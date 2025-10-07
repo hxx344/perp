@@ -674,6 +674,31 @@ def _print_summary(results: List[LegResult], cycle_number: Optional[int] = None)
         print(" | ".join(parts))
 
 
+def _calculate_cycle_pnl(results: List[LegResult]) -> Decimal:
+    total = Decimal("0")
+    for leg in results:
+        price = leg.price
+        quantity = leg.quantity
+        if price is None or quantity is None:
+            continue
+        price_dec = price if isinstance(price, Decimal) else Decimal(str(price))
+        qty_dec = quantity if isinstance(quantity, Decimal) else Decimal(str(quantity))
+        cash_flow = price_dec * qty_dec
+        if leg.side.lower() == "sell":
+            total += cash_flow
+        else:
+            total -= cash_flow
+    return total
+
+
+def _print_pnl_progress(cycle_number: int, cycle_pnl: Decimal, cumulative_pnl: Decimal) -> None:
+    header = f"PnL Progress After Cycle {cycle_number}"
+    print(header)
+    print("-" * len(header))
+    print(f"Cycle PnL: {cycle_pnl}")
+    print(f"Cumulative PnL: {cumulative_pnl}")
+
+
 async def _async_main(args: argparse.Namespace) -> None:
     env_path = Path(args.env_file)
     if not env_path.exists():
@@ -699,6 +724,7 @@ async def _async_main(args: argparse.Namespace) -> None:
     executor = HedgingCycleExecutor(config)
     await executor.setup()
     cycle_index = 0
+    cumulative_pnl = Decimal("0")
     try:
         while True:
             cycle_index += 1
@@ -706,6 +732,10 @@ async def _async_main(args: argparse.Namespace) -> None:
             results = await executor.execute_cycle()
             executor.logger.log(f"Completed hedging cycle #{cycle_index}", "INFO")
             _print_summary(results, cycle_number=cycle_index)
+
+            cycle_pnl = _calculate_cycle_pnl(results)
+            cumulative_pnl += cycle_pnl
+            _print_pnl_progress(cycle_index, cycle_pnl, cumulative_pnl)
 
             if config.max_cycles and cycle_index >= config.max_cycles:
                 executor.logger.log(
