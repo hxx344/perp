@@ -6,7 +6,7 @@ import os
 import asyncio
 import time
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Dict, Any, List, Optional, Tuple
 
 from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
@@ -62,6 +62,74 @@ class LighterClient(BaseExchangeClient):
         self.orders_cache = {}
         self.current_order_client_id = None
         self.current_order = None
+
+    @staticmethod
+    def _parse_decimal(value: Any) -> Optional[Decimal]:
+        if value is None:
+            return None
+        if isinstance(value, Decimal):
+            return value
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+
+    def _decimal_or_zero(self, value: Any) -> Decimal:
+        parsed = self._parse_decimal(value)
+        return parsed if parsed is not None else Decimal("0")
+
+    def _first_available_decimal(self, payload: Dict[str, Any], keys: List[str]) -> Optional[Decimal]:
+        for key in keys:
+            if key in payload:
+                parsed = self._parse_decimal(payload.get(key))
+                if parsed is not None:
+                    return parsed
+        return None
+
+    def _resolve_order_price(self, order_data: Dict[str, Any], filled_size: Decimal) -> Decimal:
+        average_price = self._first_available_decimal(
+            order_data,
+            [
+                "average_price",
+                "average_filled_price",
+                "avg_price",
+                "avg_filled_price",
+                "avgFilledPrice",
+                "executed_price",
+                "executedPrice",
+                "fill_price",
+                "filled_price",
+                "filledPrice",
+            ],
+        )
+        if average_price is not None and average_price > 0:
+            return average_price
+
+        filled_quote = self._first_available_decimal(
+            order_data,
+            [
+                "filled_quote_amount",
+                "filledQuoteAmount",
+                "filled_quote",
+                "filledQuote",
+                "filled_value",
+                "filledValue",
+                "filled_quote_volume",
+                "filledQuoteVolume",
+            ],
+        )
+
+        if filled_quote is not None and filled_size not in (None, Decimal("0")):
+            try:
+                return filled_quote / filled_size
+            except (InvalidOperation, ZeroDivisionError):
+                pass
+
+        fallback_price = self._parse_decimal(order_data.get("price"))
+        if fallback_price is not None:
+            return fallback_price
+
+        return Decimal("0")
 
     def _validate_config(self) -> None:
         """Validate Lighter configuration."""
@@ -206,10 +274,10 @@ class LighterClient(BaseExchangeClient):
 
             order_id = order_data['order_index']
             status = order_data['status'].upper()
-            filled_size = Decimal(order_data['filled_base_amount'])
-            size = Decimal(order_data['initial_base_amount'])
-            price = Decimal(order_data['price'])
-            remaining_size = Decimal(order_data['remaining_base_amount'])
+            filled_size = self._decimal_or_zero(order_data.get('filled_base_amount'))
+            size = self._decimal_or_zero(order_data.get('initial_base_amount'))
+            remaining_size = self._decimal_or_zero(order_data.get('remaining_base_amount'))
+            price = self._resolve_order_price(order_data, filled_size)
 
             if order_id in self.orders_cache.keys():
                 if (self.orders_cache[order_id]['status'] == 'OPEN' and
