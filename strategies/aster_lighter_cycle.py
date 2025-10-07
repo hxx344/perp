@@ -56,6 +56,8 @@ class CycleConfig:
     slippage_pct: Decimal
     max_wait_seconds: float
     poll_interval: float
+    max_retries: int
+    retry_delay_seconds: float
 
 
 @dataclass
@@ -187,15 +189,32 @@ class HedgingCycleExecutor:
         if not self.aster_client:
             raise RuntimeError("Aster client is not connected")
 
-        start = time.time()
-        order_result = await self.aster_client.place_open_order(
-            self.aster_config.contract_id, self.config.quantity, direction
-        )
-        if not order_result.order_id:
-            raise RuntimeError(f"{leg_name} | Aster order returned without an order id")
+        overall_start = time.time()
+        attempt = 0
+        while True:
+            attempt += 1
+            if attempt > 1:
+                await asyncio.sleep(self.config.retry_delay_seconds)
 
-        fill_info = await self._wait_for_aster_fill(str(order_result.order_id), leg_name)
-        latency = time.time() - start
+            order_result = await self.aster_client.place_open_order(
+                self.aster_config.contract_id, self.config.quantity, direction
+            )
+            if not order_result.order_id:
+                raise RuntimeError(f"{leg_name} | Aster order returned without an order id")
+
+            try:
+                fill_info = await self._wait_for_aster_fill(str(order_result.order_id), leg_name)
+                break
+            except TimeoutError:
+                self.logger.log(
+                    f"{leg_name} | Attempt {attempt} timed out. Repricing and retrying...",
+                    "WARNING",
+                )
+                if attempt >= self.config.max_retries:
+                    raise
+                continue
+
+        latency = time.time() - overall_start
 
         self.logger.log(
             f"{leg_name} | Aster maker filled {fill_info.filled_size} @ {fill_info.price}",
@@ -219,17 +238,34 @@ class HedgingCycleExecutor:
         if not self.aster_client:
             raise RuntimeError("Aster client is not connected")
 
-        start = time.time()
-        best_bid, best_ask = await self.aster_client.fetch_bbo_prices(self.aster_config.contract_id)
-        target_price = self._calculate_aster_maker_price(direction, best_bid, best_ask)
-        order_result = await self.aster_client.place_close_order(
-            self.aster_config.contract_id, self.config.quantity, target_price, direction
-        )
-        if not order_result.order_id:
-            raise RuntimeError(f"{leg_name} | Aster close order returned without an order id")
+        overall_start = time.time()
+        attempt = 0
+        while True:
+            attempt += 1
+            if attempt > 1:
+                await asyncio.sleep(self.config.retry_delay_seconds)
 
-        fill_info = await self._wait_for_aster_fill(str(order_result.order_id), leg_name)
-        latency = time.time() - start
+            best_bid, best_ask = await self.aster_client.fetch_bbo_prices(self.aster_config.contract_id)
+            target_price = self._calculate_aster_maker_price(direction, best_bid, best_ask)
+            order_result = await self.aster_client.place_close_order(
+                self.aster_config.contract_id, self.config.quantity, target_price, direction
+            )
+            if not order_result.order_id:
+                raise RuntimeError(f"{leg_name} | Aster close order returned without an order id")
+
+            try:
+                fill_info = await self._wait_for_aster_fill(str(order_result.order_id), leg_name)
+                break
+            except TimeoutError:
+                self.logger.log(
+                    f"{leg_name} | Attempt {attempt} timed out. Repricing and retrying...",
+                    "WARNING",
+                )
+                if attempt >= self.config.max_retries:
+                    raise
+                continue
+
+        latency = time.time() - overall_start
 
         self.logger.log(
             f"{leg_name} | Aster reverse maker filled {fill_info.filled_size} @ {fill_info.price}",
@@ -455,6 +491,18 @@ def _parse_args() -> argparse.Namespace:
         help="Polling interval when waiting for order status updates",
     )
     parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=100,
+        help="Maximum number of retries for Aster maker orders before aborting",
+    )
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=5.0,
+        help="Delay in seconds before retrying an Aster maker order",
+    )
+    parser.add_argument(
         "--env-file",
         default=".env",
         help="Path to the environment file containing both exchange credentials",
@@ -502,6 +550,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         slippage_pct=args.slippage,
         max_wait_seconds=args.max_wait,
         poll_interval=args.poll_interval,
+        max_retries=args.max_retries,
+        retry_delay_seconds=args.retry_delay,
     )
 
     executor = HedgingCycleExecutor(config)

@@ -279,6 +279,7 @@ python strategies/aster_lighter_cycle.py \
 - `--take-profit` 参数仅为兼容保留，目前不会影响 Aster 反向 Maker 的挂单价格。
 - `--slippage` 用于控制 Lighter Taker 单的价格偏移（百分比），确保在流动性有限时也能尽快成交。
 - 默认等待超时为 5 秒，可通过 `--max-wait` 调整。
+- `--max-retries` 默认 100 次，`--retry-delay` 默认 5 秒，两者共同控制 Aster Maker 单的重试次数与重试间隔，避免超时直接退出。
 
 ## 配置
 
