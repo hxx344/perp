@@ -691,12 +691,31 @@ def _calculate_cycle_pnl(results: List[LegResult]) -> Decimal:
     return total
 
 
-def _print_pnl_progress(cycle_number: int, cycle_pnl: Decimal, cumulative_pnl: Decimal) -> None:
+def _calculate_cycle_volume(results: List[LegResult]) -> Decimal:
+    total = Decimal("0")
+    for leg in results:
+        quantity = leg.quantity
+        if quantity is None:
+            continue
+        qty_dec = quantity if isinstance(quantity, Decimal) else Decimal(str(quantity))
+        total += abs(qty_dec)
+    return total
+
+
+def _print_pnl_progress(
+    cycle_number: int,
+    cycle_pnl: Decimal,
+    cumulative_pnl: Decimal,
+    cycle_volume: Decimal,
+    cumulative_volume: Decimal,
+) -> None:
     header = f"PnL Progress After Cycle {cycle_number}"
     print(header)
     print("-" * len(header))
     print(f"Cycle PnL: {cycle_pnl}")
     print(f"Cumulative PnL: {cumulative_pnl}")
+    print(f"Cycle Volume: {cycle_volume}")
+    print(f"Cumulative Volume: {cumulative_volume}")
 
 
 async def _async_main(args: argparse.Namespace) -> None:
@@ -725,6 +744,7 @@ async def _async_main(args: argparse.Namespace) -> None:
     await executor.setup()
     cycle_index = 0
     cumulative_pnl = Decimal("0")
+    cumulative_volume = Decimal("0")
     try:
         while True:
             cycle_index += 1
@@ -735,7 +755,17 @@ async def _async_main(args: argparse.Namespace) -> None:
 
             cycle_pnl = _calculate_cycle_pnl(results)
             cumulative_pnl += cycle_pnl
-            _print_pnl_progress(cycle_index, cycle_pnl, cumulative_pnl)
+
+            cycle_volume = _calculate_cycle_volume(results)
+            cumulative_volume += cycle_volume
+
+            _print_pnl_progress(
+                cycle_index,
+                cycle_pnl,
+                cumulative_pnl,
+                cycle_volume,
+                cumulative_volume,
+            )
 
             if config.max_cycles and cycle_index >= config.max_cycles:
                 executor.logger.log(
