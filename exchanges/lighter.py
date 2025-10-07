@@ -380,6 +380,7 @@ class LighterClient(BaseExchangeClient):
         # Generate unique client order index
         client_order_index = int(time.time() * 1000) % 1000000  # Simple unique ID
         self.current_order_client_id = client_order_index
+        self.current_order = None
 
         # Create order parameters
         order_params = {
