@@ -690,11 +690,9 @@ class AsterClient(BaseExchangeClient):
             'orderId': order_id
         })
 
-        order_type = result.get('type', '')
-        if order_type == 'MARKET':
-            price = Decimal(result.get('avgPrice', 0))
-        else:
-            price = Decimal(result.get('price', 0))
+        avg_price = Decimal(result.get('avgPrice', 0))
+        limit_price = Decimal(result.get('price', 0))
+        price = avg_price if avg_price > 0 else limit_price
 
         if 'orderId' in result:
             return OrderInfo(

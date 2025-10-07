@@ -235,6 +235,19 @@ BTC:
 python runbot.py --exchange grvt --ticker BTC --quantity 0.05 --take-profit 0.02 --max-orders 40 --wait-time 450
 ```
 
+## Aster–Lighter Hedging Cycle
+
+For the dedicated hedging workflow that routes between Aster maker orders and Lighter taker orders, use `strategies/aster_lighter_cycle.py`.
+
+```bash
+python strategies/aster_lighter_cycle.py --aster-ticker ETH-USDC --lighter-ticker ETH-PERP --quantity 1 --direction buy --slippage 0.15 --cycles 0 --cycle-delay 2
+```
+
+Key options:
+
+- `--cycles`: How many complete hedging cycles to execute. Use `0` to keep the script running until you interrupt it manually.
+- `--cycle-delay`: Optional pause (seconds) between successive cycles when looping.
+
 ## Configuration
 
 ### Environment Variables

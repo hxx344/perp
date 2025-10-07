@@ -269,15 +269,18 @@ python strategies/aster_lighter_cycle.py \
    --lighter-ticker ETH-PERP \
    --quantity 0.5 \
    --direction buy \
-   --take-profit 0.02 \
-   --slippage 0.05
+   --slippage 0.05 \
+   --cycles 0 \
+   --cycle-delay 2
 ```
 
 **注意事项**：
 
 - 运行前需在同一个 `.env` 文件中配置好 Aster 与 Lighter 的 API 凭证。
-- `--take-profit` 参数仅为兼容保留，目前不会影响 Aster 反向 Maker 的挂单价格。
 - `--slippage` 用于控制 Lighter Taker 单相对于对应 Aster 成交价的百分比偏移，数值越大下单越激进。
+- `--cycles` 决定执行的循环次数，设置为 `0` 表示脚本会一直运行直到手动中断。
+- `--cycle-delay` 用于在每次循环后增加一个暂停时间（秒），便于控制速度。
+- `--take-profit` 参数目前保留兼容性，但不会影响 Aster 反向 Maker 的挂单价格。
 - 默认等待超时为 5 秒，可通过 `--max-wait` 调整。
 - `--max-retries` 默认 100 次，`--retry-delay` 默认 5 秒，两者共同控制 Aster Maker 单的重试次数与重试间隔，避免超时直接退出。
 

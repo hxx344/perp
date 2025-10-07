@@ -58,6 +58,8 @@ class CycleConfig:
     poll_interval: float
     max_retries: int
     retry_delay_seconds: float
+    max_cycles: int
+    delay_between_cycles: float
 
 
 @dataclass
@@ -607,6 +609,18 @@ def _parse_args() -> argparse.Namespace:
         help="Delay in seconds before retrying an Aster maker order",
     )
     parser.add_argument(
+        "--cycles",
+        type=int,
+        default=0,
+        help="Number of hedging cycles to run (0 means run continuously until interrupted)",
+    )
+    parser.add_argument(
+        "--cycle-delay",
+        type=float,
+        default=0.0,
+        help="Optional delay in seconds between successive hedging cycles",
+    )
+    parser.add_argument(
         "--env-file",
         default=".env",
         help="Path to the environment file containing both exchange credentials",
@@ -626,8 +640,9 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def _print_summary(results: List[LegResult]) -> None:
-    header = "\nCycle Summary"
+def _print_summary(results: List[LegResult], cycle_number: Optional[int] = None) -> None:
+    title = f"Cycle {cycle_number} Summary" if cycle_number is not None else "Cycle Summary"
+    header = f"\n{title}"
     print(header)
     print("=" * len(header))
     for leg in results:
@@ -656,16 +671,36 @@ async def _async_main(args: argparse.Namespace) -> None:
         poll_interval=args.poll_interval,
         max_retries=args.max_retries,
         retry_delay_seconds=args.retry_delay,
+        max_cycles=max(0, args.cycles),
+        delay_between_cycles=max(0.0, args.cycle_delay),
     )
 
     executor = HedgingCycleExecutor(config)
     await executor.setup()
+    cycle_index = 0
     try:
-        results = await executor.execute_cycle()
+        while True:
+            cycle_index += 1
+            executor.logger.log(f"Starting hedging cycle #{cycle_index}", "INFO")
+            results = await executor.execute_cycle()
+            executor.logger.log(f"Completed hedging cycle #{cycle_index}", "INFO")
+            _print_summary(results, cycle_number=cycle_index)
+
+            if config.max_cycles and cycle_index >= config.max_cycles:
+                executor.logger.log(
+                    f"Reached configured cycle limit ({config.max_cycles}); stopping execution",
+                    "INFO",
+                )
+                break
+
+            if config.delay_between_cycles > 0:
+                executor.logger.log(
+                    f"Waiting {config.delay_between_cycles} seconds before next cycle",
+                    "INFO",
+                )
+                await asyncio.sleep(config.delay_between_cycles)
     finally:
         await executor.shutdown()
-
-    _print_summary(results)
 
 
 def main() -> None:
