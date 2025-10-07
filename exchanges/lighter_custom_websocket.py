@@ -19,6 +19,7 @@ class LighterCustomWebSocketManager:
         self.logger = None
         self.running = False
         self.ws = None
+        self.ready_event = asyncio.Event()
 
         # Order book state
         self.order_book = {"bids": {}, "asks": {}}
@@ -175,24 +176,29 @@ class LighterCustomWebSocketManager:
             raise
 
     def get_best_levels(self) -> Tuple[Tuple[Optional[float], Optional[float]], Tuple[Optional[float], Optional[float]]]:
-        """Get the best bid and ask levels with sufficient size for our order (~$5000)."""
+        """Get the best bid and ask levels from the current order book."""
         try:
-            # Get all bid levels with sufficient size
-            bid_levels = [(price, size) for price, size in self.order_book["bids"].items()
-                          if size * price >= 40000]
+            bids = list(self.order_book["bids"].items())
+            asks = list(self.order_book["asks"].items())
 
-            # Get all ask levels with sufficient size
-            ask_levels = [(price, size) for price, size in self.order_book["asks"].items()
-                          if size * price >= 40000]
-
-            # Get best bid (highest price) and best ask (lowest price)
-            best_bid = max(bid_levels) if bid_levels else (None, None)
-            best_ask = min(ask_levels) if ask_levels else (None, None)
+            best_bid = max(bids) if bids else (None, None)
+            best_ask = min(asks) if asks else (None, None)
 
             return best_bid, best_ask
         except (ValueError, KeyError) as e:
             self._log(f"Error getting best levels: {e}", "ERROR")
             return (None, None), (None, None)
+
+    async def wait_until_ready(self, timeout: float = 5.0) -> bool:
+        """Wait until both bid and ask levels are available."""
+        if self.ready_event.is_set():
+            return True
+
+        try:
+            await asyncio.wait_for(self.ready_event.wait(), timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     def cleanup_old_order_book_levels(self):
         """Clean up old order book levels to prevent memory leaks."""
@@ -227,6 +233,7 @@ class LighterCustomWebSocketManager:
             self.best_ask = None
             self.order_book_offset = None
             self.order_book_sequence_gap = False
+            self.ready_event.clear()
 
     def handle_order_update(self, order_data_list: List[Dict[str, Any]]):
         """Handle order update from WebSocket."""
@@ -319,6 +326,14 @@ class LighterCustomWebSocketManager:
                                               f"{len(self.order_book['bids'])} bids and "
                                               f"{len(self.order_book['asks'])} asks", "INFO")
 
+                                    (snapshot_best_bid, _), (snapshot_best_ask, _) = self.get_best_levels()
+                                    if snapshot_best_bid is not None:
+                                        self.best_bid = snapshot_best_bid
+                                    if snapshot_best_ask is not None:
+                                        self.best_ask = snapshot_best_ask
+                                    if self.best_bid is not None and self.best_ask is not None:
+                                        self.ready_event.set()
+
                                 elif data.get("type") == "update/order_book" and self.snapshot_loaded:
                                     # Check for cutoff/incomplete updates first
                                     if not self.handle_order_book_cutoff(data):
@@ -362,6 +377,9 @@ class LighterCustomWebSocketManager:
                                         self.best_bid = best_bid_price
                                     if best_ask_price is not None:
                                         self.best_ask = best_ask_price
+
+                                    if self.best_bid is not None and self.best_ask is not None:
+                                        self.ready_event.set()
 
                                 elif data.get("type") == "ping":
                                     # Respond to ping with pong

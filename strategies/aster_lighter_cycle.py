@@ -139,6 +139,11 @@ class HedgingCycleExecutor:
 
         await self.aster_client.get_contract_attributes()
         await self.lighter_client.get_contract_attributes()
+        if not await self.lighter_client.wait_for_market_data(timeout=10):
+            self.logger.log(
+                "Lighter market data did not become ready within 10 seconds; proceeding with caution",
+                "WARNING",
+            )
 
         self.logger.log("Hedging cycle setup complete", "INFO")
 
@@ -167,7 +172,9 @@ class HedgingCycleExecutor:
 
         # Leg 2: Lighter opposite taker
         leg2_direction = "sell" if entry_direction == "buy" else "buy"
-        leg2 = await self._execute_lighter_taker(leg_name="LEG2", direction=leg2_direction)
+        leg2 = await self._execute_lighter_taker(
+            leg_name="LEG2", direction=leg2_direction, reference_price=leg1.price
+        )
         results.append(leg2)
 
         # Leg 3: Aster reverse maker to flatten
@@ -179,7 +186,9 @@ class HedgingCycleExecutor:
 
         # Leg 4: Lighter reverse taker to flatten
         leg4_direction = entry_direction
-        leg4 = await self._execute_lighter_taker(leg_name="LEG4", direction=leg4_direction)
+        leg4 = await self._execute_lighter_taker(
+            leg_name="LEG4", direction=leg4_direction, reference_price=leg3.price
+        )
         results.append(leg4)
 
         self.logger.log("Hedging cycle completed successfully", "INFO")
@@ -283,47 +292,24 @@ class HedgingCycleExecutor:
             latency_seconds=latency,
         )
 
-    async def _execute_lighter_taker(self, leg_name: str, direction: str) -> LegResult:
+    async def _execute_lighter_taker(
+        self, leg_name: str, direction: str, reference_price: Decimal
+    ) -> LegResult:
         if not self.lighter_client:
             raise RuntimeError("Lighter client is not connected")
+
+        if reference_price <= 0:
+            raise RuntimeError(f"{leg_name} | Invalid reference price {reference_price} for Lighter taker order")
 
         max_attempts = min(5, max(1, self.config.max_retries))
         current_slippage = self.config.slippage_pct
         last_error: Optional[Exception] = None
 
         for attempt in range(1, max_attempts + 1):
-            try:
-                best_bid, best_ask = await self.lighter_client.fetch_bbo_prices(
-                    self.lighter_config.contract_id
-                )
-            except Exception as exc:  # pragma: no cover - network variability
-                last_error = exc
-                self.logger.log(
-                    f"{leg_name} | Attempt {attempt} failed to fetch Lighter BBO: {exc}",
-                    "WARNING",
-                )
-                if attempt >= max_attempts:
-                    raise RuntimeError(
-                        f"{leg_name} | Unable to fetch Lighter bid/ask after {attempt} attempts"
-                    ) from exc
-                await asyncio.sleep(self.config.retry_delay_seconds)
-                continue
-
-            if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
-                last_error = ValueError("Invalid Lighter order book data")
-                self.logger.log(
-                    f"{leg_name} | Attempt {attempt} received invalid Lighter BBO (bid={best_bid}, ask={best_ask})",
-                    "WARNING",
-                )
-                if attempt >= max_attempts:
-                    raise RuntimeError(
-                        f"{leg_name} | Invalid Lighter bid/ask after {attempt} attempts"
-                    )
-                await asyncio.sleep(self.config.retry_delay_seconds)
-                continue
-
-            target_price = self._calculate_taker_price(
-                direction, best_bid, best_ask, slippage_override=current_slippage
+            target_price = self._calculate_taker_price_from_reference(
+                direction=direction,
+                reference_price=reference_price,
+                slippage_pct=current_slippage,
             )
 
             start = time.time()
@@ -379,6 +365,13 @@ class HedgingCycleExecutor:
                 await self._attempt_cancel_lighter(str(order_result.order_id), leg_name)
                 if attempt >= max_attempts:
                     raise
+                if current_slippage <= Decimal("0"):
+                    current_slippage = Decimal("0.01")
+                else:
+                    current_slippage = min(
+                        (current_slippage * Decimal("2")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP),
+                        Decimal("5"),
+                    )
                 await asyncio.sleep(self.config.retry_delay_seconds)
                 continue
 
@@ -422,6 +415,16 @@ class HedgingCycleExecutor:
             await asyncio.sleep(self.config.poll_interval)
 
         await self._attempt_cancel_aster(order_id, leg_name, last_status)
+
+        # One last check in case the order just filled while we were canceling.
+        final_info = await self.aster_client.get_order_info(order_id)
+        if final_info and final_info.status == "FILLED":
+            self.logger.log(
+                f"{leg_name} | Aster order {order_id} filled while waiting for cancellation.",
+                "INFO",
+            )
+            return final_info
+
         raise TimeoutError(f"{leg_name} | Aster order {order_id} not filled within timeout")
 
     async def _wait_for_lighter_fill(self, client_order_id: str, leg_name: str) -> OrderInfo:
@@ -445,17 +448,26 @@ class HedgingCycleExecutor:
         await self._attempt_cancel_lighter(client_order_id, leg_name)
         raise TimeoutError(f"{leg_name} | Lighter order {client_order_id} not filled within timeout")
 
-    async def _attempt_cancel_aster(self, order_id: str, leg_name: str, last_status: str | None) -> None:
+    async def _attempt_cancel_aster(
+        self, order_id: str, leg_name: str, last_status: str | None
+    ) -> None:
         if not self.aster_client:
             return
 
         try:
             result = await self.aster_client.cancel_order(order_id)
             if not result.success:
-                self.logger.log(
-                    f"{leg_name} | Failed to cancel Aster order {order_id}: {result.error_message}",
-                    "ERROR",
-                )
+                message = (result.error_message or "").lower()
+                if "unknown order" in message or "-2011" in message:
+                    self.logger.log(
+                        f"{leg_name} | Aster reports order {order_id} already closed ({result.error_message})",
+                        "INFO",
+                    )
+                else:
+                    self.logger.log(
+                        f"{leg_name} | Failed to cancel Aster order {order_id}: {result.error_message}",
+                        "ERROR",
+                    )
         except Exception as exc:  # pragma: no cover - defensive logging
             self.logger.log(
                 f"{leg_name} | Exception canceling Aster order {order_id}: {exc} (last status={last_status})",
@@ -509,40 +521,29 @@ class HedgingCycleExecutor:
 
         return _round_to_tick(price, tick)
 
-    def _calculate_taker_price(
+    def _calculate_taker_price_from_reference(
         self,
         direction: str,
-        best_bid: Decimal,
-        best_ask: Decimal,
-        slippage_override: Optional[Decimal] = None,
+        reference_price: Decimal,
+        slippage_pct: Decimal,
     ) -> Decimal:
-        slippage_pct = self.config.slippage_pct if slippage_override is None else slippage_override
-        slip_fraction = slippage_pct / Decimal("100")
         tick = self.lighter_config.tick_size if self.lighter_config.tick_size > 0 else Decimal("0")
 
-        if direction == "buy":
-            base = best_ask
-            price = base * (Decimal("1") + slip_fraction)
-            if tick > 0:
-                min_price = base + tick
-            else:
-                min_price = base
-            if price < min_price:
-                price = min_price
-        else:
-            base = best_bid
-            price = base * (Decimal("1") - slip_fraction)
-            if tick > 0:
-                max_price = base - tick
-                if max_price <= 0:
-                    max_price = base
-            else:
-                max_price = base
-            if price > max_price:
-                price = max_price
+        slip_fraction = max(slippage_pct, Decimal("0")) / Decimal("100")
+        offset = reference_price * slip_fraction
 
-        if price <= 0 and tick > 0:
-            price = tick
+        if tick > 0:
+            offset = max(offset, tick)
+        elif offset == 0:
+            # Ensure a minimal offset to cross the spread when no tick is defined.
+            offset = max(reference_price * Decimal("0.0001"), Decimal("1E-6"))
+
+        if direction == "buy":
+            price = reference_price + offset
+        else:
+            price = reference_price - offset
+            if price <= 0:
+                price = max(reference_price / Decimal("2"), tick if tick > 0 else Decimal("1E-6"))
 
         return _round_to_tick(price, tick)
 

@@ -53,6 +53,9 @@ class LighterClient(BaseExchangeClient):
         # Initialize API client (will be done in connect)
         self.api_client = None
 
+        # Websocket manager placeholder (started after contract metadata is loaded)
+        self.ws_manager: Optional[LighterCustomWebSocketManager] = None
+
         # Market configuration
         self.base_amount_multiplier = None
         self.price_multiplier = None
@@ -129,34 +132,50 @@ class LighterClient(BaseExchangeClient):
             # Initialize Lighter client
             await self._initialize_lighter_client()
 
-            # Add market config to config for WebSocket manager
+        except Exception as e:
+            self.logger.log(f"Error connecting to Lighter: {e}", "ERROR")
+            raise
+
+    async def wait_for_market_data(self, timeout: float = 5.0) -> bool:
+        """Block until the websocket provides bid/ask data or timeout."""
+        if hasattr(self, 'ws_manager') and self.ws_manager:
+            return await self.ws_manager.wait_until_ready(timeout)
+        return False
+
+    async def _ensure_websocket_manager(self) -> None:
+        """Start or update the websocket manager after contract metadata is known."""
+        created = False
+
+        if self.ws_manager is None:
             self.config.market_index = self.config.contract_id
             self.config.account_index = self.account_index
             self.config.lighter_client = self.lighter_client
 
-            # Initialize WebSocket manager (using custom implementation)
             self.ws_manager = LighterCustomWebSocketManager(
                 config=self.config,
-                order_update_callback=self._handle_websocket_order_update
+                order_update_callback=self._handle_websocket_order_update,
             )
-
-            # Set logger for WebSocket manager
             self.ws_manager.set_logger(self.logger)
-
-            # Start WebSocket connection in background task
             asyncio.create_task(self.ws_manager.connect())
-            # Wait a moment for connection to establish
-            await asyncio.sleep(2)
+            created = True
+        else:
+            self.ws_manager.market_index = self.config.contract_id
+            self.ws_manager.account_index = self.account_index
+            self.ws_manager.lighter_client = self.lighter_client
 
-        except Exception as e:
-            self.logger.log(f"Error connecting to Lighter: {e}", "ERROR")
-            raise
+        if created:
+            if not await self.wait_for_market_data(timeout=10):
+                self.logger.log(
+                    "Timed out waiting for Lighter order book data to become available",
+                    "WARNING",
+                )
 
     async def disconnect(self) -> None:
         """Disconnect from Lighter."""
         try:
             if hasattr(self, 'ws_manager') and self.ws_manager:
                 await self.ws_manager.disconnect()
+                self.ws_manager = None
 
             # Close shared API client
             if self.api_client:
@@ -555,5 +574,7 @@ class LighterClient(BaseExchangeClient):
         except Exception:
             self.logger.log("Failed to get tick size", "ERROR")
             raise ValueError("Failed to get tick size")
+
+        await self._ensure_websocket_manager()
 
         return self.config.contract_id, self.config.tick_size
