@@ -74,6 +74,8 @@ class LegResult:
     order_id: str
     status: str
     latency_seconds: float
+    requested_price: Optional[Decimal] = None
+    reference_price: Optional[Decimal] = None
 
 
 def _round_to_tick(value: Decimal, tick: Decimal) -> Decimal:
@@ -202,10 +204,12 @@ class HedgingCycleExecutor:
 
         overall_start = time.time()
         attempt = 0
+        skip_retry_delay = False
         while True:
             attempt += 1
-            if attempt > 1:
+            if attempt > 1 and not skip_retry_delay:
                 await asyncio.sleep(self.config.retry_delay_seconds)
+            skip_retry_delay = False
 
             order_result = await self.aster_client.place_open_order(
                 self.aster_config.contract_id, self.config.quantity, direction
@@ -223,6 +227,7 @@ class HedgingCycleExecutor:
                 )
                 if attempt >= self.config.max_retries:
                     raise
+                skip_retry_delay = True
                 continue
 
         latency = time.time() - overall_start
@@ -241,6 +246,7 @@ class HedgingCycleExecutor:
             order_id=fill_info.order_id,
             status=fill_info.status,
             latency_seconds=latency,
+            requested_price=fill_info.price,
         )
 
     async def _execute_aster_reverse_maker(
@@ -251,10 +257,12 @@ class HedgingCycleExecutor:
 
         overall_start = time.time()
         attempt = 0
+        skip_retry_delay = False
         while True:
             attempt += 1
-            if attempt > 1:
+            if attempt > 1 and not skip_retry_delay:
                 await asyncio.sleep(self.config.retry_delay_seconds)
+            skip_retry_delay = False
 
             best_bid, best_ask = await self.aster_client.fetch_bbo_prices(self.aster_config.contract_id)
             target_price = self._calculate_aster_maker_price(direction, best_bid, best_ask)
@@ -274,6 +282,7 @@ class HedgingCycleExecutor:
                 )
                 if attempt >= self.config.max_retries:
                     raise
+                skip_retry_delay = True
                 continue
 
         latency = time.time() - overall_start
@@ -292,6 +301,7 @@ class HedgingCycleExecutor:
             order_id=fill_info.order_id,
             status=fill_info.status,
             latency_seconds=latency,
+            requested_price=fill_info.price,
         )
 
     async def _execute_lighter_taker(
@@ -393,6 +403,8 @@ class HedgingCycleExecutor:
                 order_id=str(fill_info.order_id),
                 status=fill_info.status,
                 latency_seconds=latency,
+                requested_price=target_price,
+                reference_price=reference_price,
             )
 
         raise RuntimeError(
@@ -646,11 +658,20 @@ def _print_summary(results: List[LegResult], cycle_number: Optional[int] = None)
     print(header)
     print("=" * len(header))
     for leg in results:
-        print(
-            f"{leg.name} | {leg.exchange.upper():7s} | {leg.side.upper():4s} | "
-            f"qty={leg.quantity} | price={leg.price} | status={leg.status} | "
-            f"latency={leg.latency_seconds:.3f}s"
-        )
+        parts = [
+            f"{leg.name} | {leg.exchange.upper():7s} | {leg.side.upper():4s}",
+            f"qty={leg.quantity}",
+            f"fill={leg.price}",
+            f"status={leg.status}",
+            f"latency={leg.latency_seconds:.3f}s",
+        ]
+
+        if leg.requested_price is not None:
+            parts.insert(3, f"limit={leg.requested_price}")
+        if leg.reference_price is not None:
+            parts.insert(3, f"ref={leg.reference_price}")
+
+        print(" | ".join(parts))
 
 
 async def _async_main(args: argparse.Namespace) -> None:
