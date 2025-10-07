@@ -259,6 +259,27 @@ BTC：
 python runbot.py --exchange grvt --ticker BTC --quantity 0.05 --take-profit 0.02 --max-orders 40 --wait-time 450
 ```
 
+## Aster-Lighter 对冲循环（新功能）
+
+若需执行文档中所述的单轮对冲流程（Aster Maker → Lighter 反向 Taker → Aster 反向 Maker → Lighter 反向 Taker），可以使用 `strategies/aster_lighter_cycle.py` 脚本：
+
+```bash
+python strategies/aster_lighter_cycle.py \
+   --aster-ticker ETH \
+   --lighter-ticker ETH-PERP \
+   --quantity 0.5 \
+   --direction buy \
+   --take-profit 0.02 \
+   --slippage 0.05
+```
+
+**注意事项**：
+
+- 运行前需在同一个 `.env` 文件中配置好 Aster 与 Lighter 的 API 凭证。
+- `--take-profit` 参数仅为兼容保留，目前不会影响 Aster 反向 Maker 的挂单价格。
+- `--slippage` 用于控制 Lighter Taker 单的价格偏移（百分比），确保在流动性有限时也能尽快成交。
+- 默认等待超时为 5 秒，可通过 `--max-wait` 调整。
+
 ## 配置
 
 ### 环境变量

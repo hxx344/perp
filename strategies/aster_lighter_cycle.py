@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+"""Aster–Lighter hedging cycle executor.
+
+This module orchestrates a single four-leg hedging cycle:
+    1. Aster maker entry.
+    2. Lighter opposite taker fill.
+    3. Aster reverse maker exit.
+    4. Lighter reverse taker fill.
+
+The implementation reuses the existing exchange adapters exposed via
+``ExchangeFactory``. It can be invoked as a standalone script or imported as a
+helper inside larger automation workflows.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import sys
+import time
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from pathlib import Path
+from typing import List, Optional, TYPE_CHECKING, cast
+
+import dotenv
+
+from exchanges import ExchangeFactory
+from exchanges.base import OrderInfo
+from helpers.logger import TradingLogger
+from trading_bot import TradingConfig
+
+if TYPE_CHECKING:  # pragma: no cover - type checking only
+    from exchanges.aster import AsterClient
+    from exchanges.lighter import LighterClient
+
+
+def _decimal_type(value: str) -> Decimal:
+    """Argparse helper that parses Decimal values with validation."""
+    try:
+        return Decimal(value)
+    except (InvalidOperation, ValueError) as exc:  # pragma: no cover - defensive
+        raise argparse.ArgumentTypeError(f"Invalid decimal value: {value}") from exc
+
+
+@dataclass
+class CycleConfig:
+    """User-configurable parameters for the hedging cycle."""
+
+    aster_ticker: str
+    lighter_ticker: str
+    quantity: Decimal
+    direction: str
+    take_profit_pct: Decimal  # retained for compatibility; reverse leg now ignores this value
+    slippage_pct: Decimal
+    max_wait_seconds: float
+    poll_interval: float
+
+
+@dataclass
+class LegResult:
+    """Execution summary for a single leg in the cycle."""
+
+    name: str
+    exchange: str
+    side: str
+    quantity: Decimal
+    price: Decimal
+    order_id: str
+    status: str
+    latency_seconds: float
+
+
+def _round_to_tick(value: Decimal, tick: Decimal) -> Decimal:
+    """Round a price to the nearest tick size."""
+    if tick <= 0:
+        return value
+    return value.quantize(tick, rounding=ROUND_HALF_UP)
+
+
+class HedgingCycleExecutor:
+    """Coordinates the four-leg hedging cycle between Aster and Lighter."""
+
+    def __init__(self, config: CycleConfig):
+        self.config = config
+        ticker_label = f"{config.aster_ticker}_{config.lighter_ticker}".replace("/", "-")
+        self.logger = TradingLogger(exchange="hedge", ticker=ticker_label, log_to_console=True)
+
+        self.aster_config = TradingConfig(
+            ticker=config.aster_ticker.upper(),
+            contract_id="",
+            quantity=config.quantity,
+            take_profit=config.take_profit_pct,
+            tick_size=Decimal(0),
+            direction=config.direction,
+            max_orders=1,
+            wait_time=0,
+            exchange="aster",
+            grid_step=Decimal("-100"),
+            stop_price=Decimal("-1"),
+            pause_price=Decimal("-1"),
+            boost_mode=False,
+        )
+
+        self.lighter_config = TradingConfig(
+            ticker=config.lighter_ticker,
+            contract_id="",
+            quantity=config.quantity,
+            take_profit=config.take_profit_pct,
+            tick_size=Decimal(0),
+            direction=self._lighter_initial_direction(),
+            max_orders=1,
+            wait_time=0,
+            exchange="lighter",
+            grid_step=Decimal("-100"),
+            stop_price=Decimal("-1"),
+            pause_price=Decimal("-1"),
+            boost_mode=False,
+        )
+
+        self.aster_client: Optional["AsterClient"] = None
+        self.lighter_client: Optional["LighterClient"] = None
+
+    def _lighter_initial_direction(self) -> str:
+        return "sell" if self.config.direction == "buy" else "buy"
+
+    async def setup(self) -> None:
+        """Instantiate exchange clients, connect, and hydrate contract metadata."""
+        aster_client = ExchangeFactory.create_exchange("aster", self.aster_config)  # type: ignore[arg-type]
+        lighter_client = ExchangeFactory.create_exchange("lighter", self.lighter_config)  # type: ignore[arg-type]
+        self.aster_client = cast("AsterClient", aster_client)
+        self.lighter_client = cast("LighterClient", lighter_client)
+
+        await self.aster_client.connect()
+        await self.lighter_client.connect()
+
+        await self.aster_client.get_contract_attributes()
+        await self.lighter_client.get_contract_attributes()
+
+        self.logger.log("Hedging cycle setup complete", "INFO")
+
+    async def shutdown(self) -> None:
+        """Ensure both exchange connections are released."""
+        tasks = []
+        if self.aster_client:
+            tasks.append(self.aster_client.disconnect())
+        if self.lighter_client:
+            tasks.append(self.lighter_client.disconnect())
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.logger.log("Hedging cycle shutdown complete", "INFO")
+
+    async def execute_cycle(self) -> List[LegResult]:
+        """Run a single four-leg hedging cycle and return execution summaries."""
+        if not self.aster_client or not self.lighter_client:
+            raise RuntimeError("Exchange clients are not initialized. Call setup() first.")
+
+        results: List[LegResult] = []
+
+        # Leg 1: Aster maker entry
+        entry_direction = self.config.direction
+        leg1 = await self._execute_aster_maker(leg_name="LEG1", direction=entry_direction)
+        results.append(leg1)
+
+        # Leg 2: Lighter opposite taker
+        leg2_direction = "sell" if entry_direction == "buy" else "buy"
+        leg2 = await self._execute_lighter_taker(leg_name="LEG2", direction=leg2_direction)
+        results.append(leg2)
+
+        # Leg 3: Aster reverse maker to flatten
+        reverse_direction = "sell" if entry_direction == "buy" else "buy"
+        leg3 = await self._execute_aster_reverse_maker(
+            leg_name="LEG3", direction=reverse_direction
+        )
+        results.append(leg3)
+
+        # Leg 4: Lighter reverse taker to flatten
+        leg4_direction = entry_direction
+        leg4 = await self._execute_lighter_taker(leg_name="LEG4", direction=leg4_direction)
+        results.append(leg4)
+
+        self.logger.log("Hedging cycle completed successfully", "INFO")
+        return results
+
+    async def _execute_aster_maker(self, leg_name: str, direction: str) -> LegResult:
+        if not self.aster_client:
+            raise RuntimeError("Aster client is not connected")
+
+        start = time.time()
+        order_result = await self.aster_client.place_open_order(
+            self.aster_config.contract_id, self.config.quantity, direction
+        )
+        if not order_result.order_id:
+            raise RuntimeError(f"{leg_name} | Aster order returned without an order id")
+
+        fill_info = await self._wait_for_aster_fill(str(order_result.order_id), leg_name)
+        latency = time.time() - start
+
+        self.logger.log(
+            f"{leg_name} | Aster maker filled {fill_info.filled_size} @ {fill_info.price}",
+            "INFO",
+        )
+
+        return LegResult(
+            name=leg_name,
+            exchange="aster",
+            side=direction,
+            quantity=fill_info.filled_size,
+            price=fill_info.price,
+            order_id=fill_info.order_id,
+            status=fill_info.status,
+            latency_seconds=latency,
+        )
+
+    async def _execute_aster_reverse_maker(
+        self, leg_name: str, direction: str
+    ) -> LegResult:
+        if not self.aster_client:
+            raise RuntimeError("Aster client is not connected")
+
+        start = time.time()
+        best_bid, best_ask = await self.aster_client.fetch_bbo_prices(self.aster_config.contract_id)
+        target_price = self._calculate_aster_maker_price(direction, best_bid, best_ask)
+        order_result = await self.aster_client.place_close_order(
+            self.aster_config.contract_id, self.config.quantity, target_price, direction
+        )
+        if not order_result.order_id:
+            raise RuntimeError(f"{leg_name} | Aster close order returned without an order id")
+
+        fill_info = await self._wait_for_aster_fill(str(order_result.order_id), leg_name)
+        latency = time.time() - start
+
+        self.logger.log(
+            f"{leg_name} | Aster reverse maker filled {fill_info.filled_size} @ {fill_info.price}",
+            "INFO",
+        )
+
+        return LegResult(
+            name=leg_name,
+            exchange="aster",
+            side=direction,
+            quantity=fill_info.filled_size,
+            price=fill_info.price,
+            order_id=fill_info.order_id,
+            status=fill_info.status,
+            latency_seconds=latency,
+        )
+
+    async def _execute_lighter_taker(self, leg_name: str, direction: str) -> LegResult:
+        if not self.lighter_client:
+            raise RuntimeError("Lighter client is not connected")
+
+        best_bid, best_ask = await self.lighter_client.fetch_bbo_prices(self.lighter_config.contract_id)
+        target_price = self._calculate_taker_price(direction, best_bid, best_ask)
+
+        start = time.time()
+        order_result = await self.lighter_client.place_limit_order(
+            self.lighter_config.contract_id, self.config.quantity, target_price, direction
+        )
+        if not order_result.success:
+            raise RuntimeError(f"{leg_name} | Failed to place Lighter order: {order_result.error_message}")
+        if not order_result.order_id:
+            raise RuntimeError(f"{leg_name} | Lighter order returned without a client order id")
+
+        fill_info = await self._wait_for_lighter_fill(str(order_result.order_id), leg_name)
+        latency = time.time() - start
+
+        self.logger.log(
+            f"{leg_name} | Lighter taker filled {fill_info.filled_size} @ {fill_info.price}",
+            "INFO",
+        )
+
+        return LegResult(
+            name=leg_name,
+            exchange="lighter",
+            side=direction,
+            quantity=fill_info.filled_size,
+            price=fill_info.price,
+            order_id=str(fill_info.order_id),
+            status=fill_info.status,
+            latency_seconds=latency,
+        )
+
+    async def _wait_for_aster_fill(self, order_id: str, leg_name: str) -> OrderInfo:
+        if not self.aster_client:
+            raise RuntimeError("Aster client is not connected")
+
+        deadline = time.time() + self.config.max_wait_seconds
+        last_status = None
+
+        while time.time() < deadline:
+            order_info = await self.aster_client.get_order_info(order_id)
+            if order_info:
+                last_status = order_info.status
+                if order_info.status == "FILLED":
+                    return order_info
+                if order_info.status in {"CANCELED", "REJECTED", "EXPIRED"}:
+                    raise RuntimeError(f"{leg_name} | Aster order ended with status {order_info.status}")
+            await asyncio.sleep(self.config.poll_interval)
+
+        await self._attempt_cancel_aster(order_id, leg_name, last_status)
+        raise TimeoutError(f"{leg_name} | Aster order {order_id} not filled within timeout")
+
+    async def _wait_for_lighter_fill(self, client_order_id: str, leg_name: str) -> OrderInfo:
+        if not self.lighter_client:
+            raise RuntimeError("Lighter client is not connected")
+
+        deadline = time.time() + self.config.max_wait_seconds
+        target_client_id = int(client_order_id)
+
+        while time.time() < deadline:
+            current_order = getattr(self.lighter_client, "current_order", None)
+            client_identifier = getattr(self.lighter_client, "current_order_client_id", None)
+            if current_order and client_identifier == target_client_id:
+                status = current_order.status
+                if status == "FILLED":
+                    return current_order
+                if status in {"CANCELED", "REJECTED", "EXPIRED"}:
+                    raise RuntimeError(f"{leg_name} | Lighter order ended with status {status}")
+            await asyncio.sleep(self.config.poll_interval)
+
+        await self._attempt_cancel_lighter(client_order_id, leg_name)
+        raise TimeoutError(f"{leg_name} | Lighter order {client_order_id} not filled within timeout")
+
+    async def _attempt_cancel_aster(self, order_id: str, leg_name: str, last_status: str | None) -> None:
+        if not self.aster_client:
+            return
+
+        try:
+            result = await self.aster_client.cancel_order(order_id)
+            if not result.success:
+                self.logger.log(
+                    f"{leg_name} | Failed to cancel Aster order {order_id}: {result.error_message}",
+                    "ERROR",
+                )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.log(
+                f"{leg_name} | Exception canceling Aster order {order_id}: {exc} (last status={last_status})",
+                "ERROR",
+            )
+
+    async def _attempt_cancel_lighter(self, client_order_id: str, leg_name: str) -> None:
+        if not self.lighter_client:
+            return
+
+        current_order = getattr(self.lighter_client, "current_order", None)
+        order_index = None
+        if current_order:
+            order_index = getattr(current_order, "order_id", None)
+
+        if order_index is None:
+            self.logger.log(
+                f"{leg_name} | Unable to cancel Lighter order {client_order_id}: missing order index",
+                "WARNING",
+            )
+            return
+
+        try:
+            result = await self.lighter_client.cancel_order(str(order_index))
+            if not result.success:
+                self.logger.log(
+                    f"{leg_name} | Failed to cancel Lighter order {order_index}: {result.error_message}",
+                    "ERROR",
+                )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.log(
+                f"{leg_name} | Exception canceling Lighter order {order_index}: {exc}",
+                "ERROR",
+            )
+
+    def _calculate_aster_maker_price(
+        self, direction: str, best_bid: Decimal, best_ask: Decimal
+    ) -> Decimal:
+        tick = self.aster_config.tick_size if self.aster_config.tick_size > 0 else Decimal("0")
+
+        if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
+            raise ValueError("Invalid Aster order book data for maker pricing")
+
+        if direction == "sell":
+            price = best_bid + tick if tick > 0 else best_ask
+        else:
+            price = best_ask - tick if tick > 0 else best_bid
+
+        if price <= 0 and tick > 0:
+            price = tick
+
+        return _round_to_tick(price, tick)
+
+    def _calculate_taker_price(self, direction: str, best_bid: Decimal, best_ask: Decimal) -> Decimal:
+        slip_fraction = self.config.slippage_pct / Decimal("100")
+        tick = self.lighter_config.tick_size if self.lighter_config.tick_size > 0 else Decimal("0")
+
+        if direction == "buy":
+            base = best_ask
+            price = base * (Decimal("1") + slip_fraction)
+            if slip_fraction == 0 and tick > 0:
+                price = base + tick
+        else:
+            base = best_bid
+            price = base * (Decimal("1") - slip_fraction)
+            if slip_fraction == 0 and tick > 0:
+                price = base - tick
+
+        if price <= 0 and tick > 0:
+            price = tick
+
+        return _round_to_tick(price, tick)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Execute a single Aster–Lighter hedging cycle using existing exchange adapters",
+    )
+    parser.add_argument("--aster-ticker", required=True, help="Symbol on Aster (e.g., ETH)")
+    parser.add_argument(
+        "--lighter-ticker",
+        required=True,
+        help="Symbol on Lighter (e.g., ETH-PERP, case-sensitive per exchange metadata)",
+    )
+    parser.add_argument(
+        "--quantity",
+        required=True,
+        type=_decimal_type,
+        help="Position size (contracts) for each leg",
+    )
+    parser.add_argument(
+        "--direction",
+        choices=["buy", "sell"],
+        default="buy",
+        help="Initial maker direction on Aster",
+    )
+    parser.add_argument(
+        "--take-profit",
+        type=_decimal_type,
+        default=Decimal("0"),
+        help="Reserved for compatibility (currently unused in reverse Aster leg)",
+    )
+    parser.add_argument(
+        "--slippage",
+        type=_decimal_type,
+        default=Decimal("0.05"),
+        help="Additional percentage applied to Lighter taker prices to ensure fills",
+    )
+    parser.add_argument(
+        "--max-wait",
+        type=float,
+        default=5.0,
+        help="Maximum seconds to wait for each leg to fill before canceling",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=0.2,
+        help="Polling interval when waiting for order status updates",
+    )
+    parser.add_argument(
+        "--env-file",
+        default=".env",
+        help="Path to the environment file containing both exchange credentials",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        help="Console logging level (DEBUG, INFO, WARNING, ERROR)",
+    )
+    return parser.parse_args()
+
+
+def _configure_logging(level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
+
+
+def _print_summary(results: List[LegResult]) -> None:
+    header = "\nCycle Summary"
+    print(header)
+    print("=" * len(header))
+    for leg in results:
+        print(
+            f"{leg.name} | {leg.exchange.upper():7s} | {leg.side.upper():4s} | "
+            f"qty={leg.quantity} | price={leg.price} | status={leg.status} | "
+            f"latency={leg.latency_seconds:.3f}s"
+        )
+
+
+async def _async_main(args: argparse.Namespace) -> None:
+    env_path = Path(args.env_file)
+    if not env_path.exists():
+        raise FileNotFoundError(f"Env file not found: {env_path.resolve()}")
+
+    dotenv.load_dotenv(env_path)
+
+    config = CycleConfig(
+        aster_ticker=args.aster_ticker,
+        lighter_ticker=args.lighter_ticker,
+        quantity=args.quantity,
+        direction=args.direction,
+        take_profit_pct=args.take_profit,
+        slippage_pct=args.slippage,
+        max_wait_seconds=args.max_wait,
+        poll_interval=args.poll_interval,
+    )
+
+    executor = HedgingCycleExecutor(config)
+    await executor.setup()
+    try:
+        results = await executor.execute_cycle()
+    finally:
+        await executor.shutdown()
+
+    _print_summary(results)
+
+
+def main() -> None:
+    args = _parse_args()
+    _configure_logging(args.log_level)
+
+    try:
+        asyncio.run(_async_main(args))
+    except KeyboardInterrupt:
+        logging.warning("Hedging cycle interrupted by user")
+        sys.exit(130)
+    except Exception as exc:
+        logging.exception("Hedging cycle failed: %s", exc)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
