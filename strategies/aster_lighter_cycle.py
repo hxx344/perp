@@ -695,10 +695,12 @@ def _calculate_cycle_volume(results: List[LegResult]) -> Decimal:
     total = Decimal("0")
     for leg in results:
         quantity = leg.quantity
-        if quantity is None:
+        price = leg.price
+        if quantity is None or price is None:
             continue
         qty_dec = quantity if isinstance(quantity, Decimal) else Decimal(str(quantity))
-        total += abs(qty_dec)
+        price_dec = price if isinstance(price, Decimal) else Decimal(str(price))
+        total += abs(qty_dec) * price_dec
     return total
 
 
@@ -714,8 +716,8 @@ def _print_pnl_progress(
     print("-" * len(header))
     print(f"Cycle PnL: {cycle_pnl}")
     print(f"Cumulative PnL: {cumulative_pnl}")
-    print(f"Cycle Volume: {cycle_volume}")
-    print(f"Cumulative Volume: {cumulative_volume}")
+    print(f"Cycle Volume (USD): {cycle_volume}")
+    print(f"Cumulative Volume (USD): {cumulative_volume}")
 
 
 async def _async_main(args: argparse.Namespace) -> None:
