@@ -287,35 +287,121 @@ class HedgingCycleExecutor:
         if not self.lighter_client:
             raise RuntimeError("Lighter client is not connected")
 
-        best_bid, best_ask = await self.lighter_client.fetch_bbo_prices(self.lighter_config.contract_id)
-        target_price = self._calculate_taker_price(direction, best_bid, best_ask)
+        max_attempts = min(5, max(1, self.config.max_retries))
+        current_slippage = self.config.slippage_pct
+        last_error: Optional[Exception] = None
 
-        start = time.time()
-        order_result = await self.lighter_client.place_limit_order(
-            self.lighter_config.contract_id, self.config.quantity, target_price, direction
-        )
-        if not order_result.success:
-            raise RuntimeError(f"{leg_name} | Failed to place Lighter order: {order_result.error_message}")
-        if not order_result.order_id:
-            raise RuntimeError(f"{leg_name} | Lighter order returned without a client order id")
+        for attempt in range(1, max_attempts + 1):
+            try:
+                best_bid, best_ask = await self.lighter_client.fetch_bbo_prices(
+                    self.lighter_config.contract_id
+                )
+            except Exception as exc:  # pragma: no cover - network variability
+                last_error = exc
+                self.logger.log(
+                    f"{leg_name} | Attempt {attempt} failed to fetch Lighter BBO: {exc}",
+                    "WARNING",
+                )
+                if attempt >= max_attempts:
+                    raise RuntimeError(
+                        f"{leg_name} | Unable to fetch Lighter bid/ask after {attempt} attempts"
+                    ) from exc
+                await asyncio.sleep(self.config.retry_delay_seconds)
+                continue
 
-        fill_info = await self._wait_for_lighter_fill(str(order_result.order_id), leg_name)
-        latency = time.time() - start
+            if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
+                last_error = ValueError("Invalid Lighter order book data")
+                self.logger.log(
+                    f"{leg_name} | Attempt {attempt} received invalid Lighter BBO (bid={best_bid}, ask={best_ask})",
+                    "WARNING",
+                )
+                if attempt >= max_attempts:
+                    raise RuntimeError(
+                        f"{leg_name} | Invalid Lighter bid/ask after {attempt} attempts"
+                    )
+                await asyncio.sleep(self.config.retry_delay_seconds)
+                continue
 
-        self.logger.log(
-            f"{leg_name} | Lighter taker filled {fill_info.filled_size} @ {fill_info.price}",
-            "INFO",
-        )
+            target_price = self._calculate_taker_price(
+                direction, best_bid, best_ask, slippage_override=current_slippage
+            )
 
-        return LegResult(
-            name=leg_name,
-            exchange="lighter",
-            side=direction,
-            quantity=fill_info.filled_size,
-            price=fill_info.price,
-            order_id=str(fill_info.order_id),
-            status=fill_info.status,
-            latency_seconds=latency,
+            start = time.time()
+            order_result = await self.lighter_client.place_limit_order(
+                self.lighter_config.contract_id,
+                self.config.quantity,
+                target_price,
+                direction,
+            )
+
+            if not order_result.success:
+                error_message = order_result.error_message or "Unknown error"
+                lowered = error_message.lower()
+                if (
+                    "accidental price" in lowered
+                    and current_slippage > Decimal("0")
+                    and attempt < max_attempts
+                ):
+                    self.logger.log(
+                        f"{leg_name} | Lighter flagged price as accidental at slippage {current_slippage}%. Tightening and retrying...",
+                        "WARNING",
+                    )
+                    current_slippage = max(
+                        (current_slippage / Decimal("2")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP),
+                        Decimal("0"),
+                    )
+                    await asyncio.sleep(self.config.retry_delay_seconds)
+                    continue
+
+                last_error = RuntimeError(error_message)
+                self.logger.log(
+                    f"{leg_name} | Attempt {attempt} failed to place Lighter order: {error_message}",
+                    "ERROR",
+                )
+                if attempt >= max_attempts:
+                    raise RuntimeError(
+                        f"{leg_name} | Failed to place Lighter order after {attempt} attempts: {error_message}"
+                    )
+                await asyncio.sleep(self.config.retry_delay_seconds)
+                continue
+
+            if not order_result.order_id:
+                raise RuntimeError(f"{leg_name} | Lighter order returned without a client order id")
+
+            try:
+                fill_info = await self._wait_for_lighter_fill(str(order_result.order_id), leg_name)
+            except TimeoutError as exc:
+                last_error = exc
+                self.logger.log(
+                    f"{leg_name} | Attempt {attempt} timed out waiting for Lighter fill. Canceling and retrying...",
+                    "WARNING",
+                )
+                await self._attempt_cancel_lighter(str(order_result.order_id), leg_name)
+                if attempt >= max_attempts:
+                    raise
+                await asyncio.sleep(self.config.retry_delay_seconds)
+                continue
+
+            latency = time.time() - start
+
+            self.logger.log(
+                f"{leg_name} | Lighter taker filled {fill_info.filled_size} @ {fill_info.price}",
+                "INFO",
+            )
+
+            return LegResult(
+                name=leg_name,
+                exchange="lighter",
+                side=direction,
+                quantity=fill_info.filled_size,
+                price=fill_info.price,
+                order_id=str(fill_info.order_id),
+                status=fill_info.status,
+                latency_seconds=latency,
+            )
+
+        raise RuntimeError(
+            f"{leg_name} | Failed to execute Lighter taker leg after {max_attempts} attempts: {last_error}"
         )
 
     async def _wait_for_aster_fill(self, order_id: str, leg_name: str) -> OrderInfo:
@@ -423,20 +509,37 @@ class HedgingCycleExecutor:
 
         return _round_to_tick(price, tick)
 
-    def _calculate_taker_price(self, direction: str, best_bid: Decimal, best_ask: Decimal) -> Decimal:
-        slip_fraction = self.config.slippage_pct / Decimal("100")
+    def _calculate_taker_price(
+        self,
+        direction: str,
+        best_bid: Decimal,
+        best_ask: Decimal,
+        slippage_override: Optional[Decimal] = None,
+    ) -> Decimal:
+        slippage_pct = self.config.slippage_pct if slippage_override is None else slippage_override
+        slip_fraction = slippage_pct / Decimal("100")
         tick = self.lighter_config.tick_size if self.lighter_config.tick_size > 0 else Decimal("0")
 
         if direction == "buy":
             base = best_ask
             price = base * (Decimal("1") + slip_fraction)
-            if slip_fraction == 0 and tick > 0:
-                price = base + tick
+            if tick > 0:
+                min_price = base + tick
+            else:
+                min_price = base
+            if price < min_price:
+                price = min_price
         else:
             base = best_bid
             price = base * (Decimal("1") - slip_fraction)
-            if slip_fraction == 0 and tick > 0:
-                price = base - tick
+            if tick > 0:
+                max_price = base - tick
+                if max_price <= 0:
+                    max_price = base
+            else:
+                max_price = base
+            if price > max_price:
+                price = max_price
 
         if price <= 0 and tick > 0:
             price = tick

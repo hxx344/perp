@@ -235,19 +235,27 @@ class LighterClient(BaseExchangeClient):
     async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
         """Get orderbook using official SDK."""
         # Use WebSocket data if available
-        if (hasattr(self, 'ws_manager') and
-                self.ws_manager.best_bid and self.ws_manager.best_ask):
-            best_bid = Decimal(str(self.ws_manager.best_bid))
-            best_ask = Decimal(str(self.ws_manager.best_ask))
-
-            if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
-                self.logger.log("Invalid bid/ask prices", "ERROR")
-                raise ValueError("Invalid bid/ask prices")
-        else:
-            self.logger.log("Unable to get bid/ask prices from WebSocket.", "ERROR")
+        if not hasattr(self, 'ws_manager'):
             raise ValueError("WebSocket not running. No bid/ask prices available")
 
-        return best_bid, best_ask
+        for _ in range(20):
+            best_bid_raw = getattr(self.ws_manager, 'best_bid', None)
+            best_ask_raw = getattr(self.ws_manager, 'best_ask', None)
+            if best_bid_raw and best_ask_raw:
+                best_bid = Decimal(str(best_bid_raw))
+                best_ask = Decimal(str(best_ask_raw))
+
+                if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
+                    self.logger.log("Invalid bid/ask prices", "ERROR")
+                    raise ValueError("Invalid bid/ask prices")
+                return best_bid, best_ask
+            await asyncio.sleep(0.25)
+
+        self.logger.log(
+            "Unable to get bid/ask prices from WebSocket within the expected time window.",
+            "ERROR"
+        )
+        raise ValueError("WebSocket not running. No bid/ask prices available")
 
     async def _submit_order_with_retry(self, order_params: Dict[str, Any]) -> OrderResult:
         """Submit an order with Lighter using official SDK."""
