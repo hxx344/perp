@@ -472,6 +472,79 @@ class AsterClient(BaseExchangeClient):
 
         return best_bid, best_ask
 
+    @query_retry(default_return=([], []))
+    async def fetch_order_book(
+        self,
+        contract_id: str,
+        limit: int = 20,
+    ) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
+        """Fetch aggregated order book depth for a contract."""
+        depth_limit = max(5, min(limit, 500))
+        result = await self._make_request(
+            'GET',
+            '/fapi/v1/depth',
+            {
+                'symbol': contract_id,
+                'limit': depth_limit,
+            },
+        )
+
+        bids = [
+            (Decimal(price), Decimal(quantity))
+            for price, quantity in result.get('bids', [])
+            if Decimal(price) > 0 and Decimal(quantity) >= 0
+        ]
+        asks = [
+            (Decimal(price), Decimal(quantity))
+            for price, quantity in result.get('asks', [])
+            if Decimal(price) > 0 and Decimal(quantity) >= 0
+        ]
+
+        return bids, asks
+
+    @staticmethod
+    def _select_depth_price(
+        side_levels: List[Tuple[Decimal, Decimal]],
+        level: int,
+    ) -> Optional[Decimal]:
+        """Select the price for the requested depth level from one side of the book."""
+        if level <= 0:
+            return None
+
+        for index, (price, _quantity) in enumerate(side_levels, start=1):
+            if price <= 0:
+                continue
+            if index == level:
+                return price
+
+        if side_levels:
+            # Fallback to the furthest available level to avoid failing outright.
+            return side_levels[-1][0]
+
+        return None
+
+    async def get_depth_level_price(
+        self,
+        contract_id: str,
+        direction: str,
+        level: int,
+    ) -> Tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+        """Return depth price together with current best bid/ask for convenience."""
+        bids, asks = await self.fetch_order_book(contract_id, limit=max(level, 20))
+
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+
+        direction_lower = direction.lower()
+        if direction_lower == 'buy':
+            depth_price = self._select_depth_price(bids, level)
+        elif direction_lower == 'sell':
+            depth_price = self._select_depth_price(asks, level)
+        else:
+            depth_price = None
+
+        return depth_price, best_bid, best_ask
+
     async def get_order_price(self, direction: str) -> Decimal:
         """Get the price of an order with Aster using official SDK."""
         best_bid, best_ask = await self.fetch_bbo_prices(self.config.contract_id)
@@ -503,20 +576,62 @@ class AsterClient(BaseExchangeClient):
                     self.logger.log(f"[OPEN] ERROR: Active open orders abnormal: {active_open_orders}", "ERROR")
                     raise Exception(f"[OPEN] ERROR: Active open orders abnormal: {active_open_orders}")
 
-            best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+            depth_price, best_bid, best_ask = await self.get_depth_level_price(
+                contract_id,
+                direction,
+                level=4,
+            )
 
-            if best_bid <= 0 or best_ask <= 0:
-                return OrderResult(success=False, error_message='Invalid bid/ask prices')
+            best_bid = best_bid if best_bid is not None else Decimal(0)
+            best_ask = best_ask if best_ask is not None else Decimal(0)
 
-            # Determine order side and price
-            if direction == 'buy':
-                # For buy orders, place slightly below best ask to ensure execution
-                price = best_ask - self.config.tick_size
-            elif direction == 'sell':
-                # For sell orders, place slightly above best bid to ensure execution
-                price = best_bid + self.config.tick_size
-            else:
-                raise Exception(f"[OPEN] Invalid direction: {direction}")
+            tick = self.config.tick_size if self.config.tick_size > 0 else Decimal(0)
+
+            price = depth_price if depth_price is not None else None
+
+            if price is None or price <= 0:
+                fallback_bid, fallback_ask = await self.fetch_bbo_prices(contract_id)
+                best_bid = fallback_bid if fallback_bid > 0 else best_bid
+                best_ask = fallback_ask if fallback_ask > 0 else best_ask
+
+                if direction == 'buy':
+                    if best_bid > 0:
+                        price = best_bid
+                    elif best_ask > 0 and tick > 0:
+                        price = best_ask - tick
+                elif direction == 'sell':
+                    if best_ask > 0:
+                        price = best_ask
+                    elif best_bid > 0 and tick > 0:
+                        price = best_bid + tick
+                else:
+                    raise Exception(f"[OPEN] Invalid direction: {direction}")
+
+            if price is None or price <= 0:
+                return OrderResult(success=False, error_message='Unable to determine a valid maker price')
+
+            if tick > 0:
+                price = self.round_to_tick(price)
+
+            minimal_step = tick if tick > 0 else Decimal("0.00000001")
+
+            if direction == 'buy' and best_ask > 0 and price >= best_ask:
+                price = best_ask - minimal_step
+                if tick > 0:
+                    price = self.round_to_tick(price)
+            elif direction == 'sell' and best_bid > 0 and price <= best_bid:
+                price = best_bid + minimal_step
+                if tick > 0:
+                    price = self.round_to_tick(price)
+
+            minimal_price = tick if tick > 0 else minimal_step
+            if price < minimal_price:
+                price = minimal_price
+                if tick > 0:
+                    price = self.round_to_tick(price)
+
+            if price <= 0:
+                return OrderResult(success=False, error_message='Calculated maker price is non-positive')
 
             # Place the order
             order_data = {

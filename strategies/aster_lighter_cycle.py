@@ -264,8 +264,7 @@ class HedgingCycleExecutor:
                 await asyncio.sleep(self.config.retry_delay_seconds)
             skip_retry_delay = False
 
-            best_bid, best_ask = await self.aster_client.fetch_bbo_prices(self.aster_config.contract_id)
-            target_price = self._calculate_aster_maker_price(direction, best_bid, best_ask)
+            target_price = await self._calculate_aster_maker_price(direction)
             order_result = await self.aster_client.place_close_order(
                 self.aster_config.contract_id, self.config.quantity, target_price, direction
             )
@@ -517,23 +516,69 @@ class HedgingCycleExecutor:
                 "ERROR",
             )
 
-    def _calculate_aster_maker_price(
-        self, direction: str, best_bid: Decimal, best_ask: Decimal
-    ) -> Decimal:
+    async def _calculate_aster_maker_price(self, direction: str) -> Decimal:
+        if not self.aster_client:
+            raise RuntimeError("Aster client is not connected")
+
         tick = self.aster_config.tick_size if self.aster_config.tick_size > 0 else Decimal("0")
+        level = 4
 
-        if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
-            raise ValueError("Invalid Aster order book data for maker pricing")
+        depth_price, best_bid, best_ask = await self.aster_client.get_depth_level_price(
+            self.aster_config.contract_id,
+            direction,
+            level,
+        )
 
-        if direction == "sell":
-            price = best_bid + tick if tick > 0 else best_ask
-        else:
-            price = best_ask - tick if tick > 0 else best_bid
+        best_bid = best_bid if best_bid is not None else Decimal("0")
+        best_ask = best_ask if best_ask is not None else Decimal("0")
 
-        if price <= 0 and tick > 0:
-            price = tick
+        price = depth_price if depth_price is not None else None
 
-        return _round_to_tick(price, tick)
+        if price is None or price <= 0:
+            fallback_bid, fallback_ask = await self.aster_client.fetch_bbo_prices(
+                self.aster_config.contract_id
+            )
+            best_bid = fallback_bid if fallback_bid > 0 else best_bid
+            best_ask = fallback_ask if fallback_ask > 0 else best_ask
+
+            if direction == "sell":
+                if best_ask > 0:
+                    price = best_ask
+                elif best_bid > 0 and tick > 0:
+                    price = best_bid + tick
+            else:
+                if best_bid > 0:
+                    price = best_bid
+                elif best_ask > 0 and tick > 0:
+                    price = best_ask - tick
+
+        if price is None or price <= 0:
+            raise ValueError("Unable to determine Aster maker price from market data")
+
+        if tick > 0:
+            price = _round_to_tick(price, tick)
+
+        minimal_step = tick if tick > 0 else Decimal("0.00000001")
+
+        if direction == "sell" and best_bid > 0 and price <= best_bid:
+            price = best_bid + minimal_step
+            if tick > 0:
+                price = _round_to_tick(price, tick)
+        elif direction == "buy" and best_ask > 0 and price >= best_ask:
+            price = best_ask - minimal_step
+            if tick > 0:
+                price = _round_to_tick(price, tick)
+
+        minimal_price = tick if tick > 0 else minimal_step
+        if price < minimal_price:
+            price = minimal_price
+            if tick > 0:
+                price = _round_to_tick(price, tick)
+
+        if price <= 0:
+            raise ValueError("Calculated maker price is non-positive")
+
+        return price
 
     def _calculate_taker_price_from_reference(
         self,
