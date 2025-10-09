@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING, cast
+from typing import List, Optional, TYPE_CHECKING, Tuple, cast
 
 import dotenv
 
@@ -732,34 +732,92 @@ def _print_summary(results: List[LegResult], cycle_number: Optional[int] = None)
         print(" | ".join(parts))
 
 
+def _to_decimal(value: Decimal | float | int | str) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
+def _extract_price_quantity(leg: LegResult) -> Tuple[Optional[Decimal], Optional[Decimal]]:
+    price = leg.price
+    quantity = leg.quantity
+    if price is None or quantity is None:
+        return None, None
+    try:
+        price_dec = _to_decimal(price)
+        quantity_dec = abs(_to_decimal(quantity))
+    except (InvalidOperation, ValueError):  # pragma: no cover - defensive
+        return None, None
+    return price_dec, quantity_dec
+
+
+def _calculate_pair_metrics(leg_a: LegResult, leg_b: LegResult) -> Tuple[Decimal, Decimal]:
+    price_a, qty_a = _extract_price_quantity(leg_a)
+    price_b, qty_b = _extract_price_quantity(leg_b)
+
+    if price_a is None or price_b is None or qty_a is None or qty_b is None:
+        return Decimal("0"), Decimal("0")
+
+    matched_qty = min(qty_a, qty_b)
+    if matched_qty <= 0:
+        return Decimal("0"), Decimal("0")
+
+    side_a = leg_a.side.lower()
+    side_b = leg_b.side.lower()
+    valid_sides = {"buy", "sell"}
+
+    if side_a not in valid_sides or side_b not in valid_sides:
+        return Decimal("0"), Decimal("0")
+
+    if side_a == side_b:
+        # Fallback to cash-flow approach limited to matched quantity
+        factor_a = Decimal("1") if side_a == "sell" else Decimal("-1")
+        factor_b = Decimal("1") if side_b == "sell" else Decimal("-1")
+        pnl = (price_a * matched_qty * factor_a) + (price_b * matched_qty * factor_b)
+        volume = (price_a + price_b) * matched_qty
+        return pnl, volume
+
+    if side_a == "sell":
+        sell_price = price_a
+        buy_price = price_b
+    else:
+        sell_price = price_b
+        buy_price = price_a
+
+    pnl = (sell_price - buy_price) * matched_qty
+    volume = (sell_price + buy_price) * matched_qty
+    return pnl, volume
+
+
+def _calculate_cycle_pair_metrics(results: List[LegResult]) -> Tuple[Decimal, Decimal]:
+    total_pnl = Decimal("0")
+    total_volume = Decimal("0")
+
+    leg_pairs: List[Tuple[LegResult, LegResult]] = []
+    if len(results) >= 3:
+        leg_pairs.append((results[0], results[2]))
+    if len(results) >= 4:
+        leg_pairs.append((results[1], results[3]))
+
+    if not leg_pairs:
+        return total_pnl, total_volume
+
+    for leg_a, leg_b in leg_pairs:
+        pair_pnl, pair_volume = _calculate_pair_metrics(leg_a, leg_b)
+        total_pnl += pair_pnl
+        total_volume += pair_volume
+
+    return total_pnl, total_volume
+
+
 def _calculate_cycle_pnl(results: List[LegResult]) -> Decimal:
-    total = Decimal("0")
-    for leg in results:
-        price = leg.price
-        quantity = leg.quantity
-        if price is None or quantity is None:
-            continue
-        price_dec = price if isinstance(price, Decimal) else Decimal(str(price))
-        qty_dec = quantity if isinstance(quantity, Decimal) else Decimal(str(quantity))
-        cash_flow = price_dec * qty_dec
-        if leg.side.lower() == "sell":
-            total += cash_flow
-        else:
-            total -= cash_flow
-    return total
+    pnl, _ = _calculate_cycle_pair_metrics(results)
+    return pnl
 
 
 def _calculate_cycle_volume(results: List[LegResult]) -> Decimal:
-    total = Decimal("0")
-    for leg in results:
-        quantity = leg.quantity
-        price = leg.price
-        if quantity is None or price is None:
-            continue
-        qty_dec = quantity if isinstance(quantity, Decimal) else Decimal(str(quantity))
-        price_dec = price if isinstance(price, Decimal) else Decimal(str(price))
-        total += abs(qty_dec) * price_dec
-    return total
+    _, volume = _calculate_cycle_pair_metrics(results)
+    return volume
 
 
 def _print_pnl_progress(
