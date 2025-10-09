@@ -663,7 +663,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--poll-interval",
         type=float,
-        default=0.2,
+        default=0.1,
         help="Polling interval when waiting for order status updates",
     )
     parser.add_argument(
