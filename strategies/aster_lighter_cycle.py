@@ -255,6 +255,19 @@ class HedgingCycleExecutor:
         if not self.aster_client:
             raise RuntimeError("Aster client is not connected")
 
+        reverse_quantity = await self.aster_client.get_account_positions()
+        if reverse_quantity <= 0:
+            self.logger.log(
+                f"{leg_name} | No open position detected on Aster; falling back to configured quantity {self.config.quantity}",
+                "WARNING",
+            )
+            reverse_quantity = self.config.quantity
+        else:
+            self.logger.log(
+                f"{leg_name} | Using current Aster position {reverse_quantity} as close quantity",
+                "INFO",
+            )
+
         overall_start = time.time()
         attempt = 0
         skip_retry_delay = False
@@ -266,7 +279,7 @@ class HedgingCycleExecutor:
 
             target_price = await self._calculate_aster_maker_price(direction)
             order_result = await self.aster_client.place_close_order(
-                self.aster_config.contract_id, self.config.quantity, target_price, direction
+                self.aster_config.contract_id, reverse_quantity, target_price, direction
             )
             if not order_result.order_id:
                 raise RuntimeError(f"{leg_name} | Aster close order returned without an order id")
