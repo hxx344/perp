@@ -51,6 +51,8 @@ class CycleConfig:
     aster_ticker: str
     lighter_ticker: str
     quantity: Decimal
+    aster_quantity: Decimal
+    lighter_quantity: Decimal
     direction: str
     take_profit_pct: Decimal  # retained for compatibility; reverse leg now ignores this value
     slippage_pct: Decimal
@@ -96,7 +98,7 @@ class HedgingCycleExecutor:
         self.aster_config = TradingConfig(
             ticker=config.aster_ticker.upper(),
             contract_id="",
-            quantity=config.quantity,
+            quantity=config.aster_quantity,
             take_profit=config.take_profit_pct,
             tick_size=Decimal(0),
             direction=config.direction,
@@ -112,7 +114,7 @@ class HedgingCycleExecutor:
         self.lighter_config = TradingConfig(
             ticker=config.lighter_ticker,
             contract_id="",
-            quantity=config.quantity,
+            quantity=config.lighter_quantity,
             take_profit=config.take_profit_pct,
             tick_size=Decimal(0),
             direction=self._lighter_initial_direction(),
@@ -149,6 +151,10 @@ class HedgingCycleExecutor:
                 "WARNING",
             )
 
+        self.logger.log(
+            f"Configured leg quantities -> Aster: {self.config.aster_quantity}, Lighter: {self.config.lighter_quantity}",
+            "INFO",
+        )
         self.logger.log("Hedging cycle setup complete", "INFO")
 
     async def shutdown(self) -> None:
@@ -212,7 +218,7 @@ class HedgingCycleExecutor:
             skip_retry_delay = False
 
             order_result = await self.aster_client.place_open_order(
-                self.aster_config.contract_id, self.config.quantity, direction
+                self.aster_config.contract_id, self.config.aster_quantity, direction
             )
             if not order_result.order_id:
                 raise RuntimeError(f"{leg_name} | Aster order returned without an order id")
@@ -258,10 +264,10 @@ class HedgingCycleExecutor:
         reverse_quantity = await self.aster_client.get_account_positions()
         if reverse_quantity <= 0:
             self.logger.log(
-                f"{leg_name} | No open position detected on Aster; falling back to configured quantity {self.config.quantity}",
+                f"{leg_name} | No open position detected on Aster; falling back to configured quantity {self.config.aster_quantity}",
                 "WARNING",
             )
-            reverse_quantity = self.config.quantity
+            reverse_quantity = self.config.aster_quantity
         else:
             self.logger.log(
                 f"{leg_name} | Using current Aster position {reverse_quantity} as close quantity",
@@ -339,7 +345,7 @@ class HedgingCycleExecutor:
             start = time.time()
             order_result = await self.lighter_client.place_limit_order(
                 self.lighter_config.contract_id,
-                self.config.quantity,
+                self.config.lighter_quantity,
                 target_price,
                 direction,
             )
@@ -637,6 +643,16 @@ def _parse_args() -> argparse.Namespace:
         help="Position size (contracts) for each leg",
     )
     parser.add_argument(
+        "--aster-quantity",
+        type=_decimal_type,
+        help="Override quantity for Aster maker legs (defaults to --quantity)",
+    )
+    parser.add_argument(
+        "--lighter-quantity",
+        type=_decimal_type,
+        help="Override quantity for Lighter taker legs (defaults to --quantity)",
+    )
+    parser.add_argument(
         "--direction",
         choices=["buy", "sell"],
         default="buy",
@@ -847,6 +863,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         aster_ticker=args.aster_ticker,
         lighter_ticker=args.lighter_ticker,
         quantity=args.quantity,
+        aster_quantity=args.aster_quantity if args.aster_quantity is not None else args.quantity,
+        lighter_quantity=args.lighter_quantity if args.lighter_quantity is not None else args.quantity,
         direction=args.direction,
         take_profit_pct=args.take_profit,
         slippage_pct=args.slippage,
