@@ -57,6 +57,7 @@ class CycleConfig:
     take_profit_pct: Decimal  # retained for compatibility; reverse leg now ignores this value
     slippage_pct: Decimal
     max_wait_seconds: float
+    lighter_max_wait_seconds: float
     poll_interval: float
     max_retries: int
     retry_delay_seconds: float
@@ -392,7 +393,11 @@ class HedgingCycleExecutor:
                     f"{leg_name} | Attempt {attempt} timed out waiting for Lighter fill. Canceling and retrying...",
                     "WARNING",
                 )
-                await self._attempt_cancel_lighter(str(order_result.order_id), leg_name)
+                cancel_success = await self._attempt_cancel_lighter(str(order_result.order_id), leg_name)
+                if not cancel_success:
+                    raise RuntimeError(
+                        f"{leg_name} | Cancel failed after timeout; aborting to avoid duplicate exposure"
+                    )
                 if attempt >= max_attempts:
                     raise
                 if current_slippage <= Decimal("0"):
@@ -463,7 +468,7 @@ class HedgingCycleExecutor:
         if not self.lighter_client:
             raise RuntimeError("Lighter client is not connected")
 
-        deadline = time.time() + self.config.max_wait_seconds
+        deadline = time.time() + self.config.lighter_max_wait_seconds
         target_client_id = int(client_order_id)
 
         while time.time() < deadline:
@@ -477,7 +482,11 @@ class HedgingCycleExecutor:
                     raise RuntimeError(f"{leg_name} | Lighter order ended with status {status}")
             await asyncio.sleep(self.config.poll_interval)
 
-        await self._attempt_cancel_lighter(client_order_id, leg_name)
+        cancel_success = await self._attempt_cancel_lighter(client_order_id, leg_name)
+        if not cancel_success:
+            raise RuntimeError(
+                f"{leg_name} | Cancel failed after timeout; aborting to avoid duplicate exposure"
+            )
         raise TimeoutError(f"{leg_name} | Lighter order {client_order_id} not filled within timeout")
 
     async def _attempt_cancel_aster(
@@ -506,9 +515,9 @@ class HedgingCycleExecutor:
                 "ERROR",
             )
 
-    async def _attempt_cancel_lighter(self, client_order_id: str, leg_name: str) -> None:
+    async def _attempt_cancel_lighter(self, client_order_id: str, leg_name: str) -> bool:
         if not self.lighter_client:
-            return
+            return False
 
         current_order = getattr(self.lighter_client, "current_order", None)
         order_index = None
@@ -520,7 +529,7 @@ class HedgingCycleExecutor:
                 f"{leg_name} | Unable to cancel Lighter order {client_order_id}: missing order index",
                 "WARNING",
             )
-            return
+            return False
 
         try:
             result = await self.lighter_client.cancel_order(str(order_index))
@@ -529,11 +538,14 @@ class HedgingCycleExecutor:
                     f"{leg_name} | Failed to cancel Lighter order {order_index}: {result.error_message}",
                     "ERROR",
                 )
+                return False
+            return True
         except Exception as exc:  # pragma: no cover - defensive logging
             self.logger.log(
                 f"{leg_name} | Exception canceling Lighter order {order_index}: {exc}",
                 "ERROR",
             )
+            return False
 
     async def _calculate_aster_maker_price(self, direction: str) -> Decimal:
         if not self.aster_client:
@@ -675,6 +687,12 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=5.0,
         help="Maximum seconds to wait for each leg to fill before canceling",
+    )
+    parser.add_argument(
+        "--lighter-max-wait",
+        type=float,
+        default=120.0,
+        help="Maximum seconds to wait for Lighter fills before canceling",
     )
     parser.add_argument(
         "--poll-interval",
@@ -869,6 +887,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         take_profit_pct=args.take_profit,
         slippage_pct=args.slippage,
         max_wait_seconds=args.max_wait,
+    lighter_max_wait_seconds=args.lighter_max_wait,
         poll_interval=args.poll_interval,
         max_retries=args.max_retries,
         retry_delay_seconds=args.retry_delay,
