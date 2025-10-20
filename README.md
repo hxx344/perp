@@ -284,6 +284,28 @@ python strategies/aster_lighter_cycle.py \
 - 默认等待超时为 5 秒，可通过 `--max-wait` 调整。
 - `--max-retries` 默认 100 次，`--retry-delay` 默认 5 秒，两者共同控制 Aster Maker 单的重试次数与重试间隔，避免超时直接退出。
 
+## GRVT-Lighter 对冲循环
+
+如果想实现与 Aster 类似的流程，但将 Maker 端替换为 GRVT，可使用 `strategies/grvt_lighter_cycle.py`：
+
+```bash
+python strategies/grvt_lighter_cycle.py \
+   --grvt-ticker BTC \
+   --lighter-ticker BTC-PERP \
+   --quantity 0.5 \
+   --direction buy \
+   --slippage 0.05 \
+   --cycles 0 \
+   --cycle-delay 2
+```
+
+**注意事项**：
+
+- 需要在 `.env` 中同时配置 GRVT 与 Lighter 的凭证。
+- GRVT Maker 单默认等待超时为 5 秒（`--max-wait`），Lighter Taker 单默认等待 120 秒（`--lighter-max-wait`）。
+- `--grvt-quantity` / `--lighter-quantity` 可分别覆盖默认数量，未提供则回落到 `--quantity`。
+- 其余参数含义与 Aster-Lighter 版本一致，可直接复用。
+
 ## 配置
 
 ### 环境变量

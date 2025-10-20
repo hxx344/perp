@@ -248,6 +248,21 @@ Key options:
 - `--cycles`: How many complete hedging cycles to execute. Use `0` to keep the script running until you interrupt it manually.
 - `--cycle-delay`: Optional pause (seconds) between successive cycles when looping.
 
+## GRVT–Lighter Hedging Cycle
+
+To mirror the same workflow with GRVT on the maker side, run `strategies/grvt_lighter_cycle.py`:
+
+```bash
+python strategies/grvt_lighter_cycle.py --grvt-ticker BTC --lighter-ticker BTC-PERP --quantity 1 --direction buy --slippage 0.15 --cycles 0 --cycle-delay 2
+```
+
+Key options:
+
+- `--max-wait`: Timeout (seconds) for GRVT fills; defaults to 5 seconds.
+- `--lighter-max-wait`: Independent timeout for Lighter taker fills; defaults to 120 seconds.
+- `--grvt-quantity` / `--lighter-quantity`: Override leg sizes individually; fall back to `--quantity` when omitted.
+- All remaining switches match the Aster–Lighter script, so you can reuse existing automation templates.
+
 ## Configuration
 
 ### Environment Variables
