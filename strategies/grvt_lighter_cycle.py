@@ -31,6 +31,17 @@ from exchanges.base import OrderInfo
 from helpers.logger import TradingLogger
 from trading_bot import TradingConfig
 
+NOISY_LOGGERS: Tuple[str, ...] = (
+    "pysdk",
+    "pysdk.grvt_ccxt",
+    "pysdk.grvt_ccxt_base",
+    "pysdk.grvt_ccxt_ws",
+    "pysdk.grvt_ccxt_pro",
+    "aiohttp",
+    "aiohttp.client",
+    "websockets",
+)
+
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from exchanges.grvt import GrvtClient
     from exchanges.lighter import LighterClient
@@ -741,10 +752,16 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _configure_logging(level: str) -> None:
+    base_level = getattr(logging, level.upper(), logging.INFO)
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
+        level=base_level,
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
+
+    noisy_level = logging.WARNING if base_level < logging.WARNING else base_level
+    for name in NOISY_LOGGERS:
+        logger = logging.getLogger(name)
+        logger.setLevel(noisy_level)
 
 
 def _print_summary(results: List[LegResult], cycle_number: Optional[int] = None) -> None:
