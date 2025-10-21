@@ -962,6 +962,10 @@ def _calculate_cycle_pair_metrics(results: List[LegResult]) -> Tuple[Decimal, De
         return total_pnl, total_volume
 
     for leg_a, leg_b in leg_pairs:
+        status_a = (leg_a.status or "").upper()
+        status_b = (leg_b.status or "").upper()
+        if status_a.startswith("VIRTUAL") or status_b.startswith("VIRTUAL"):
+            continue
         pair_pnl, pair_volume = _calculate_pair_metrics(leg_a, leg_b)
         total_pnl += pair_pnl
         total_volume += pair_volume
