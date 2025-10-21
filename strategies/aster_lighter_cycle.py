@@ -63,6 +63,7 @@ class CycleConfig:
     retry_delay_seconds: float
     max_cycles: int
     delay_between_cycles: float
+    virtual_aster_maker: bool
 
 
 @dataclass
@@ -209,6 +210,13 @@ class HedgingCycleExecutor:
         if not self.aster_client:
             raise RuntimeError("Aster client is not connected")
 
+        if self.config.virtual_aster_maker:
+            return await self._simulate_virtual_aster_leg(
+                leg_name=leg_name,
+                direction=direction,
+                quantity=self.config.aster_quantity,
+            )
+
         overall_start = time.time()
         attempt = 0
         skip_retry_delay = False
@@ -261,6 +269,13 @@ class HedgingCycleExecutor:
     ) -> LegResult:
         if not self.aster_client:
             raise RuntimeError("Aster client is not connected")
+
+        if self.config.virtual_aster_maker:
+            return await self._simulate_virtual_aster_leg(
+                leg_name=leg_name,
+                direction=direction,
+                quantity=self.config.aster_quantity,
+            )
 
         reverse_quantity = await self.aster_client.get_account_positions()
         if reverse_quantity <= 0:
@@ -322,6 +337,111 @@ class HedgingCycleExecutor:
             latency_seconds=latency,
             requested_price=fill_info.price,
         )
+
+    async def _simulate_virtual_aster_leg(
+        self,
+        leg_name: str,
+        direction: str,
+        quantity: Decimal,
+    ) -> LegResult:
+        if not self.aster_client:
+            raise RuntimeError("Aster client is not connected")
+
+        overall_start = time.time()
+        attempt = 0
+        skip_retry_delay = False
+        last_error: Optional[str] = None
+
+        while True:
+            attempt += 1
+            if attempt > 1 and not skip_retry_delay:
+                await asyncio.sleep(self.config.retry_delay_seconds)
+            skip_retry_delay = False
+
+            try:
+                target_price = await self._calculate_aster_maker_price(direction)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                last_error = str(exc)
+                self.logger.log(
+                    f"{leg_name} | Virtual pricing attempt {attempt} failed: {last_error}",
+                    "ERROR",
+                )
+                if attempt >= self.config.max_retries:
+                    raise RuntimeError(
+                        f"{leg_name} | Unable to determine virtual Aster price after {attempt} attempts: {last_error}"
+                    )
+                continue
+
+            try:
+                fill_price, fill_timestamp = await self._wait_for_virtual_aster_fill(
+                    leg_name=leg_name,
+                    direction=direction,
+                    target_price=target_price,
+                )
+                break
+            except TimeoutError:
+                self.logger.log(
+                    f"{leg_name} | Virtual Aster order at {target_price} timed out on attempt {attempt}. Retrying...",
+                    "WARNING",
+                )
+                if attempt >= self.config.max_retries:
+                    raise
+                skip_retry_delay = True
+                continue
+
+        latency = max(fill_timestamp - overall_start, 0.0)
+        order_id = f"virtual-{leg_name}-{int(fill_timestamp * 1000)}"
+
+        self.logger.log(
+            f"{leg_name} | Virtual Aster maker filled {quantity} @ {fill_price} (target {target_price})",
+            "INFO",
+        )
+
+        return LegResult(
+            name=leg_name,
+            exchange="aster",
+            side=direction,
+            quantity=quantity,
+            price=fill_price,
+            order_id=order_id,
+            status="VIRTUAL_FILLED",
+            latency_seconds=latency,
+            requested_price=target_price,
+        )
+
+    async def _wait_for_virtual_aster_fill(
+        self,
+        leg_name: str,
+        direction: str,
+        target_price: Decimal,
+    ) -> Tuple[Decimal, float]:
+        if not self.aster_client:
+            raise RuntimeError("Aster client is not connected")
+
+        contract_id = self.aster_config.contract_id
+        if not contract_id:
+            raise RuntimeError("Aster contract id is not initialized")
+
+        deadline = time.time() + self.config.max_wait_seconds
+        poll_interval = max(self.config.poll_interval, 0.05)
+
+        while True:
+            best_bid, best_ask = await self.aster_client.fetch_bbo_prices(contract_id)
+            now = time.time()
+
+            if direction == "buy":
+                if best_ask > 0 and best_ask <= target_price:
+                    return best_ask, now
+            else:
+                if best_bid > 0 and best_bid >= target_price:
+                    return best_bid, now
+
+            if now >= deadline:
+                break
+
+            await asyncio.sleep(poll_interval)
+
+        raise TimeoutError(f"{leg_name} | Virtual fill not reached for target {target_price}")
 
     async def _execute_lighter_taker(
         self, leg_name: str, direction: str, reference_price: Decimal
@@ -713,6 +833,11 @@ def _parse_args() -> argparse.Namespace:
         help="Delay in seconds before retrying an Aster maker order",
     )
     parser.add_argument(
+        "--virtual-aster-maker",
+        action="store_true",
+        help="Simulate Aster maker legs without sending real orders",
+    )
+    parser.add_argument(
         "--cycles",
         type=int,
         default=0,
@@ -893,6 +1018,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         retry_delay_seconds=args.retry_delay,
         max_cycles=max(0, args.cycles),
         delay_between_cycles=max(0.0, args.cycle_delay),
+        virtual_aster_maker=args.virtual_aster_maker,
     )
 
     executor = HedgingCycleExecutor(config)
