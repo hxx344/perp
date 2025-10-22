@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import random
 import sys
 import time
 from dataclasses import dataclass
@@ -64,6 +65,8 @@ class CycleConfig:
     max_cycles: int
     delay_between_cycles: float
     virtual_aster_maker: bool
+    lighter_quantity_min: Optional[Decimal] = None
+    lighter_quantity_max: Optional[Decimal] = None
 
 
 @dataclass
@@ -97,6 +100,15 @@ class HedgingCycleExecutor:
         ticker_label = f"{config.aster_ticker}_{config.lighter_ticker}".replace("/", "-")
         self.logger = TradingLogger(exchange="hedge", ticker=ticker_label, log_to_console=True)
 
+        self._lighter_quantity_min = config.lighter_quantity_min
+        self._lighter_quantity_max = config.lighter_quantity_max
+        self._lighter_quantity_step = Decimal("0.001")
+        self._current_cycle_lighter_quantity: Optional[Decimal] = None
+
+        base_lighter_quantity = config.lighter_quantity
+        if self._lighter_quantity_min is not None and self._lighter_quantity_max is not None:
+            base_lighter_quantity = self._lighter_quantity_max
+
         self.aster_config = TradingConfig(
             ticker=config.aster_ticker.upper(),
             contract_id="",
@@ -116,7 +128,7 @@ class HedgingCycleExecutor:
         self.lighter_config = TradingConfig(
             ticker=config.lighter_ticker,
             contract_id="",
-            quantity=config.lighter_quantity,
+            quantity=base_lighter_quantity,
             take_profit=config.take_profit_pct,
             tick_size=Decimal(0),
             direction=self._lighter_initial_direction(),
@@ -154,8 +166,13 @@ class HedgingCycleExecutor:
                 "WARNING",
             )
 
+        if self._lighter_quantity_min is not None and self._lighter_quantity_max is not None:
+            lighter_quantity_display = f"{self._lighter_quantity_min}-{self._lighter_quantity_max} (step {self._lighter_quantity_step})"
+        else:
+            lighter_quantity_display = f"{self.config.lighter_quantity}"
+
         self.logger.log(
-            f"Configured leg quantities -> Aster: {self.config.aster_quantity}, Lighter: {self.config.lighter_quantity}",
+            f"Configured leg quantities -> Aster: {self.config.aster_quantity}, Lighter: {lighter_quantity_display}",
             "INFO",
         )
         self.logger.log("Hedging cycle setup complete", "INFO")
@@ -180,6 +197,7 @@ class HedgingCycleExecutor:
 
         # Leg 1: Aster maker entry
         self._last_leg1_price = None
+        self._current_cycle_lighter_quantity = None
         entry_direction = self.config.direction
         leg1 = await self._execute_aster_maker(leg_name="LEG1", direction=entry_direction)
         results.append(leg1)
@@ -204,6 +222,8 @@ class HedgingCycleExecutor:
             leg_name="LEG4", direction=leg4_direction, reference_price=leg3.price
         )
         results.append(leg4)
+
+        self._current_cycle_lighter_quantity = None
 
         self.logger.log("Hedging cycle completed successfully", "INFO")
         return results
@@ -461,6 +481,18 @@ class HedgingCycleExecutor:
         max_attempts = min(5, max(1, self.config.max_retries))
         current_slippage = self.config.slippage_pct
         last_error: Optional[Exception] = None
+        if self._current_cycle_lighter_quantity is None:
+            order_quantity = self._select_lighter_order_quantity()
+            self._current_cycle_lighter_quantity = order_quantity
+            quantity_source = "randomized"
+        else:
+            order_quantity = self._current_cycle_lighter_quantity
+            quantity_source = "reused"
+
+        self.logger.log(
+            f"{leg_name} | Using Lighter order quantity {order_quantity} ({quantity_source})",
+            "DEBUG",
+        )
 
         for attempt in range(1, max_attempts + 1):
             target_price = self._calculate_taker_price_from_reference(
@@ -472,7 +504,7 @@ class HedgingCycleExecutor:
             start = time.time()
             order_result = await self.lighter_client.place_limit_order(
                 self.lighter_config.contract_id,
-                self.config.lighter_quantity,
+                order_quantity,
                 target_price,
                 direction,
             )
@@ -763,6 +795,28 @@ class HedgingCycleExecutor:
 
         return _round_to_tick(price, tick)
 
+    def _select_lighter_order_quantity(self) -> Decimal:
+        if self._lighter_quantity_min is None or self._lighter_quantity_max is None:
+            return self.config.lighter_quantity
+
+        min_units = int(
+            (self._lighter_quantity_min / self._lighter_quantity_step).to_integral_value(
+                rounding=ROUND_HALF_UP
+            )
+        )
+        max_units = int(
+            (self._lighter_quantity_max / self._lighter_quantity_step).to_integral_value(
+                rounding=ROUND_HALF_UP
+            )
+        )
+
+        if max_units < min_units:
+            raise ValueError("Configured Lighter quantity range is invalid")
+
+        selected_units = random.randint(min_units, max_units)
+        quantity = Decimal(selected_units) * self._lighter_quantity_step
+        return quantity.quantize(self._lighter_quantity_step)
+
     def _calculate_emergency_limit_price(self, base_price: Decimal, side: str) -> Decimal:
         if base_price <= 0:
             raise ValueError("Base price for emergency order must be positive")
@@ -884,6 +938,16 @@ def _parse_args() -> argparse.Namespace:
         help="Override quantity for Lighter taker legs (defaults to --quantity)",
     )
     parser.add_argument(
+        "--lighter-quantity-min",
+        type=_decimal_type,
+        help="Optional minimum quantity for Lighter taker legs when randomizing",
+    )
+    parser.add_argument(
+        "--lighter-quantity-max",
+        type=_decimal_type,
+        help="Optional maximum quantity for Lighter taker legs when randomizing",
+    )
+    parser.add_argument(
         "--direction",
         choices=["buy", "sell"],
         default="buy",
@@ -922,7 +986,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-retries",
         type=int,
-        default=100,
+        default=500,
         help="Maximum number of retries for Aster maker orders before aborting",
     )
     parser.add_argument(
@@ -1105,12 +1169,46 @@ async def _async_main(args: argparse.Namespace) -> None:
 
     dotenv.load_dotenv(env_path)
 
+    lighter_quantity_min = args.lighter_quantity_min
+    lighter_quantity_max = args.lighter_quantity_max
+
+    if (lighter_quantity_min is None) != (lighter_quantity_max is None):
+        raise ValueError("Both --lighter-quantity-min and --lighter-quantity-max must be provided together")
+
+    if lighter_quantity_min is not None and lighter_quantity_max is not None:
+        if lighter_quantity_min <= 0 or lighter_quantity_max <= 0:
+            raise ValueError("Lighter quantity range values must be positive")
+        if lighter_quantity_min > lighter_quantity_max:
+            raise ValueError("--lighter-quantity-min cannot exceed --lighter-quantity-max")
+
+        step = Decimal("0.001")
+        try:
+            normalized_min = lighter_quantity_min.quantize(step)
+            normalized_max = lighter_quantity_max.quantize(step)
+        except InvalidOperation as exc:
+            raise ValueError("Lighter quantity range must align to 0.001 precision") from exc
+
+        if normalized_min != lighter_quantity_min or normalized_max != lighter_quantity_max:
+            raise ValueError("Lighter quantity range must align to 0.001 precision")
+
+        lighter_quantity_min = normalized_min
+        lighter_quantity_max = normalized_max
+
+    if args.lighter_quantity is not None:
+        lighter_quantity_base = args.lighter_quantity
+    elif lighter_quantity_max is not None:
+        lighter_quantity_base = lighter_quantity_max
+    else:
+        lighter_quantity_base = args.quantity
+
     config = CycleConfig(
         aster_ticker=args.aster_ticker,
         lighter_ticker=args.lighter_ticker,
         quantity=args.quantity,
         aster_quantity=args.aster_quantity if args.aster_quantity is not None else args.quantity,
-        lighter_quantity=args.lighter_quantity if args.lighter_quantity is not None else args.quantity,
+        lighter_quantity=lighter_quantity_base,
+        lighter_quantity_min=lighter_quantity_min,
+        lighter_quantity_max=lighter_quantity_max,
         direction=args.direction,
         take_profit_pct=args.take_profit,
         slippage_pct=args.slippage,
