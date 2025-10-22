@@ -608,8 +608,38 @@ class LighterClient(BaseExchangeClient):
 
         # Find position for current market
         for position in positions:
-            if position.market_id == self.config.contract_id:
-                return Decimal(position.position)
+            market_identifier = getattr(position, "market_id", None)
+            if market_identifier != self.config.contract_id:
+                continue
+
+            raw_quantity = self._decimal_or_zero(getattr(position, "position", None))
+
+            sign_value = getattr(position, "sign", None)
+            sign_multiplier: Optional[int] = None
+
+            if sign_value is not None:
+                try:
+                    sign_multiplier = int(sign_value)
+                except (TypeError, ValueError):
+                    sign_multiplier = None
+
+            if sign_multiplier is None:
+                side_value = getattr(position, "side", None)
+                if isinstance(side_value, str):
+                    side_normalized = side_value.strip().lower()
+                    if side_normalized in {"sell", "short", "ask"}:
+                        sign_multiplier = -1
+                    elif side_normalized in {"buy", "long", "bid"}:
+                        sign_multiplier = 1
+
+            if sign_multiplier is None:
+                sign_multiplier = 1 if raw_quantity >= 0 else -1
+
+            if sign_multiplier == 0:
+                return Decimal(0)
+
+            signed_quantity = raw_quantity if sign_multiplier > 0 else -raw_quantity
+            return signed_quantity
 
         return Decimal(0)
 
