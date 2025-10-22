@@ -1154,6 +1154,7 @@ def _print_pnl_progress(
     cumulative_volume: Decimal,
     cycle_duration_seconds: float,
     lighter_balance: Optional[Decimal],
+    total_runtime_seconds: float,
 ) -> None:
     header = f"PnL Progress After Cycle {cycle_number}"
     print(header)
@@ -1163,6 +1164,7 @@ def _print_pnl_progress(
     print(f"Cycle Volume (USD): {cycle_volume}")
     print(f"Cumulative Volume (USD): {cumulative_volume}")
     print(f"Cycle Duration: {cycle_duration_seconds:.2f}s")
+    print(f"Runtime Since Start: {total_runtime_seconds:.2f}s")
     if lighter_balance is not None:
         print(f"Lighter Available Balance: {lighter_balance}")
     else:
@@ -1234,6 +1236,7 @@ async def _async_main(args: argparse.Namespace) -> None:
     cycle_index = 0
     cumulative_pnl = Decimal("0")
     cumulative_volume = Decimal("0")
+    run_start_time = time.time()
     try:
         while True:
             cycle_index += 1
@@ -1241,6 +1244,7 @@ async def _async_main(args: argparse.Namespace) -> None:
             cycle_start_time = time.time()
             results = await executor.execute_cycle()
             cycle_duration = time.time() - cycle_start_time
+            total_runtime = time.time() - run_start_time
             executor.logger.log(f"Completed hedging cycle #{cycle_index}", "INFO")
             _print_summary(results, cycle_number=cycle_index)
 
@@ -1268,6 +1272,7 @@ async def _async_main(args: argparse.Namespace) -> None:
                 cumulative_volume,
                 cycle_duration,
                 lighter_balance,
+                total_runtime,
             )
 
             try:
