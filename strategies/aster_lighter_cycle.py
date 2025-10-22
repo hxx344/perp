@@ -796,7 +796,8 @@ class HedgingCycleExecutor:
             self.logger.log("No Lighter position detected; no emergency action required", "INFO")
             return
 
-        side = "sell" if position > 0 else "buy"
+        # Lighter reports positive positions when we're short (need to buy back) and negative when long.
+        side = "buy" if position > 0 else "sell"
         quantity = abs(position)
 
         reference_price = self._last_leg1_price
