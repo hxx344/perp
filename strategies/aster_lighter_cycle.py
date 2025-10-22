@@ -1237,12 +1237,50 @@ async def _async_main(args: argparse.Namespace) -> None:
     cumulative_pnl = Decimal("0")
     cumulative_volume = Decimal("0")
     run_start_time = time.time()
+    network_error_count = 0
+    network_error_exceptions: Tuple[type[BaseException], ...] = (
+        asyncio.TimeoutError,
+        ConnectionError,
+        OSError,
+    )
     try:
         while True:
             cycle_index += 1
             executor.logger.log(f"Starting hedging cycle #{cycle_index}", "INFO")
             cycle_start_time = time.time()
-            results = await executor.execute_cycle()
+            try:
+                results = await executor.execute_cycle()
+            except network_error_exceptions as exc:
+                network_error_count += 1
+                executor.logger.log(
+                    f"Cycle {cycle_index} aborted due to network error: {exc}",
+                    "ERROR",
+                )
+                try:
+                    await executor.ensure_lighter_flat()
+                except Exception as flatten_exc:
+                    executor.logger.log(
+                        f"Emergency flatten after network error failed: {flatten_exc}",
+                        "ERROR",
+                    )
+
+                if network_error_count >= 3:
+                    executor.logger.log(
+                        "Encountered 3 consecutive network errors; stopping execution.",
+                        "ERROR",
+                    )
+                    break
+
+                pause_seconds = 30
+                executor.logger.log(
+                    f"Pausing {pause_seconds} seconds before attempting next cycle",
+                    "WARNING",
+                )
+                await asyncio.sleep(pause_seconds)
+                continue
+            else:
+                network_error_count = 0
+
             cycle_duration = time.time() - cycle_start_time
             total_runtime = time.time() - run_start_time
             executor.logger.log(f"Completed hedging cycle #{cycle_index}", "INFO")
