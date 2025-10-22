@@ -131,6 +131,7 @@ class HedgingCycleExecutor:
 
         self.aster_client: Optional["AsterClient"] = None
         self.lighter_client: Optional["LighterClient"] = None
+        self._last_leg1_price: Optional[Decimal] = None
 
     def _lighter_initial_direction(self) -> str:
         return "sell" if self.config.direction == "buy" else "buy"
@@ -178,6 +179,7 @@ class HedgingCycleExecutor:
         results: List[LegResult] = []
 
         # Leg 1: Aster maker entry
+        self._last_leg1_price = None
         entry_direction = self.config.direction
         leg1 = await self._execute_aster_maker(leg_name="LEG1", direction=entry_direction)
         results.append(leg1)
@@ -251,6 +253,8 @@ class HedgingCycleExecutor:
             f"{leg_name} | Aster maker filled {fill_info.filled_size} @ {fill_info.price}",
             "INFO",
         )
+
+        self._last_leg1_price = fill_info.price
 
         return LegResult(
             name=leg_name,
@@ -396,6 +400,8 @@ class HedgingCycleExecutor:
             f"{leg_name} | Virtual Aster maker filled {quantity} @ {fill_price} (target {target_price})",
             "INFO",
         )
+
+        self._last_leg1_price = fill_price
 
         return LegResult(
             name=leg_name,
@@ -757,6 +763,98 @@ class HedgingCycleExecutor:
 
         return _round_to_tick(price, tick)
 
+    def _calculate_emergency_limit_price(self, base_price: Decimal, side: str) -> Decimal:
+        if base_price <= 0:
+            raise ValueError("Base price for emergency order must be positive")
+
+        tick = self.lighter_config.tick_size if self.lighter_config.tick_size > 0 else Decimal("0")
+        slip_fraction = max(self.config.slippage_pct, Decimal("0")) / Decimal("100")
+        if slip_fraction <= 0:
+            slip_fraction = Decimal("0.0005")
+
+        if side.lower() == "sell":
+            price = base_price * (Decimal("1") - slip_fraction)
+        else:
+            price = base_price * (Decimal("1") + slip_fraction)
+
+        if tick > 0:
+            price = _round_to_tick(price, tick)
+
+        minimal_step = tick if tick > 0 else Decimal("0.00000001")
+        if price <= 0:
+            price = minimal_step
+
+        return price
+
+    async def ensure_lighter_flat(self) -> None:
+        if not self.lighter_client:
+            self.logger.log("Lighter client unavailable; skipping emergency flatten", "WARNING")
+            return
+
+        position = await self.lighter_client.get_account_positions()
+        if position == 0:
+            self.logger.log("No Lighter position detected; no emergency action required", "INFO")
+            return
+
+        side = "sell" if position > 0 else "buy"
+        quantity = abs(position)
+
+        reference_price = self._last_leg1_price
+        if reference_price is None or reference_price <= 0:
+            try:
+                best_bid, best_ask = await self.lighter_client.fetch_bbo_prices(self.lighter_config.contract_id)
+                reference_price = best_bid if side == "sell" else best_ask
+            except Exception as exc:  # pragma: no cover - fallback logging
+                self.logger.log(
+                    f"Unable to obtain reference price for emergency flatten: {exc}",
+                    "ERROR",
+                )
+                return
+
+        try:
+            limit_price = self._calculate_emergency_limit_price(reference_price, side)
+        except Exception as exc:
+            self.logger.log(
+                f"Failed to calculate emergency price using reference {reference_price}: {exc}",
+                "ERROR",
+            )
+            return
+
+        if not self.lighter_config.contract_id:
+            self.logger.log("Lighter contract ID missing; cannot place emergency order", "ERROR")
+            return
+
+        self.logger.log(
+            f"Emergency flatten on Lighter: position={position}, side={side}, quantity={quantity}, limit={limit_price}",
+            "WARNING",
+        )
+
+        order_result = await self.lighter_client.place_limit_order(
+            self.lighter_config.contract_id,
+            quantity,
+            limit_price,
+            side,
+        )
+
+        if not order_result.success or not order_result.order_id:
+            self.logger.log(
+                f"Emergency flatten order failed: {order_result.error_message}",
+                "ERROR",
+            )
+            return
+
+        try:
+            fill_info = await self._wait_for_lighter_fill(str(order_result.order_id), "EMERGENCY_FLATTEN")
+            self.logger.log(
+                f"Emergency flatten filled {fill_info.filled_size} @ {fill_info.price}",
+                "INFO",
+            )
+        except Exception as exc:
+            self.logger.log(
+                f"Emergency flatten order {order_result.order_id} did not complete: {exc}",
+                "ERROR",
+            )
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -1052,6 +1150,14 @@ async def _async_main(args: argparse.Namespace) -> None:
                 cumulative_volume,
             )
 
+            try:
+                await executor.ensure_lighter_flat()
+            except Exception as exc:
+                executor.logger.log(
+                    f"Emergency flatten failed after cycle {cycle_index}: {exc}",
+                    "ERROR",
+                )
+
             if config.max_cycles and cycle_index >= config.max_cycles:
                 executor.logger.log(
                     f"Reached configured cycle limit ({config.max_cycles}); stopping execution",
@@ -1066,6 +1172,13 @@ async def _async_main(args: argparse.Namespace) -> None:
                 )
                 await asyncio.sleep(config.delay_between_cycles)
     finally:
+        try:
+            await executor.ensure_lighter_flat()
+        except Exception as exc:
+            executor.logger.log(
+                f"Emergency flatten failed during shutdown: {exc}",
+                "ERROR",
+            )
         await executor.shutdown()
 
 
