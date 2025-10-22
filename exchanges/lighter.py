@@ -583,19 +583,23 @@ class LighterClient(BaseExchangeClient):
         return contract_orders
 
     @query_retry(reraise=True)
-    async def _fetch_positions_with_retry(self) -> List[Dict[str, Any]]:
-        """Get positions using official SDK."""
-        # Use shared API client
+    async def _fetch_account_with_retry(self):
+        """Get primary account details using official SDK."""
         account_api = lighter.AccountApi(self.api_client)
 
-        # Get account info
         account_data = await account_api.account(by="index", value=str(self.account_index))
 
         if not account_data or not account_data.accounts:
-            self.logger.log("Failed to get positions", "ERROR")
-            raise ValueError("Failed to get positions")
+            self.logger.log("Failed to get account data", "ERROR")
+            raise ValueError("Failed to get account data")
 
-        return account_data.accounts[0].positions
+        return account_data.accounts[0]
+
+    @query_retry(reraise=True)
+    async def _fetch_positions_with_retry(self) -> List[Any]:
+        """Get positions using official SDK."""
+        account = await self._fetch_account_with_retry()
+        return account.positions
 
     async def get_account_positions(self) -> Decimal:
         """Get account positions using official SDK."""
@@ -608,6 +612,19 @@ class LighterClient(BaseExchangeClient):
                 return Decimal(position.position)
 
         return Decimal(0)
+
+    async def get_available_balance(self) -> Decimal:
+        """Fetch the available balance from the primary account."""
+        account = await self._fetch_account_with_retry()
+
+        balance_value = getattr(account, "available_balance", None)
+        if balance_value is None:
+            balance_value = getattr(account, "availableBalance", None)
+        if balance_value is None and hasattr(account, "to_dict"):
+            account_dict = account.to_dict() or {}
+            balance_value = account_dict.get("available_balance") or account_dict.get("availableBalance")
+
+        return self._decimal_or_zero(balance_value)
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID for a ticker."""

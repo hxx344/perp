@@ -1152,6 +1152,8 @@ def _print_pnl_progress(
     cumulative_pnl: Decimal,
     cycle_volume: Decimal,
     cumulative_volume: Decimal,
+    cycle_duration_seconds: float,
+    lighter_balance: Optional[Decimal],
 ) -> None:
     header = f"PnL Progress After Cycle {cycle_number}"
     print(header)
@@ -1160,6 +1162,11 @@ def _print_pnl_progress(
     print(f"Cumulative PnL: {cumulative_pnl}")
     print(f"Cycle Volume (USD): {cycle_volume}")
     print(f"Cumulative Volume (USD): {cumulative_volume}")
+    print(f"Cycle Duration: {cycle_duration_seconds:.2f}s")
+    if lighter_balance is not None:
+        print(f"Lighter Available Balance: {lighter_balance}")
+    else:
+        print("Lighter Available Balance: unavailable")
 
 
 async def _async_main(args: argparse.Namespace) -> None:
@@ -1231,7 +1238,9 @@ async def _async_main(args: argparse.Namespace) -> None:
         while True:
             cycle_index += 1
             executor.logger.log(f"Starting hedging cycle #{cycle_index}", "INFO")
+            cycle_start_time = time.time()
             results = await executor.execute_cycle()
+            cycle_duration = time.time() - cycle_start_time
             executor.logger.log(f"Completed hedging cycle #{cycle_index}", "INFO")
             _print_summary(results, cycle_number=cycle_index)
 
@@ -1241,12 +1250,24 @@ async def _async_main(args: argparse.Namespace) -> None:
             cycle_volume = _calculate_cycle_volume(results)
             cumulative_volume += cycle_volume
 
+            lighter_balance: Optional[Decimal] = None
+            if executor.lighter_client:
+                try:
+                    lighter_balance = await executor.lighter_client.get_available_balance()
+                except Exception as exc:
+                    executor.logger.log(
+                        f"Unable to fetch Lighter balance after cycle {cycle_index}: {exc}",
+                        "WARNING",
+                    )
+
             _print_pnl_progress(
                 cycle_index,
                 cycle_pnl,
                 cumulative_pnl,
                 cycle_volume,
                 cumulative_volume,
+                cycle_duration,
+                lighter_balance,
             )
 
             try:
