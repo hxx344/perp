@@ -247,6 +247,9 @@ Key options:
 
 - `--cycles`: How many complete hedging cycles to execute. Use `0` to keep the script running until you interrupt it manually.
 - `--cycle-delay`: Optional pause (seconds) between successive cycles when looping.
+- `--virtual-aster-maker`: Simulate the Aster maker legs without sending real orders; combine with
+   `--virtual-maker-price-source bn` to watch Binance futures level-4 prices instead of Aster depth, and
+   optionally override the Binance contract symbol via `--virtual-maker-symbol` (defaults to the resolved Aster contract ID).
 
 ## GRVT–Lighter Hedging Cycle
 

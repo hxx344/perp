@@ -283,6 +283,9 @@ python strategies/aster_lighter_cycle.py \
 - `--take-profit` 参数目前保留兼容性，但不会影响 Aster 反向 Maker 的挂单价格。
 - 默认等待超时为 5 秒，可通过 `--max-wait` 调整。
 - `--max-retries` 默认 100 次，`--retry-delay` 默认 5 秒，两者共同控制 Aster Maker 单的重试次数与重试间隔，避免超时直接退出。
+- 如果仅想在虚拟环境中监听价格并触发 Lighter Taker，可使用 `--virtual-aster-maker`；
+   配合 `--virtual-maker-price-source bn` 可改为监听 Binance 永续合约的买四/卖四价格，
+   如需自定义 Binance 符号可通过 `--virtual-maker-symbol` 覆盖（默认沿用解析到的 Aster 合约 ID）。
 
 ## GRVT-Lighter 对冲循环
 

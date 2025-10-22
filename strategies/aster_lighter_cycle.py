@@ -25,6 +25,8 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import List, Optional, TYPE_CHECKING, Tuple, cast
 
+import aiohttp
+
 import dotenv
 
 from exchanges import ExchangeFactory
@@ -36,6 +38,110 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
     from exchanges.aster import AsterClient
     from exchanges.lighter import LighterClient
 
+
+class _BinanceFuturesPriceSource:
+    """Lightweight market data client for Binance USDT-margined futures."""
+
+    _BASE_URL = "https://fapi.binance.com"
+
+    def __init__(self, symbol: str, logger: TradingLogger):
+        self.symbol = symbol.upper()
+        self.logger = logger
+
+    async def _get(self, path: str, params: Optional[dict] = None) -> dict:
+        if params is None:
+            params = {}
+
+        url = f"{self._BASE_URL}{path}"
+        timeout = aiohttp.ClientTimeout(total=5)
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as response:
+                try:
+                    payload = await response.json()
+                except aiohttp.ContentTypeError as exc:
+                    text = await response.text()
+                    raise RuntimeError(f"Binance response not JSON: {text}") from exc
+
+                if response.status != 200:
+                    message = payload.get("msg") if isinstance(payload, dict) else payload
+                    raise RuntimeError(
+                        f"Binance request {path} failed with status {response.status}: {message}"
+                    )
+
+                return payload
+
+    @staticmethod
+    def _to_decimal_pairs(levels: list) -> List[Tuple[Decimal, Decimal]]:
+        results: List[Tuple[Decimal, Decimal]] = []
+        for item in levels:
+            if not isinstance(item, list) or len(item) < 2:
+                continue
+            try:
+                price = Decimal(item[0])
+                quantity = Decimal(item[1])
+            except (InvalidOperation, ValueError, TypeError):
+                continue
+            if price <= 0 or quantity < 0:
+                continue
+            results.append((price, quantity))
+        return results
+
+    @staticmethod
+    def _select_depth_price(levels: List[Tuple[Decimal, Decimal]], level: int) -> Optional[Decimal]:
+        if level <= 0:
+            return None
+
+        if level <= len(levels):
+            return levels[level - 1][0]
+
+        if levels:
+            return levels[-1][0]
+
+        return None
+
+    async def fetch_order_book(self, limit: int = 50) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
+        limit = max(5, min(limit, 500))
+        payload = await self._get("/fapi/v1/depth", {"symbol": self.symbol, "limit": limit})
+
+        bids = self._to_decimal_pairs(payload.get("bids", []))
+        asks = self._to_decimal_pairs(payload.get("asks", []))
+        return bids, asks
+
+    async def fetch_bbo_prices(self) -> Tuple[Decimal, Decimal]:
+        payload = await self._get("/fapi/v1/ticker/bookTicker", {"symbol": self.symbol})
+
+        try:
+            bid = Decimal(payload.get("bidPrice", "0"))
+        except (InvalidOperation, ValueError, TypeError):
+            bid = Decimal("0")
+
+        try:
+            ask = Decimal(payload.get("askPrice", "0"))
+        except (InvalidOperation, ValueError, TypeError):
+            ask = Decimal("0")
+
+        return bid, ask
+
+    async def get_depth_level_price(
+        self,
+        direction: str,
+        level: int,
+    ) -> Tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+        bids, asks = await self.fetch_order_book(limit=max(level, 20))
+
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+
+        direction_lower = direction.lower()
+        if direction_lower == "buy":
+            depth_price = self._select_depth_price(bids, level)
+        elif direction_lower == "sell":
+            depth_price = self._select_depth_price(asks, level)
+        else:
+            depth_price = None
+
+        return depth_price, best_bid, best_ask
 
 def _decimal_type(value: str) -> Decimal:
     """Argparse helper that parses Decimal values with validation."""
@@ -67,6 +173,8 @@ class CycleConfig:
     virtual_aster_maker: bool
     lighter_quantity_min: Optional[Decimal] = None
     lighter_quantity_max: Optional[Decimal] = None
+    virtual_aster_price_source: str = "aster"
+    virtual_aster_reference_symbol: Optional[str] = None
 
 
 @dataclass
@@ -140,6 +248,16 @@ class HedgingCycleExecutor:
         self._lighter_quantity_max = config.lighter_quantity_max
         self._lighter_quantity_step = Decimal("0.001")
         self._current_cycle_lighter_quantity: Optional[Decimal] = None
+        self._virtual_price_source = (config.virtual_aster_price_source or "aster").lower()
+        allowed_virtual_sources = {"aster", "bn"}
+        if self._virtual_price_source not in allowed_virtual_sources:
+            self.logger.log(
+                f"Invalid virtual maker price source '{config.virtual_aster_price_source}', fallback to 'aster'",
+                "WARNING",
+            )
+            self._virtual_price_source = "aster"
+        self._virtual_reference_symbol = config.virtual_aster_reference_symbol
+        self._binance_price_client: Optional["_BinanceFuturesPriceSource"] = None
 
         base_lighter_quantity = config.lighter_quantity
         if self._lighter_quantity_min is not None and self._lighter_quantity_max is not None:
@@ -194,8 +312,31 @@ class HedgingCycleExecutor:
         await self.aster_client.connect()
         await self.lighter_client.connect()
 
-        await self.aster_client.get_contract_attributes()
+        aster_contract_id, _ = await self.aster_client.get_contract_attributes()
         await self.lighter_client.get_contract_attributes()
+
+        if not self._virtual_reference_symbol:
+            self._virtual_reference_symbol = aster_contract_id
+
+        if self._virtual_reference_symbol:
+            normalized_symbol = (
+                self._virtual_reference_symbol.replace("-", "").replace("/", "").strip().upper()
+            )
+            if normalized_symbol:
+                self._virtual_reference_symbol = normalized_symbol
+
+        if self._virtual_price_source == "bn" and not self._virtual_reference_symbol:
+            raise ValueError("Virtual maker price source 'bn' requires a reference symbol")
+
+        if self._virtual_price_source == "bn" and self._virtual_reference_symbol:
+            self._binance_price_client = _BinanceFuturesPriceSource(
+                symbol=self._virtual_reference_symbol,
+                logger=self.logger,
+            )
+            self.logger.log(
+                f"Virtual maker price source set to Binance ({self._virtual_reference_symbol})",
+                "INFO",
+            )
         if not await self.lighter_client.wait_for_market_data(timeout=10):
             self.logger.log(
                 "Lighter market data did not become ready within 10 seconds; proceeding with caution",
@@ -419,7 +560,7 @@ class HedgingCycleExecutor:
             skip_retry_delay = False
 
             try:
-                target_price = await self._calculate_aster_maker_price(direction)
+                target_price = await self._calculate_virtual_maker_price(direction)
             except Exception as exc:  # pragma: no cover - defensive logging
                 last_error = str(exc)
                 self.logger.log(
@@ -452,8 +593,9 @@ class HedgingCycleExecutor:
         latency = max(fill_timestamp - overall_start, 0.0)
         order_id = f"virtual-{leg_name}-{int(fill_timestamp * 1000)}"
 
+        source_label = "binance" if self._virtual_price_source == "bn" else "aster"
         self.logger.log(
-            f"{leg_name} | Virtual Aster maker filled {quantity} @ {fill_price} (target {target_price})",
+            f"{leg_name} | Virtual Aster maker filled {quantity} @ {fill_price} (target {target_price}, source={source_label})",
             "INFO",
         )
 
@@ -481,14 +623,17 @@ class HedgingCycleExecutor:
             raise RuntimeError("Aster client is not connected")
 
         contract_id = self.aster_config.contract_id
-        if not contract_id:
+        if not contract_id and not (self._virtual_price_source == "bn" and self._binance_price_client):
             raise RuntimeError("Aster contract id is not initialized")
 
         deadline = time.time() + self.config.max_wait_seconds
         poll_interval = max(self.config.poll_interval, 0.05)
 
         while True:
-            best_bid, best_ask = await self.aster_client.fetch_bbo_prices(contract_id)
+            if self._virtual_price_source == "bn" and self._binance_price_client:
+                best_bid, best_ask = await self._binance_price_client.fetch_bbo_prices()
+            else:
+                best_bid, best_ask = await self.aster_client.fetch_bbo_prices(contract_id)
             now = time.time()
 
             if direction == "buy":
@@ -805,6 +950,70 @@ class HedgingCycleExecutor:
 
         return price
 
+    async def _calculate_binance_maker_price(self, direction: str) -> Decimal:
+        if not self._binance_price_client:
+            raise RuntimeError("Binance price source is not configured")
+
+        tick = self.aster_config.tick_size if self.aster_config.tick_size > 0 else Decimal("0")
+        depth_price, best_bid, best_ask = await self._binance_price_client.get_depth_level_price(
+            direction,
+            level=4,
+        )
+
+        best_bid = best_bid if best_bid is not None else Decimal("0")
+        best_ask = best_ask if best_ask is not None else Decimal("0")
+
+        price = depth_price if depth_price is not None else None
+
+        if price is None or price <= 0:
+            fallback_bid, fallback_ask = await self._binance_price_client.fetch_bbo_prices()
+            best_bid = fallback_bid if fallback_bid > 0 else best_bid
+            best_ask = fallback_ask if fallback_ask > 0 else best_ask
+
+            if direction == "sell":
+                if best_ask > 0:
+                    price = best_ask
+                elif best_bid > 0 and tick > 0:
+                    price = best_bid + tick
+            else:
+                if best_bid > 0:
+                    price = best_bid
+                elif best_ask > 0 and tick > 0:
+                    price = best_ask - tick
+
+        if price is None or price <= 0:
+            raise ValueError("Unable to determine Binance maker price from market data")
+
+        if tick > 0:
+            price = _round_to_tick(price, tick)
+
+        minimal_step = tick if tick > 0 else Decimal("0.00000001")
+
+        if direction == "sell" and best_bid > 0 and price <= best_bid:
+            price = best_bid + minimal_step
+            if tick > 0:
+                price = _round_to_tick(price, tick)
+        elif direction == "buy" and best_ask > 0 and price >= best_ask:
+            price = best_ask - minimal_step
+            if tick > 0:
+                price = _round_to_tick(price, tick)
+
+        minimal_price = tick if tick > 0 else minimal_step
+        if price < minimal_price:
+            price = minimal_price
+            if tick > 0:
+                price = _round_to_tick(price, tick)
+
+        if price <= 0:
+            raise ValueError("Calculated Binance maker price is non-positive")
+
+        return price
+
+    async def _calculate_virtual_maker_price(self, direction: str) -> Decimal:
+        if self._virtual_price_source == "bn" and self._binance_price_client:
+            return await self._calculate_binance_maker_price(direction)
+        return await self._calculate_aster_maker_price(direction)
+
     def _calculate_taker_price_from_reference(
         self,
         direction: str,
@@ -1037,6 +1246,16 @@ def _parse_args() -> argparse.Namespace:
         help="Simulate Aster maker legs without sending real orders",
     )
     parser.add_argument(
+        "--virtual-maker-price-source",
+        choices=["aster", "bn"],
+        default="aster",
+        help="When --virtual-aster-maker is set, choose the market data source for virtual maker fills",
+    )
+    parser.add_argument(
+        "--virtual-maker-symbol",
+        help="Optional contract symbol used by the virtual maker price source (defaults to the resolved Aster contract id)",
+    )
+    parser.add_argument(
         "--cycles",
         type=int,
         default=0,
@@ -1265,6 +1484,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         max_cycles=max(0, args.cycles),
         delay_between_cycles=max(0.0, args.cycle_delay),
         virtual_aster_maker=args.virtual_aster_maker,
+        virtual_aster_price_source=args.virtual_maker_price_source,
+        virtual_aster_reference_symbol=args.virtual_maker_symbol,
     )
 
     executor = HedgingCycleExecutor(config)
