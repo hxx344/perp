@@ -92,6 +92,42 @@ def _round_to_tick(value: Decimal, tick: Decimal) -> Decimal:
     return value.quantize(tick, rounding=ROUND_HALF_UP)
 
 
+def _format_duration(seconds: float) -> str:
+    """Represent a duration in days/hours/minutes/seconds."""
+    if seconds < 0:
+        seconds = 0.0
+
+    whole_seconds = int(seconds)
+    fractional = seconds - whole_seconds
+
+    days, remainder = divmod(whole_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+    secs = secs + fractional
+
+    return f"{days}d {hours}h {minutes}m {secs:.2f}s"
+
+
+def _format_decimal(value: Optional[Decimal], places: int = 6) -> str:
+    if value is None:
+        return "N/A"
+
+    quantize_exp = Decimal(1).scaleb(-places)
+    try:
+        quantized = value.quantize(quantize_exp, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return str(value)
+
+    text = f"{quantized:f}"
+    if "e" in text.lower():
+        text = format(quantized, "f")
+
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+
+    return text
+
+
 class HedgingCycleExecutor:
     """Coordinates the four-leg hedging cycle between Aster and Lighter."""
 
@@ -1040,16 +1076,16 @@ def _print_summary(results: List[LegResult], cycle_number: Optional[int] = None)
     for leg in results:
         parts = [
             f"{leg.name} | {leg.exchange.upper():7s} | {leg.side.upper():4s}",
-            f"qty={leg.quantity}",
-            f"fill={leg.price}",
+            f"qty={_format_decimal(leg.quantity)}",
+            f"fill={_format_decimal(leg.price, places=2)}",
             f"status={leg.status}",
             f"latency={leg.latency_seconds:.3f}s",
         ]
 
         if leg.requested_price is not None:
-            parts.insert(3, f"limit={leg.requested_price}")
+            parts.insert(3, f"limit={_format_decimal(leg.requested_price, places=2)}")
         if leg.reference_price is not None:
-            parts.insert(3, f"ref={leg.reference_price}")
+            parts.insert(3, f"ref={_format_decimal(leg.reference_price, places=2)}")
 
         print(" | ".join(parts))
 
@@ -1159,14 +1195,14 @@ def _print_pnl_progress(
     header = f"PnL Progress After Cycle {cycle_number}"
     print(header)
     print("-" * len(header))
-    print(f"Cycle PnL: {cycle_pnl}")
-    print(f"Cumulative PnL: {cumulative_pnl}")
-    print(f"Cycle Volume (USD): {cycle_volume}")
-    print(f"Cumulative Volume (USD): {cumulative_volume}")
+    print(f"Cycle PnL: {_format_decimal(cycle_pnl, places=2)}")
+    print(f"Cumulative PnL: {_format_decimal(cumulative_pnl, places=2)}")
+    print(f"Cycle Volume (USD): {_format_decimal(cycle_volume, places=2)}")
+    print(f"Cumulative Volume (USD): {_format_decimal(cumulative_volume, places=2)}")
     print(f"Cycle Duration: {cycle_duration_seconds:.2f}s")
-    print(f"Runtime Since Start: {total_runtime_seconds:.2f}s")
+    print(f"Runtime Since Start: {_format_duration(total_runtime_seconds)}")
     if lighter_balance is not None:
-        print(f"Lighter Available Balance: {lighter_balance}")
+        print(f"Lighter Available Balance: {_format_decimal(lighter_balance, places=2)}")
     else:
         print("Lighter Available Balance: unavailable")
 
