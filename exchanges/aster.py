@@ -35,6 +35,7 @@ class AsterWebSocketManager:
         self._keepalive_task = None
         self._last_ping_time = None
         self.config = config
+        self._reconnect_requested = False
 
     def _generate_signature(self, params: Dict[str, Any]) -> str:
         """Generate HMAC SHA256 signature for Aster API authentication."""
@@ -142,31 +143,27 @@ class AsterWebSocketManager:
                 # Check if connection is healthy
                 if not await self._check_connection_health():
                     if self.logger:
-                        self.logger.log("Connection health check failed, reconnecting...", "WARNING")
-                    # Try to reconnect
+                        self.logger.log("Connection health check failed, requesting reconnect...", "WARNING")
+                    # Signal reconnect by closing current websocket; outer loop will reconnect
+                    self._reconnect_requested = True
                     try:
-                        await self.connect()
-                    except Exception as e:
-                        if self.logger:
-                            self.logger.log(f"Reconnection failed: {e}", "ERROR")
-                        # Wait before retrying
-                        await asyncio.sleep(30)
-                    continue
+                        if self.websocket:
+                            await self.websocket.close()
+                    finally:
+                        continue
 
                 # Check if we need to keepalive the listen key (every 50 minutes)
                 if self.listen_key and time.time() % (50 * 60) < 5 * 60:  # Within 5 minutes of 50-minute mark
                     success = await self._keepalive_listen_key()
                     if not success:
                         if self.logger:
-                            self.logger.log("Listen key keepalive failed, reconnecting...", "WARNING")
-                        # Try to reconnect
+                            self.logger.log("Listen key keepalive failed, requesting reconnect...", "WARNING")
+                        self._reconnect_requested = True
                         try:
-                            await self.connect()
-                        except Exception as e:
-                            if self.logger:
-                                self.logger.log(f"Reconnection failed: {e}", "ERROR")
-                            # Wait before retrying
-                            await asyncio.sleep(30)
+                            if self.websocket:
+                                await self.websocket.close()
+                        finally:
+                            continue
 
             except Exception as e:
                 if self.logger:
@@ -175,31 +172,61 @@ class AsterWebSocketManager:
                 await asyncio.sleep(60)
 
     async def connect(self):
-        """Connect to Aster WebSocket."""
-        try:
-            # Get listen key
-            self.listen_key = await self._get_listen_key()
-            if not self.listen_key:
-                raise Exception("Failed to get listen key")
+        """Connect to Aster WebSocket with internal reconnect loop (single task)."""
+        self.running = True
+        backoff = 1
+        max_backoff = 30
+        while self.running:
+            try:
+                # Obtain listen key
+                self.listen_key = await self._get_listen_key()
+                if not self.listen_key:
+                    raise Exception("Failed to get listen key")
 
-            # Connect to WebSocket
-            ws_url = f"{self.ws_url}/ws/{self.listen_key}"
-            self.websocket = await websockets.connect(ws_url)
-            self.running = True
+                # Establish WebSocket
+                ws_url = f"{self.ws_url}/ws/{self.listen_key}"
+                self.websocket = await websockets.connect(ws_url)
+                self._reconnect_requested = False
 
-            if self.logger:
-                self.logger.log("Connected to Aster WebSocket with listen key", "INFO")
+                if self.logger:
+                    self.logger.log("Connected to Aster WebSocket with listen key", "INFO")
 
-            # Start keepalive task
-            self._keepalive_task = asyncio.create_task(self._start_keepalive_task())
+                # Start keepalive task (ensure previous is not lingering)
+                if self._keepalive_task and not self._keepalive_task.done():
+                    self._keepalive_task.cancel()
+                    try:
+                        await self._keepalive_task
+                    except asyncio.CancelledError:
+                        pass
+                self._keepalive_task = asyncio.create_task(self._start_keepalive_task())
 
-            # Start listening for messages
-            await self._listen()
+                # Listen until disconnected
+                await self._listen()
 
-        except Exception as e:
-            if self.logger:
-                self.logger.log(f"WebSocket connection error: {e}", "ERROR")
-            raise
+            except Exception as e:
+                if self.logger:
+                    self.logger.log(f"WebSocket connection error: {e}", "ERROR")
+            finally:
+                # Cleanup
+                if self._keepalive_task and not self._keepalive_task.done():
+                    self._keepalive_task.cancel()
+                    try:
+                        await self._keepalive_task
+                    except asyncio.CancelledError:
+                        pass
+                if self.websocket:
+                    try:
+                        await self.websocket.close()
+                    except Exception:
+                        pass
+                    self.websocket = None
+
+            if not self.running:
+                break
+
+            # Backoff and reconnect
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
 
     async def _listen(self):
         """Listen for WebSocket messages."""
@@ -241,9 +268,14 @@ class AsterWebSocketManager:
                 await self._handle_order_update(data)
             elif event_type == 'listenKeyExpired':
                 if self.logger:
-                    self.logger.log("Listen key expired, reconnecting...", "WARNING")
-                # Reconnect with new listen key
-                await self.connect()
+                    self.logger.log("Listen key expired, requesting reconnect...", "WARNING")
+                # Signal reconnect by closing websocket; outer loop will reconnect
+                self._reconnect_requested = True
+                try:
+                    if self.websocket:
+                        await self.websocket.close()
+                finally:
+                    return
             else:
                 if self.logger:
                     self.logger.log(f"Unknown WebSocket message: {data}", "DEBUG")
@@ -311,7 +343,10 @@ class AsterWebSocketManager:
                 pass
 
         if self.websocket:
-            await self.websocket.close()
+            try:
+                await self.websocket.close()
+            except Exception:
+                pass
             if self.logger:
                 self.logger.log("WebSocket disconnected", "INFO")
 
