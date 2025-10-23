@@ -1436,6 +1436,7 @@ def _print_summary(
     print(header)
     print("=" * len(header))
     if logger:
+        # Log only the header to the file to avoid duplicating each leg line
         logger.log(title, "INFO")
     for leg in results:
         parts = [
@@ -1453,8 +1454,6 @@ def _print_summary(
 
         line = " | ".join(parts)
         print(line)
-        if logger:
-            logger.log(line, "INFO")
 
 
 def _to_decimal(value: Decimal | float | int | str) -> Decimal:

@@ -46,6 +46,9 @@ LOG_TO_CONSOLE=true
 LOG_TO_FILE=true
 LOG_FILE=trading_log.csv
 
+# Suppress duplicate log lines within this many seconds (set to 0 to disable)
+LOG_DEDUP_WINDOW=1.0
+
 TIMEZONE=Asia/Shanghai
 
 # EdgeX API Endpoints

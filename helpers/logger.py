@@ -43,9 +43,36 @@ class TradingLogger:
         # Prevent propagation to root logger to avoid duplicate messages
         logger.propagate = False
 
-        # Prevent duplicate handlers
+        # If handlers already exist, reuse the logger as-is
         if logger.handlers:
             return logger
+
+        class _DedupFilter(logging.Filter):
+            """Filter out exact duplicate messages within a short time window."""
+
+            def __init__(self, window_seconds: float = 1.0):
+                super().__init__()
+                self.window = float(window_seconds)
+                self._last_msg = None
+                self._last_level = None
+                self._last_time = 0.0
+
+            def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+                try:
+                    msg = record.getMessage()
+                except Exception:
+                    return True
+                now = float(getattr(record, "created", 0.0) or 0.0)
+                if (
+                    self._last_msg == msg
+                    and self._last_level == record.levelno
+                    and (now - self._last_time) <= self.window
+                ):
+                    return False
+                self._last_msg = msg
+                self._last_level = record.levelno
+                self._last_time = now
+                return True
 
         class TimeZoneFormatter(logging.Formatter):
             def __init__(self, fmt=None, datefmt=None, tz=None):
@@ -63,6 +90,14 @@ class TradingLogger:
             datefmt="%Y-%m-%d %H:%M:%S",
             tz=self.timezone
         )
+
+        # Optional de-dup filter on logger
+        try:
+            window = float(os.getenv("LOG_DEDUP_WINDOW", "0.0"))
+        except Exception:
+            window = 0.0
+        if window > 0:
+            logger.addFilter(_DedupFilter(window))
 
         # File handler
         file_handler = logging.FileHandler(self.debug_log_file)
