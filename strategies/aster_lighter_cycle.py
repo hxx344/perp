@@ -20,6 +20,8 @@ import logging
 import random
 import sys
 import time
+import os
+import gc
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -311,6 +313,68 @@ class HedgingCycleExecutor:
         self.aster_client: Optional["AsterClient"] = None
         self.lighter_client: Optional["LighterClient"] = None
         self._last_leg1_price: Optional[Decimal] = None
+        self._housekeeping_task: Optional[asyncio.Task] = None
+
+    async def _memory_housekeeping_loop(self) -> None:
+        """Periodically trigger GC and clean bounded in-memory states.
+
+        Controlled by env vars:
+        - MEMORY_CLEAN_INTERVAL_SECONDS: interval seconds (default 300)
+        - MEMORY_WARN_MB: if >0, warn when rss exceeds threshold (best-effort)
+        """
+        interval_s = float(os.getenv("MEMORY_CLEAN_INTERVAL_SECONDS", "300") or 300)
+        warn_mb = float(os.getenv("MEMORY_WARN_MB", "0") or 0)
+        # Clamp interval to sensible bounds
+        interval_s = max(30.0, min(interval_s, 3600.0))
+
+        while True:
+            try:
+                await asyncio.sleep(interval_s)
+
+                # Log current memory (best-effort)
+                if warn_mb > 0:
+                    try:
+                        _psutil = __import__("psutil")
+                        rss = _psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+                        if rss >= warn_mb:
+                            self.logger.log(f"Process RSS {rss:.1f} MB exceeds threshold {warn_mb:.1f} MB", "WARNING")
+                    except Exception:
+                        pass
+
+                # Force GC
+                try:
+                    counts_before = gc.get_count()
+                    gc.collect()
+                    counts_after = gc.get_count()
+                    self.logger.log(
+                        f"Housekeeping GC: gen_counts {counts_before} -> {counts_after}",
+                        "DEBUG",
+                    )
+                except Exception:
+                    pass
+
+                # Ask Lighter WS to trim order book aggressively (already bounded, but proactive)
+                try:
+                    if self.lighter_client and getattr(self.lighter_client, "ws_manager", None):
+                        ws = getattr(self.lighter_client, "ws_manager", None)
+                        if ws and hasattr(ws, "cleanup_old_order_book_levels"):
+                            ws.cleanup_old_order_book_levels()
+                except Exception:
+                    pass
+
+                # Prune Lighter caches if large
+                try:
+                    if self.lighter_client and hasattr(self.lighter_client, "prune_caches"):
+                        self.lighter_client.prune_caches()
+                except Exception:
+                    pass
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                # Don't let housekeeping kill the executor
+                self.logger.log(f"Housekeeping loop error: {exc}", "WARNING")
+                continue
 
     def _lighter_initial_direction(self) -> str:
         return "sell" if self.config.direction == "buy" else "buy"
@@ -375,8 +439,19 @@ class HedgingCycleExecutor:
         )
         self.logger.log("Hedging cycle setup complete", "INFO")
 
+        # Start housekeeping loop
+        if self._housekeeping_task is None or self._housekeeping_task.done():
+            self._housekeeping_task = asyncio.create_task(self._memory_housekeeping_loop())
+
     async def shutdown(self) -> None:
         """Ensure both exchange connections are released."""
+        # Stop housekeeping loop first
+        if self._housekeeping_task and not self._housekeeping_task.done():
+            self._housekeeping_task.cancel()
+            try:
+                await self._housekeeping_task
+            except asyncio.CancelledError:
+                pass
         tasks = []
         if self.aster_client:
             tasks.append(self.aster_client.disconnect())

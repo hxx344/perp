@@ -49,6 +49,12 @@ LOG_FILE=trading_log.csv
 # Suppress duplicate log lines within this many seconds (set to 0 to disable)
 LOG_DEDUP_WINDOW=1.0
 
+# Memory housekeeping (optional)
+# Interval in seconds to run background GC and clean bounded caches (min 30, max 3600)
+MEMORY_CLEAN_INTERVAL_SECONDS=300
+# Warn when process RSS exceeds this value in MB (0 to disable)
+MEMORY_WARN_MB=0
+
 TIMEZONE=Asia/Shanghai
 
 # EdgeX API Endpoints

@@ -63,6 +63,23 @@ class LighterClient(BaseExchangeClient):
         self.current_order_client_id = None
         self.current_order = None
 
+    def prune_caches(self, *, max_orders: int = 1000) -> None:
+        """Bound in-memory caches to avoid unbounded growth.
+
+        Currently trims orders_cache to at most `max_orders` entries.
+        """
+        try:
+            cache = self.orders_cache
+            if not isinstance(cache, dict):
+                return
+            if len(cache) > max_orders:
+                # Keep latest N by insertion order where possible (Py3.7+ dict preserves insertion order)
+                excess = len(cache) - max_orders
+                for k in list(cache.keys())[:excess]:
+                    cache.pop(k, None)
+        except Exception:
+            pass
+
     @staticmethod
     def _parse_decimal(value: Any) -> Optional[Decimal]:
         if value is None:
