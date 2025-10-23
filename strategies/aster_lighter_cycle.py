@@ -184,6 +184,9 @@ class CycleConfig:
     lighter_quantity_max: Optional[Decimal] = None
     virtual_aster_price_source: str = "aster"
     virtual_aster_reference_symbol: Optional[str] = None
+    # Housekeeping and memory monitoring
+    memory_clean_interval_seconds: float = 300.0
+    memory_warn_mb: float = 0.0
 
 
 @dataclass
@@ -318,12 +321,12 @@ class HedgingCycleExecutor:
     async def _memory_housekeeping_loop(self) -> None:
         """Periodically trigger GC and clean bounded in-memory states.
 
-        Controlled by env vars:
-        - MEMORY_CLEAN_INTERVAL_SECONDS: interval seconds (default 300)
-        - MEMORY_WARN_MB: if >0, warn when rss exceeds threshold (best-effort)
+        Controlled by run arguments (CycleConfig):
+        - memory_clean_interval_seconds: interval seconds (default 300)
+        - memory_warn_mb: if >0, warn when rss exceeds threshold (best-effort)
         """
-        interval_s = float(os.getenv("MEMORY_CLEAN_INTERVAL_SECONDS", "300") or 300)
-        warn_mb = float(os.getenv("MEMORY_WARN_MB", "0") or 0)
+        interval_s = float(getattr(self.config, "memory_clean_interval_seconds", 300.0) or 300.0)
+        warn_mb = float(getattr(self.config, "memory_warn_mb", 0.0) or 0.0)
         # Clamp interval to sensible bounds
         interval_s = max(30.0, min(interval_s, 3600.0))
 
@@ -1462,6 +1465,18 @@ def _parse_args() -> argparse.Namespace:
         default="INFO",
         help="Console logging level (DEBUG, INFO, WARNING, ERROR)",
     )
+    parser.add_argument(
+        "--memory-clean-interval",
+        type=float,
+        default=300.0,
+        help="Interval in seconds for periodic memory housekeeping (GC and cache trims). Clamp 30..3600; set 0 to use default",
+    )
+    parser.add_argument(
+        "--memory-warn-mb",
+        type=float,
+        default=0.0,
+        help="If > 0, emit a WARNING log when process RSS exceeds this threshold in MB (0 disables)",
+    )
     return parser.parse_args()
 
 
@@ -1672,7 +1687,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         take_profit_pct=args.take_profit,
         slippage_pct=args.slippage,
         max_wait_seconds=args.max_wait,
-    lighter_max_wait_seconds=args.lighter_max_wait,
+        lighter_max_wait_seconds=args.lighter_max_wait,
         poll_interval=args.poll_interval,
         max_retries=args.max_retries,
         retry_delay_seconds=args.retry_delay,
@@ -1681,6 +1696,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         virtual_aster_maker=args.virtual_aster_maker,
         virtual_aster_price_source=args.virtual_maker_price_source,
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
+        memory_clean_interval_seconds=args.memory_clean_interval,
+        memory_warn_mb=args.memory_warn_mb,
     )
 
     executor = HedgingCycleExecutor(config)
