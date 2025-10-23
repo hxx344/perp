@@ -20,6 +20,7 @@ class LighterCustomWebSocketManager:
         self.running = False
         self.ws = None
         self.ready_event = asyncio.Event()
+        self._stop = False  # stop flag to gracefully exit connect loop
 
         # Order book state
         self.order_book = {"bids": {}, "asks": {}}
@@ -252,7 +253,7 @@ class LighterCustomWebSocketManager:
         reconnect_delay = 1  # Start with 1 second delay
         max_reconnect_delay = 30  # Maximum delay of 30 seconds
 
-        while True:
+        while not self._stop:
             try:
                 # Reset order book state before connecting
                 await self.reset_order_book()
@@ -285,6 +286,11 @@ class LighterCustomWebSocketManager:
                                 self._log("Subscribed to account orders with auth token (expires in 10 minutes)", "INFO")
                     except Exception as e:
                         self._log(f"Error creating auth token for account orders subscription: {e}", "WARNING")
+
+                    if self._stop:
+                        # Stop requested after establishing connection
+                        await self.ws.close()
+                        break
 
                     self.running = True
                     # Reset reconnect delay on successful connection
@@ -433,14 +439,17 @@ class LighterCustomWebSocketManager:
                 self._log(f"Failed to connect to Lighter websocket: {e}", "ERROR")
 
             # Wait before reconnecting with exponential backoff
-            if self.running:
+            if self.running and not self._stop:
                 self._log(f"Waiting {reconnect_delay} seconds before reconnecting...", "INFO")
                 await asyncio.sleep(reconnect_delay)
                 # Exponential backoff: double the delay, but cap at max_reconnect_delay
                 reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
 
+        self._log("Connect loop exited", "INFO")
+
     async def disconnect(self):
         """Disconnect from WebSocket."""
+        self._stop = True
         self.running = False
         if self.ws:
             try:

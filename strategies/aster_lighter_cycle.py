@@ -1426,11 +1426,17 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def _print_summary(results: List[LegResult], cycle_number: Optional[int] = None) -> None:
+def _print_summary(
+    results: List[LegResult],
+    cycle_number: Optional[int] = None,
+    logger: Optional[TradingLogger] = None,
+) -> None:
     title = f"Cycle {cycle_number} Summary" if cycle_number is not None else "Cycle Summary"
     header = f"\n{title}"
     print(header)
     print("=" * len(header))
+    if logger:
+        logger.log(title, "INFO")
     for leg in results:
         parts = [
             f"{leg.name} | {leg.exchange.upper():7s} | {leg.side.upper():4s}",
@@ -1445,7 +1451,10 @@ def _print_summary(results: List[LegResult], cycle_number: Optional[int] = None)
         if leg.reference_price is not None:
             parts.insert(3, f"ref={_format_decimal(leg.reference_price, places=2)}")
 
-        print(" | ".join(parts))
+        line = " | ".join(parts)
+        print(line)
+        if logger:
+            logger.log(line, "INFO")
 
 
 def _to_decimal(value: Decimal | float | int | str) -> Decimal:
@@ -1549,6 +1558,7 @@ def _print_pnl_progress(
     cycle_duration_seconds: float,
     lighter_balance: Optional[Decimal],
     total_runtime_seconds: float,
+    logger: Optional[TradingLogger] = None,
 ) -> None:
     header = f"PnL Progress After Cycle {cycle_number}"
     print(header)
@@ -1563,6 +1573,19 @@ def _print_pnl_progress(
         print(f"Lighter Available Balance: {_format_decimal(lighter_balance, places=2)}")
     else:
         print("Lighter Available Balance: unavailable")
+
+    if logger:
+        logger.log(header, "INFO")
+        logger.log(f"Cycle PnL: {_format_decimal(cycle_pnl, places=2)}", "INFO")
+        logger.log(f"Cumulative PnL: {_format_decimal(cumulative_pnl, places=2)}", "INFO")
+        logger.log(f"Cycle Volume (USD): {_format_decimal(cycle_volume, places=2)}", "INFO")
+        logger.log(f"Cumulative Volume (USD): {_format_decimal(cumulative_volume, places=2)}", "INFO")
+        logger.log(f"Cycle Duration: {cycle_duration_seconds:.2f}s", "INFO")
+        logger.log(f"Runtime Since Start: {_format_duration(total_runtime_seconds)}", "INFO")
+        if lighter_balance is not None:
+            logger.log(f"Lighter Available Balance: {_format_decimal(lighter_balance, places=2)}", "INFO")
+        else:
+            logger.log("Lighter Available Balance: unavailable", "INFO")
 
 
 async def _async_main(args: argparse.Namespace) -> None:
@@ -1698,7 +1721,7 @@ async def _async_main(args: argparse.Namespace) -> None:
             cycle_duration = time.time() - cycle_start_time
             total_runtime = time.time() - run_start_time
             executor.logger.log(f"Completed hedging cycle #{cycle_index}", "INFO")
-            _print_summary(results, cycle_number=cycle_index)
+            _print_summary(results, cycle_number=cycle_index, logger=executor.logger)
 
             cycle_pnl = _calculate_cycle_pnl(results)
             cumulative_pnl += cycle_pnl
@@ -1725,6 +1748,7 @@ async def _async_main(args: argparse.Namespace) -> None:
                 cycle_duration,
                 lighter_balance,
                 total_runtime,
+                logger=executor.logger,
             )
 
             try:
