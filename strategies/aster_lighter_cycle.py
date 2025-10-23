@@ -1194,6 +1194,8 @@ class HedgingCycleExecutor:
         position = await self.lighter_client.get_account_positions()
         if position == 0:
             self.logger.log("No Lighter position detected; no emergency action required", "INFO")
+            # Add a blank line for readability before the next cycle output
+            print()
             return
 
         # Positive values denote a net long position; negative values denote a net short position.
