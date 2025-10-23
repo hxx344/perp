@@ -351,7 +351,7 @@ class HedgingCycleExecutor:
                     counts_after = gc.get_count()
                     self.logger.log(
                         f"Housekeeping GC: gen_counts {counts_before} -> {counts_after}",
-                        "DEBUG",
+                        "INFO",
                     )
                 except Exception:
                     pass
