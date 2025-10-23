@@ -47,6 +47,7 @@ class _BinanceFuturesPriceSource:
     def __init__(self, symbol: str, logger: TradingLogger):
         self.symbol = symbol.upper()
         self.logger = logger
+        self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get(self, path: str, params: Optional[dict] = None) -> dict:
         if params is None:
@@ -54,22 +55,24 @@ class _BinanceFuturesPriceSource:
 
         url = f"{self._BASE_URL}{path}"
         timeout = aiohttp.ClientTimeout(total=5)
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(timeout=timeout)
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params) as response:
-                try:
-                    payload = await response.json()
-                except aiohttp.ContentTypeError as exc:
-                    text = await response.text()
-                    raise RuntimeError(f"Binance response not JSON: {text}") from exc
+        assert self._session is not None  # for type checkers
+        async with self._session.get(url, params=params) as response:
+            try:
+                payload = await response.json()
+            except aiohttp.ContentTypeError as exc:
+                text = await response.text()
+                raise RuntimeError(f"Binance response not JSON: {text}") from exc
 
-                if response.status != 200:
-                    message = payload.get("msg") if isinstance(payload, dict) else payload
-                    raise RuntimeError(
-                        f"Binance request {path} failed with status {response.status}: {message}"
-                    )
+            if response.status != 200:
+                message = payload.get("msg") if isinstance(payload, dict) else payload
+                raise RuntimeError(
+                    f"Binance request {path} failed with status {response.status}: {message}"
+                )
 
-                return payload
+            return payload
 
     @staticmethod
     def _to_decimal_pairs(levels: list) -> List[Tuple[Decimal, Decimal]]:
@@ -142,6 +145,10 @@ class _BinanceFuturesPriceSource:
             depth_price = None
 
         return depth_price, best_bid, best_ask
+
+    async def aclose(self) -> None:
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
 
 def _decimal_type(value: str) -> Decimal:
     """Argparse helper that parses Decimal values with validation."""
@@ -375,6 +382,12 @@ class HedgingCycleExecutor:
             tasks.append(self.aster_client.disconnect())
         if self.lighter_client:
             tasks.append(self.lighter_client.disconnect())
+        # Close Binance client session if used
+        if self._binance_price_client is not None:
+            try:
+                await self._binance_price_client.aclose()
+            except Exception:
+                pass
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.logger.log("Hedging cycle shutdown complete", "INFO")
@@ -967,37 +980,7 @@ class HedgingCycleExecutor:
                 "ERROR",
             )
 
-    async def _attempt_cancel_lighter(self, client_order_id: str, leg_name: str) -> bool:
-        if not self.lighter_client:
-            return False
-
-        current_order = getattr(self.lighter_client, "current_order", None)
-        order_index = None
-        if current_order:
-            order_index = getattr(current_order, "order_id", None)
-
-        if order_index is None:
-            self.logger.log(
-                f"{leg_name} | Unable to cancel Lighter order {client_order_id}: missing order index",
-                "WARNING",
-            )
-            return False
-
-        try:
-            result = await self.lighter_client.cancel_order(str(order_index))
-            if not result.success:
-                self.logger.log(
-                    f"{leg_name} | Failed to cancel Lighter order {order_index}: {result.error_message}",
-                    "ERROR",
-                )
-                return False
-            return True
-        except Exception as exc:  # pragma: no cover - defensive logging
-            self.logger.log(
-                f"{leg_name} | Exception canceling Lighter order {order_index}: {exc}",
-                "ERROR",
-            )
-            return False
+    
 
     async def _calculate_aster_maker_price(self, direction: str) -> Decimal:
         if not self.aster_client:
@@ -1015,15 +998,67 @@ class HedgingCycleExecutor:
         best_bid = best_bid if best_bid is not None else Decimal("0")
         best_ask = best_ask if best_ask is not None else Decimal("0")
 
-        price = depth_price if depth_price is not None else None
+        # If no usable depth price, fetch fallback BBO
+        if depth_price is None or depth_price <= 0:
+            fb_bid, fb_ask = await self.aster_client.fetch_bbo_prices(self.aster_config.contract_id)
+            best_bid = fb_bid if fb_bid > 0 else best_bid
+            best_ask = fb_ask if fb_ask > 0 else best_ask
 
-        if price is None or price <= 0:
-            fallback_bid, fallback_ask = await self.aster_client.fetch_bbo_prices(
-                self.aster_config.contract_id
-            )
-            best_bid = fallback_bid if fallback_bid > 0 else best_bid
-            best_ask = fallback_ask if fallback_ask > 0 else best_ask
+        price = self._compute_maker_price_from_data(
+            source_label="ASTER",
+            direction=direction,
+            tick=tick,
+            level=level,
+            depth_price=depth_price,
+            best_bid=best_bid,
+            best_ask=best_ask,
+        )
+        return price
 
+    async def _calculate_binance_maker_price(self, direction: str) -> Decimal:
+        if not self._binance_price_client:
+            raise RuntimeError("Binance price source is not configured")
+
+        tick = self.aster_config.tick_size if self.aster_config.tick_size > 0 else Decimal("0")
+        level = 4
+        depth_price, best_bid, best_ask = await self._binance_price_client.get_depth_level_price(
+            direction,
+            level=level,
+        )
+
+        best_bid = best_bid if best_bid is not None else Decimal("0")
+        best_ask = best_ask if best_ask is not None else Decimal("0")
+
+        if depth_price is None or depth_price <= 0:
+            fb_bid, fb_ask = await self._binance_price_client.fetch_bbo_prices()
+            best_bid = fb_bid if fb_bid > 0 else best_bid
+            best_ask = fb_ask if fb_ask > 0 else best_ask
+
+        price = self._compute_maker_price_from_data(
+            source_label="BINANCE",
+            direction=direction,
+            tick=tick,
+            level=level,
+            depth_price=depth_price,
+            best_bid=best_bid,
+            best_ask=best_ask,
+        )
+        return price
+
+    def _compute_maker_price_from_data(
+        self,
+        *,
+        source_label: str,
+        direction: str,
+        tick: Decimal,
+        level: int,
+        depth_price: Optional[Decimal],
+        best_bid: Decimal,
+        best_ask: Decimal,
+    ) -> Decimal:
+        price = depth_price if (depth_price is not None and depth_price > 0) else None
+
+        if price is None:
             if direction == "sell":
                 if best_ask > 0:
                     price = best_ask
@@ -1036,7 +1071,7 @@ class HedgingCycleExecutor:
                     price = best_ask - tick
 
         if price is None or price <= 0:
-            raise ValueError("Unable to determine Aster maker price from market data")
+            raise ValueError(f"Unable to determine {source_label} maker price from market data")
 
         if tick > 0:
             price = _round_to_tick(price, tick)
@@ -1063,73 +1098,7 @@ class HedgingCycleExecutor:
 
         self.logger.log(
             (
-                f"ASTER maker price calc: dir={direction}, depth@{level}={depth_price}, "
-                f"bbo=({_format_decimal(best_bid,8)},{_format_decimal(best_ask,8)}), tick={_format_decimal(tick,8)}, chosen={price}"
-            ),
-            "DEBUG",
-        )
-        return price
-
-    async def _calculate_binance_maker_price(self, direction: str) -> Decimal:
-        if not self._binance_price_client:
-            raise RuntimeError("Binance price source is not configured")
-
-        tick = self.aster_config.tick_size if self.aster_config.tick_size > 0 else Decimal("0")
-        depth_price, best_bid, best_ask = await self._binance_price_client.get_depth_level_price(
-            direction,
-            level=4,
-        )
-
-        best_bid = best_bid if best_bid is not None else Decimal("0")
-        best_ask = best_ask if best_ask is not None else Decimal("0")
-
-        price = depth_price if depth_price is not None else None
-
-        if price is None or price <= 0:
-            fallback_bid, fallback_ask = await self._binance_price_client.fetch_bbo_prices()
-            best_bid = fallback_bid if fallback_bid > 0 else best_bid
-            best_ask = fallback_ask if fallback_ask > 0 else best_ask
-
-            if direction == "sell":
-                if best_ask > 0:
-                    price = best_ask
-                elif best_bid > 0 and tick > 0:
-                    price = best_bid + tick
-            else:
-                if best_bid > 0:
-                    price = best_bid
-                elif best_ask > 0 and tick > 0:
-                    price = best_ask - tick
-
-        if price is None or price <= 0:
-            raise ValueError("Unable to determine Binance maker price from market data")
-
-        if tick > 0:
-            price = _round_to_tick(price, tick)
-
-        minimal_step = tick if tick > 0 else Decimal("0.00000001")
-
-        if direction == "sell" and best_bid > 0 and price <= best_bid:
-            price = best_bid + minimal_step
-            if tick > 0:
-                price = _round_to_tick(price, tick)
-        elif direction == "buy" and best_ask > 0 and price >= best_ask:
-            price = best_ask - minimal_step
-            if tick > 0:
-                price = _round_to_tick(price, tick)
-
-        minimal_price = tick if tick > 0 else minimal_step
-        if price < minimal_price:
-            price = minimal_price
-            if tick > 0:
-                price = _round_to_tick(price, tick)
-
-        if price <= 0:
-            raise ValueError("Calculated Binance maker price is non-positive")
-
-        self.logger.log(
-            (
-                f"BINANCE maker price calc: dir={direction}, depth@4={depth_price}, "
+                f"{source_label} maker price calc: dir={direction}, depth@{level}={depth_price}, "
                 f"bbo=({_format_decimal(best_bid,8)},{_format_decimal(best_ask,8)}), tick={_format_decimal(tick,8)}, chosen={price}"
             ),
             "DEBUG",
@@ -1573,18 +1542,6 @@ def _print_pnl_progress(
     else:
         print("Lighter Available Balance: unavailable")
 
-    if logger:
-        logger.log(header, "INFO")
-        logger.log(f"Cycle PnL: {_format_decimal(cycle_pnl, places=2)}", "INFO")
-        logger.log(f"Cumulative PnL: {_format_decimal(cumulative_pnl, places=2)}", "INFO")
-        logger.log(f"Cycle Volume (USD): {_format_decimal(cycle_volume, places=2)}", "INFO")
-        logger.log(f"Cumulative Volume (USD): {_format_decimal(cumulative_volume, places=2)}", "INFO")
-        logger.log(f"Cycle Duration: {cycle_duration_seconds:.2f}s", "INFO")
-        logger.log(f"Runtime Since Start: {_format_duration(total_runtime_seconds)}", "INFO")
-        if lighter_balance is not None:
-            logger.log(f"Lighter Available Balance: {_format_decimal(lighter_balance, places=2)}", "INFO")
-        else:
-            logger.log("Lighter Available Balance: unavailable", "INFO")
 
 
 async def _async_main(args: argparse.Namespace) -> None:
