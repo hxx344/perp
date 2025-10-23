@@ -318,8 +318,16 @@ class HedgingCycleExecutor:
         await self.aster_client.connect()
         await self.lighter_client.connect()
 
-        aster_contract_id, _ = await self.aster_client.get_contract_attributes()
-        await self.lighter_client.get_contract_attributes()
+        aster_contract_id, aster_tick = await self.aster_client.get_contract_attributes()
+        lighter_contract_id, lighter_tick = await self.lighter_client.get_contract_attributes()
+
+        self.logger.log(
+            (
+                f"Contracts resolved | Aster: id={aster_contract_id}, tick={_format_decimal(aster_tick, 8)}; "
+                f"Lighter: id={lighter_contract_id}, tick={_format_decimal(lighter_tick, 8)}"
+            ),
+            "INFO",
+        )
 
         if not self._virtual_reference_symbol:
             self._virtual_reference_symbol = aster_contract_id
@@ -431,6 +439,10 @@ class HedgingCycleExecutor:
                 await asyncio.sleep(self.config.retry_delay_seconds)
             skip_retry_delay = False
 
+            self.logger.log(
+                f"{leg_name} | Placing Aster maker open: qty={self.config.aster_quantity}, side={direction}",
+                "DEBUG",
+            )
             order_result = await self.aster_client.place_open_order(
                 self.aster_config.contract_id, self.config.aster_quantity, direction
             )
@@ -507,6 +519,10 @@ class HedgingCycleExecutor:
             skip_retry_delay = False
 
             target_price = await self._calculate_aster_maker_price(direction)
+            self.logger.log(
+                f"{leg_name} | Placing Aster reverse close: qty={reverse_quantity}, side={direction}, limit={target_price}",
+                "DEBUG",
+            )
             order_result = await self.aster_client.place_close_order(
                 self.aster_config.contract_id, reverse_quantity, target_price, direction
             )
@@ -687,6 +703,10 @@ class HedgingCycleExecutor:
                 reference_price=reference_price,
                 slippage_pct=current_slippage,
             )
+            self.logger.log(
+                f"{leg_name} | Lighter taker intent: side={direction}, qty={order_quantity}, ref={reference_price}, slip={current_slippage}%, limit={target_price}",
+                "DEBUG",
+            )
 
             start = time.time()
 
@@ -706,7 +726,7 @@ class HedgingCycleExecutor:
                     and attempt < max_attempts
                 ):
                     self.logger.log(
-                        f"{leg_name} | Lighter flagged price as accidental at slippage {current_slippage}%. Tightening and retrying...",
+                        f"{leg_name} | Lighter flagged 'accidental price' at slip={current_slippage}%. Tightening and retrying...",
                         "WARNING",
                     )
                     current_slippage = max(
@@ -718,7 +738,7 @@ class HedgingCycleExecutor:
 
                 last_error = RuntimeError(error_message)
                 self.logger.log(
-                    f"{leg_name} | Attempt {attempt} failed to place Lighter order: {error_message}",
+                    f"{leg_name} | Attempt {attempt} failed to place Lighter order: {error_message} (side={direction}, qty={order_quantity}, limit={target_price})",
                     "ERROR",
                 )
                 if attempt >= max_attempts:
@@ -730,6 +750,11 @@ class HedgingCycleExecutor:
 
             if not order_result.order_id:
                 raise RuntimeError(f"{leg_name} | Lighter order returned without a client order id")
+            else:
+                self.logger.log(
+                    f"{leg_name} | Lighter order placed: client_id={order_result.order_id}, side={direction}, qty={order_quantity}, limit={target_price}",
+                    "INFO",
+                )
 
             try:
                 fill_info = await self._wait_for_lighter_fill(
@@ -739,6 +764,10 @@ class HedgingCycleExecutor:
                     expected_side=direction,
                 )
             except SkipCycleError:
+                self.logger.log(
+                    f"{leg_name} | Skipping cycle after Lighter timeout/position mismatch (client_id={order_result.order_id})",
+                    "WARNING",
+                )
                 raise
 
             latency = time.time() - start
@@ -822,6 +851,15 @@ class HedgingCycleExecutor:
                     raise RuntimeError(f"{leg_name} | Lighter order ended with status {status}")
             await asyncio.sleep(self.config.poll_interval)
 
+        self.logger.log(
+            (
+                f"{leg_name} | Timeout reached waiting for Lighter (client_id={client_order_id}); "
+                f"checking position with expectations: final={expected_final_position}, "
+                f"side={expected_side}, size={expected_fill_size}"
+            ),
+            "WARNING",
+        )
+
         position_after: Optional[Decimal] = None
         try:
             position_after = await self.lighter_client.get_account_positions()
@@ -880,7 +918,7 @@ class HedgingCycleExecutor:
             self.logger.log(
                 (
                     f"{leg_name} | Lighter order {client_order_id} timed out but position "
-                    f"matches expectation ({position_after}); treating as filled"
+                    f"matches expectation (pos={position_after}); treating as filled: side={side}, size={fill_size}, price={assumed_price}"
                 ),
                 "WARNING",
             )
@@ -897,7 +935,8 @@ class HedgingCycleExecutor:
 
         message = (
             f"{leg_name} | Lighter order {client_order_id} timed out; "
-            f"position {position_after} did not meet expected {expected_final_position}. Skipping cycle."
+            f"position={position_after} did not meet expected_final={expected_final_position} "
+            f"(expected_side={expected_side}, expected_size={expected_fill_size}). Skipping cycle."
         )
         self.logger.log(message, "WARNING")
         raise SkipCycleError(message)
@@ -1022,6 +1061,13 @@ class HedgingCycleExecutor:
         if price <= 0:
             raise ValueError("Calculated maker price is non-positive")
 
+        self.logger.log(
+            (
+                f"ASTER maker price calc: dir={direction}, depth@{level}={depth_price}, "
+                f"bbo=({_format_decimal(best_bid,8)},{_format_decimal(best_ask,8)}), tick={_format_decimal(tick,8)}, chosen={price}"
+            ),
+            "DEBUG",
+        )
         return price
 
     async def _calculate_binance_maker_price(self, direction: str) -> Decimal:
@@ -1081,6 +1127,13 @@ class HedgingCycleExecutor:
         if price <= 0:
             raise ValueError("Calculated Binance maker price is non-positive")
 
+        self.logger.log(
+            (
+                f"BINANCE maker price calc: dir={direction}, depth@4={depth_price}, "
+                f"bbo=({_format_decimal(best_bid,8)},{_format_decimal(best_ask,8)}), tick={_format_decimal(tick,8)}, chosen={price}"
+            ),
+            "DEBUG",
+        )
         return price
 
     async def _calculate_virtual_maker_price(self, direction: str) -> Decimal:
@@ -1112,7 +1165,12 @@ class HedgingCycleExecutor:
             if price <= 0:
                 price = max(reference_price / Decimal("2"), tick if tick > 0 else Decimal("1E-6"))
 
-        return _round_to_tick(price, tick)
+        result = _round_to_tick(price, tick)
+        self.logger.log(
+            f"Lighter taker price calc: dir={direction}, ref={reference_price}, slip%={slippage_pct}, tick={_format_decimal(tick,8)}, result={result}",
+            "DEBUG",
+        )
+        return result
 
     def _select_lighter_order_quantity(self) -> Decimal:
         if self._lighter_quantity_min is None or self._lighter_quantity_max is None:
