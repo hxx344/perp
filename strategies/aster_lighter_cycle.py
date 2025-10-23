@@ -193,6 +193,12 @@ class LegResult:
     reference_price: Optional[Decimal] = None
 
 
+class SkipCycleError(Exception):
+    """Raised when the current hedging cycle should be skipped."""
+
+    pass
+
+
 def _round_to_tick(value: Decimal, tick: Decimal) -> Decimal:
     """Round a price to the nearest tick size."""
     if tick <= 0:
@@ -683,6 +689,7 @@ class HedgingCycleExecutor:
             )
 
             start = time.time()
+
             order_result = await self.lighter_client.place_limit_order(
                 self.lighter_config.contract_id,
                 order_quantity,
@@ -725,29 +732,14 @@ class HedgingCycleExecutor:
                 raise RuntimeError(f"{leg_name} | Lighter order returned without a client order id")
 
             try:
-                fill_info = await self._wait_for_lighter_fill(str(order_result.order_id), leg_name)
-            except TimeoutError as exc:
-                last_error = exc
-                self.logger.log(
-                    f"{leg_name} | Attempt {attempt} timed out waiting for Lighter fill. Canceling and retrying...",
-                    "WARNING",
+                fill_info = await self._wait_for_lighter_fill(
+                    str(order_result.order_id),
+                    leg_name,
+                    expected_fill_size=order_quantity,
+                    expected_side=direction,
                 )
-                cancel_success = await self._attempt_cancel_lighter(str(order_result.order_id), leg_name)
-                if not cancel_success:
-                    raise RuntimeError(
-                        f"{leg_name} | Cancel failed after timeout; aborting to avoid duplicate exposure"
-                    )
-                if attempt >= max_attempts:
-                    raise
-                if current_slippage <= Decimal("0"):
-                    current_slippage = Decimal("0.01")
-                else:
-                    current_slippage = min(
-                        (current_slippage * Decimal("2")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP),
-                        Decimal("5"),
-                    )
-                await asyncio.sleep(self.config.retry_delay_seconds)
-                continue
+            except SkipCycleError:
+                raise
 
             latency = time.time() - start
 
@@ -803,7 +795,16 @@ class HedgingCycleExecutor:
 
         raise TimeoutError(f"{leg_name} | Aster order {order_id} not filled within timeout")
 
-    async def _wait_for_lighter_fill(self, client_order_id: str, leg_name: str) -> OrderInfo:
+    async def _wait_for_lighter_fill(
+        self,
+        client_order_id: str,
+        leg_name: str,
+        *,
+        expected_final_position: Optional[Decimal] = None,
+        expected_fill_size: Optional[Decimal] = None,
+        expected_side: Optional[str] = None,
+        position_before: Optional[Decimal] = None,
+    ) -> OrderInfo:
         if not self.lighter_client:
             raise RuntimeError("Lighter client is not connected")
 
@@ -821,12 +822,85 @@ class HedgingCycleExecutor:
                     raise RuntimeError(f"{leg_name} | Lighter order ended with status {status}")
             await asyncio.sleep(self.config.poll_interval)
 
-        cancel_success = await self._attempt_cancel_lighter(client_order_id, leg_name)
-        if not cancel_success:
-            raise RuntimeError(
-                f"{leg_name} | Cancel failed after timeout; aborting to avoid duplicate exposure"
+        position_after: Optional[Decimal] = None
+        try:
+            position_after = await self.lighter_client.get_account_positions()
+        except Exception as exc:
+            self.logger.log(
+                f"{leg_name} | Failed to fetch Lighter position after timeout: {exc}",
+                "ERROR",
             )
-        raise TimeoutError(f"{leg_name} | Lighter order {client_order_id} not filled within timeout")
+
+        current_order = getattr(self.lighter_client, "current_order", None)
+        assumed_price = Decimal("0")
+        if current_order is not None:
+            price_candidate = getattr(current_order, "price", None)
+            if isinstance(price_candidate, Decimal):
+                assumed_price = price_candidate
+            elif price_candidate is not None:
+                try:
+                    assumed_price = Decimal(str(price_candidate))
+                except (InvalidOperation, ValueError, TypeError):
+                    assumed_price = Decimal("0")
+
+        expected_match = False
+        tolerance = Decimal("0.0001")
+        if expected_fill_size is not None and expected_fill_size > 0:
+            tolerance = max(tolerance, expected_fill_size * Decimal("0.0001"))
+
+        if expected_final_position is not None and position_after is not None:
+            # Absolute target check: compare actual final position to expected final position
+            expected_match = abs(position_after - expected_final_position) <= tolerance
+        elif (
+            expected_final_position is None
+            and expected_fill_size is not None
+            and expected_side is not None
+            and position_after is not None
+        ):
+            # Delta-based check: if we don't know the starting position, assume we expect at least
+            # expected_fill_size movement in the expected direction.
+            side_norm = expected_side.lower()
+            if side_norm == "buy":
+                expected_match = position_after >= (expected_fill_size - tolerance)
+            elif side_norm == "sell":
+                expected_match = (-position_after) >= (expected_fill_size - tolerance)
+
+        if expected_match:
+            fill_size = expected_fill_size
+            if fill_size is None and position_after is not None and position_before is not None:
+                fill_size = abs(position_after - position_before)
+
+            if fill_size is None:
+                fill_size = Decimal("0")
+
+            fill_size = abs(fill_size)
+            side = (expected_side or getattr(current_order, "side", "buy")).lower()
+            side = "buy" if side not in {"buy", "sell"} else side
+
+            self.logger.log(
+                (
+                    f"{leg_name} | Lighter order {client_order_id} timed out but position "
+                    f"matches expectation ({position_after}); treating as filled"
+                ),
+                "WARNING",
+            )
+
+            return OrderInfo(
+                order_id=client_order_id,
+                side=side,
+                size=Decimal(fill_size),
+                price=assumed_price,
+                status="FILLED",
+                filled_size=Decimal(fill_size),
+                remaining_size=Decimal("0"),
+            )
+
+        message = (
+            f"{leg_name} | Lighter order {client_order_id} timed out; "
+            f"position {position_after} did not meet expected {expected_final_position}. Skipping cycle."
+        )
+        self.logger.log(message, "WARNING")
+        raise SkipCycleError(message)
 
     async def _attempt_cancel_aster(
         self, order_id: str, leg_name: str, last_status: str | None
@@ -1144,7 +1218,14 @@ class HedgingCycleExecutor:
             return
 
         try:
-            fill_info = await self._wait_for_lighter_fill(str(order_result.order_id), "EMERGENCY_FLATTEN")
+            fill_info = await self._wait_for_lighter_fill(
+                str(order_result.order_id),
+                "EMERGENCY_FLATTEN",
+                expected_final_position=Decimal("0"),
+                expected_fill_size=quantity,
+                expected_side=side,
+                position_before=position,
+            )
             self.logger.log(
                 f"Emergency flatten filled {fill_info.filled_size} @ {fill_info.price}",
                 "INFO",
@@ -1507,6 +1588,24 @@ async def _async_main(args: argparse.Namespace) -> None:
             cycle_start_time = time.time()
             try:
                 results = await executor.execute_cycle()
+            except SkipCycleError as exc:
+                network_error_count = 0
+                executor.logger.log(str(exc), "WARNING")
+                try:
+                    await executor.ensure_lighter_flat()
+                except Exception as flatten_exc:
+                    executor.logger.log(
+                        f"Emergency flatten after skipped cycle failed: {flatten_exc}",
+                        "ERROR",
+                    )
+
+                if config.delay_between_cycles > 0:
+                    executor.logger.log(
+                        f"Waiting {config.delay_between_cycles} seconds before next cycle",
+                        "INFO",
+                    )
+                    await asyncio.sleep(config.delay_between_cycles)
+                continue
             except network_error_exceptions as exc:
                 network_error_count += 1
                 executor.logger.log(
