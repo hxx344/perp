@@ -403,6 +403,149 @@ class AsterWebSocketManager:
         self.logger = logger
 
 
+class AsterMarketDataWebSocket:
+    """Lightweight public WebSocket client for Aster futures depth snapshots."""
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        base_ws_url: str,
+        logger: TradingLogger,
+        depth_levels: int = 20,
+    ) -> None:
+        self.symbol = symbol.lower()
+        self._base_ws_url = base_ws_url.rstrip("/")
+        self.logger = logger
+        self.depth_levels = max(5, min(depth_levels, 50))
+        self._bids: List[Tuple[Decimal, Decimal]] = []
+        self._asks: List[Tuple[Decimal, Decimal]] = []
+        self._lock = asyncio.Lock()
+        self._ready = asyncio.Event()
+        self._task: Optional[asyncio.Task] = None
+        self._running = False
+
+    async def start(self) -> None:
+        if self._task and not self._task.done():
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._run())
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                if self.logger:
+                    self.logger.log(f"Error stopping market data websocket: {exc}", "WARNING")
+        self._task = None
+        self._ready.clear()
+        async with self._lock:
+            self._bids = []
+            self._asks = []
+
+    async def wait_until_ready(self, timeout: float = 2.0) -> bool:
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def get_depth(self, limit: int) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
+        async with self._lock:
+            clipped_limit = max(1, min(limit, self.depth_levels))
+            bids = self._bids[:clipped_limit]
+            asks = self._asks[:clipped_limit]
+        return bids, asks
+
+    async def get_bbo(self) -> Tuple[Optional[Decimal], Optional[Decimal]]:
+        async with self._lock:
+            best_bid = self._bids[0][0] if self._bids else None
+            best_ask = self._asks[0][0] if self._asks else None
+        return best_bid, best_ask
+
+    async def _run(self) -> None:
+        backoff_seconds = 1
+        max_backoff = 30
+        stream = f"{self.symbol}@depth{self.depth_levels}@100ms"
+        url = f"{self._base_ws_url}/ws/{stream}"
+
+        while self._running:
+            try:
+                self._ready.clear()
+                async with websockets.connect(url, ping_interval=10, ping_timeout=10) as ws:
+                    if self.logger:
+                        self.logger.log(
+                            f"Connected to Aster market data stream ({stream})",
+                            "INFO",
+                        )
+                    backoff_seconds = 1
+                    async for message in ws:
+                        if not self._running:
+                            break
+                        try:
+                            payload = json.loads(message)
+                        except json.JSONDecodeError:
+                            if self.logger:
+                                self.logger.log("Received non-JSON market data payload", "WARNING")
+                            continue
+
+                        bids_raw = payload.get("bids") or payload.get("b") or []
+                        asks_raw = payload.get("asks") or payload.get("a") or []
+
+                        bids = self._parse_levels(bids_raw)
+                        asks = self._parse_levels(asks_raw)
+
+                        async with self._lock:
+                            if bids:
+                                self._bids = bids
+                            if asks:
+                                self._asks = asks
+
+                            if self._bids and self._asks:
+                                self._ready.set()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                if self.logger:
+                    self.logger.log(f"Market data websocket error: {exc}", "ERROR")
+
+            if not self._running:
+                break
+
+            await asyncio.sleep(backoff_seconds)
+            backoff_seconds = min(backoff_seconds * 2, max_backoff)
+
+        if self.logger:
+            self.logger.log("Market data websocket stopped", "INFO")
+
+    def _parse_levels(self, levels: List[List[Any]]) -> List[Tuple[Decimal, Decimal]]:
+        parsed: List[Tuple[Decimal, Decimal]] = []
+        for raw in levels:
+            if not isinstance(raw, list) or len(raw) < 2:
+                continue
+            price_raw, qty_raw = raw[0], raw[1]
+            try:
+                price = Decimal(str(price_raw))
+                quantity = Decimal(str(qty_raw))
+            except (ValueError, ArithmeticError):
+                continue
+
+            if price <= 0 or quantity < 0:
+                continue
+
+            parsed.append((price, quantity))
+            if len(parsed) >= self.depth_levels:
+                break
+
+        return parsed
+
+
 class AsterClient(BaseExchangeClient):
     """Aster exchange client implementation."""
 
@@ -426,6 +569,9 @@ class AsterClient(BaseExchangeClient):
         # Reusable HTTP client session/connector (avoid per-request session churn)
         self._http_connector: Optional[aiohttp.TCPConnector] = None
         self._http_session: Optional[aiohttp.ClientSession] = None
+        # Public market data websocket (lazy)
+        self._market_ws_url = "wss://fstream.asterdex.com"
+        self._market_data_ws: Optional[AsterMarketDataWebSocket] = None
 
     def _ensure_http(self) -> aiohttp.ClientSession:
         """Get or create a shared aiohttp session with bounded connector and no cookie persistence."""
@@ -447,6 +593,30 @@ class AsterClient(BaseExchangeClient):
                 cookie_jar=cookie_jar,
             )
         return self._http_session
+
+    async def _ensure_market_data_stream(self, contract_id: str) -> bool:
+        if not contract_id:
+            return False
+
+        symbol = contract_id.lower()
+
+        try:
+            if self._market_data_ws is None or self._market_data_ws.symbol != symbol:
+                if self._market_data_ws is not None:
+                    await self._market_data_ws.stop()
+
+                self._market_data_ws = AsterMarketDataWebSocket(
+                    symbol=symbol,
+                    base_ws_url=self._market_ws_url,
+                    logger=self.logger,
+                    depth_levels=20,
+                )
+                await self._market_data_ws.start()
+
+            return await self._market_data_ws.wait_until_ready(timeout=2.0)
+        except Exception as exc:
+            self.logger.log(f"Failed to initialize Aster market data websocket: {exc}", "WARNING")
+            return False
 
     def _validate_config(self) -> None:
         """Validate Aster configuration."""
@@ -574,6 +744,9 @@ class AsterClient(BaseExchangeClient):
         try:
             if hasattr(self, 'ws_manager') and self.ws_manager:
                 await self.ws_manager.disconnect()
+            if self._market_data_ws is not None:
+                await self._market_data_ws.stop()
+                self._market_data_ws = None
             # Close shared HTTP session
             if self._http_session is not None:
                 try:
@@ -604,6 +777,12 @@ class AsterClient(BaseExchangeClient):
     @query_retry(default_return=(0, 0))
     async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
         """Fetch best bid and ask prices from Aster."""
+        ws_ready = await self._ensure_market_data_stream(contract_id)
+        if ws_ready and self._market_data_ws is not None:
+            bid, ask = await self._market_data_ws.get_bbo()
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
+                return bid, ask
+
         result = await self._make_request('GET', '/fapi/v1/ticker/bookTicker', {'symbol': contract_id})
 
         best_bid = Decimal(result.get('bidPrice', 0))
@@ -618,6 +797,12 @@ class AsterClient(BaseExchangeClient):
         limit: int = 20,
     ) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
         """Fetch aggregated order book depth for a contract."""
+        ws_ready = await self._ensure_market_data_stream(contract_id)
+        if ws_ready and self._market_data_ws is not None:
+            bids, asks = await self._market_data_ws.get_depth(limit)
+            if bids and asks:
+                return bids, asks
+
         depth_limit = max(5, min(limit, 500))
         result = await self._make_request(
             'GET',
@@ -1035,6 +1220,7 @@ class AsterClient(BaseExchangeClient):
                         self.logger.log("Failed to get tick size for ticker", "ERROR")
                         raise ValueError("Failed to get tick size for ticker")
 
+                    await self._ensure_market_data_stream(self.config.contract_id)
                     return self.config.contract_id, self.config.tick_size
 
             self.logger.log("Failed to get contract ID for ticker", "ERROR")
