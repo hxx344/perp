@@ -9,7 +9,7 @@ import time
 import hmac
 import hashlib
 from decimal import Decimal
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Callable
 from urllib.parse import urlencode
 import aiohttp
 import websockets
@@ -22,7 +22,7 @@ from helpers.logger import TradingLogger
 class AsterWebSocketManager:
     """WebSocket manager for Aster order updates."""
 
-    def __init__(self, config: Dict[str, Any], api_key: str, secret_key: str, order_update_callback):
+    def __init__(self, config: Dict[str, Any], api_key: str, secret_key: str, order_update_callback, get_session: Optional[Callable[[], aiohttp.ClientSession]] = None):
         self.api_key = api_key
         self.secret_key = secret_key
         self.order_update_callback = order_update_callback
@@ -36,6 +36,8 @@ class AsterWebSocketManager:
         self._last_ping_time = None
         self.config = config
         self._reconnect_requested = False
+        # Optional shared session provider injected by AsterClient
+        self.get_session = get_session
 
     def _generate_signature(self, params: Dict[str, Any]) -> str:
         """Generate HMAC SHA256 signature for Aster API authentication."""
@@ -64,17 +66,45 @@ class AsterWebSocketManager:
             'Content-Type': 'application/x-www-form-urlencoded'
         }
 
-        async with aiohttp.ClientSession() as session:
+        # Prefer shared session if provided; fallback to ephemeral session
+        if self.get_session:
+            session = self.get_session()
             async with session.post(
                 'https://fapi.asterdex.com/fapi/v1/listenKey',
                 headers=headers,
                 data=params
             ) as response:
+                text = await response.text()
                 if response.status == 200:
-                    result = await response.json()
-                    return result.get('listenKey')
+                    try:
+                        result = json.loads(text)
+                    except Exception:
+                        result = {"raw": text}
+                    key = result.get('listenKey') if isinstance(result, dict) else None
+                    if not isinstance(key, str):
+                        raise Exception(f"listenKey missing in response: {result}")
+                    return key
                 else:
-                    raise Exception(f"Failed to get listen key: {response.status}")
+                    raise Exception(f"Failed to get listen key: {response.status} {text}")
+        else:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    'https://fapi.asterdex.com/fapi/v1/listenKey',
+                    headers=headers,
+                    data=params
+                ) as response:
+                    text = await response.text()
+                    if response.status == 200:
+                        try:
+                            result = json.loads(text)
+                        except Exception:
+                            result = {"raw": text}
+                        key = result.get('listenKey') if isinstance(result, dict) else None
+                        if not isinstance(key, str):
+                            raise Exception(f"listenKey missing in response: {result}")
+                        return key
+                    else:
+                        raise Exception(f"Failed to get listen key: {response.status} {text}")
 
     async def _keepalive_listen_key(self) -> bool:
         """Keep alive the listen key to prevent timeout."""
@@ -93,20 +123,38 @@ class AsterWebSocketManager:
                 'Content-Type': 'application/x-www-form-urlencoded'
             }
 
-            async with aiohttp.ClientSession() as session:
+            if self.get_session:
+                session = self.get_session()
                 async with session.put(
                     f"{self.base_url}/fapi/v1/listenKey",
                     headers=headers,
                     data=params
                 ) as response:
+                    text = await response.text()
                     if response.status == 200:
                         if self.logger:
                             self.logger.log("Listen key keepalive successful", "DEBUG")
                         return True
                     else:
                         if self.logger:
-                            self.logger.log(f"Failed to keepalive listen key: {response.status}", "WARNING")
+                            self.logger.log(f"Failed to keepalive listen key: {response.status} {text}", "WARNING")
                         return False
+            else:
+                async with aiohttp.ClientSession() as session:
+                    async with session.put(
+                        f"{self.base_url}/fapi/v1/listenKey",
+                        headers=headers,
+                        data=params
+                    ) as response:
+                        text = await response.text()
+                        if response.status == 200:
+                            if self.logger:
+                                self.logger.log("Listen key keepalive successful", "DEBUG")
+                            return True
+                        else:
+                            if self.logger:
+                                self.logger.log(f"Failed to keepalive listen key: {response.status} {text}", "WARNING")
+                            return False
         except Exception as e:
             if self.logger:
                 self.logger.log(f"Error keeping alive listen key: {e}", "ERROR")
@@ -496,7 +544,8 @@ class AsterClient(BaseExchangeClient):
             config=self.config,
             api_key=self.api_key,
             secret_key=self.secret_key,
-            order_update_callback=self._handle_websocket_order_update
+            order_update_callback=self._handle_websocket_order_update,
+            get_session=self._ensure_http,
         )
 
         # Set logger for WebSocket manager
