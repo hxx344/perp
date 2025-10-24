@@ -434,13 +434,23 @@ class HedgingCycleExecutor:
                             try:
                                 size_mb = float(getattr(st, "size", 0)) / (1024 * 1024)
                                 count = int(getattr(st, "count", 0)) if hasattr(st, "count") else 0
-                                # First frame summary
-                                frame = None
+                                # Prefer the deepest frame (most specific). If filter is set, prefer last frame matching filter.
+                                display = None
                                 try:
-                                    frame = st.traceback[0]
+                                    tb_frames = list(st.traceback)
                                 except Exception:
-                                    frame = None
-                                loc = f"{frame.filename}:{frame.lineno}" if frame else "<unknown>"
+                                    tb_frames = []
+                                if tb_frames:
+                                    display = tb_frames[-1]
+                                    if filt_sub:
+                                        for fr in reversed(tb_frames):
+                                            try:
+                                                if filt_sub in str(fr.filename):
+                                                    display = fr
+                                                    break
+                                            except Exception:
+                                                continue
+                                loc = f"{display.filename}:{display.lineno}" if display else "<unknown>"
                                 self.logger.log(
                                     f"#{i:02d} {size_mb:.3f} MB in {count} blocks at {loc}",
                                     "INFO",
