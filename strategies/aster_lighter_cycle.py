@@ -187,6 +187,8 @@ class CycleConfig:
     # Housekeeping and memory monitoring
     memory_clean_interval_seconds: float = 300.0
     memory_warn_mb: float = 0.0
+    # Logging
+    log_to_console: bool = False
 
 
 @dataclass
@@ -260,7 +262,11 @@ class HedgingCycleExecutor:
     def __init__(self, config: CycleConfig):
         self.config = config
         ticker_label = f"{config.aster_ticker}_{config.lighter_ticker}".replace("/", "-")
-        self.logger = TradingLogger(exchange="hedge", ticker=ticker_label, log_to_console=True)
+        self.logger = TradingLogger(
+            exchange="hedge",
+            ticker=ticker_label,
+            log_to_console=bool(getattr(config, "log_to_console", False)),
+        )
 
         self._lighter_quantity_min = config.lighter_quantity_min
         self._lighter_quantity_max = config.lighter_quantity_max
@@ -1282,7 +1288,8 @@ class HedgingCycleExecutor:
         if position == 0:
             self.logger.log("No Lighter position detected; no emergency action required", "INFO")
             # Add a blank line for readability before the next cycle output
-            print()
+            if bool(getattr(self.config, "log_to_console", False)):
+                print()
             return
 
         # Positive values denote a net long position; negative values denote a net short position.
@@ -1475,6 +1482,11 @@ def _parse_args() -> argparse.Namespace:
         help="Console logging level (DEBUG, INFO, WARNING, ERROR)",
     )
     parser.add_argument(
+        "--log-to-console",
+        action="store_true",
+        help="Also log strategy messages to stdout/stderr (increases tmux scrollback); default off",
+    )
+    parser.add_argument(
         "--memory-clean-interval",
         type=float,
         default=300.0,
@@ -1500,11 +1512,14 @@ def _print_summary(
     results: List[LegResult],
     cycle_number: Optional[int] = None,
     logger: Optional[TradingLogger] = None,
+    *,
+    to_console: bool = True,
 ) -> None:
     title = f"Cycle {cycle_number} Summary" if cycle_number is not None else "Cycle Summary"
     header = f"\n{title}"
-    print(header)
-    print("=" * len(header))
+    if to_console:
+        print(header)
+        print("=" * len(header))
     if logger:
         # Log only the header to the file to avoid duplicating each leg line
         logger.log(title, "INFO")
@@ -1523,7 +1538,10 @@ def _print_summary(
             parts.insert(3, f"ref={_format_decimal(leg.reference_price, places=2)}")
 
         line = " | ".join(parts)
-        print(line)
+        if to_console:
+            print(line)
+        if logger and not to_console:
+            logger.log(line, "INFO")
 
 
 def _to_decimal(value: Decimal | float | int | str) -> Decimal:
@@ -1628,20 +1646,35 @@ def _print_pnl_progress(
     lighter_balance: Optional[Decimal],
     total_runtime_seconds: float,
     logger: Optional[TradingLogger] = None,
+    *,
+    to_console: bool = True,
 ) -> None:
     header = f"PnL Progress After Cycle {cycle_number}"
-    print(header)
-    print("-" * len(header))
-    print(f"Cycle PnL: {_format_decimal(cycle_pnl, places=2)}")
-    print(f"Cumulative PnL: {_format_decimal(cumulative_pnl, places=2)}")
-    print(f"Cycle Volume (USD): {_format_decimal(cycle_volume, places=2)}")
-    print(f"Cumulative Volume (USD): {_format_decimal(cumulative_volume, places=2)}")
-    print(f"Cycle Duration: {cycle_duration_seconds:.2f}s")
-    print(f"Runtime Since Start: {_format_duration(total_runtime_seconds)}")
-    if lighter_balance is not None:
-        print(f"Lighter Available Balance: {_format_decimal(lighter_balance, places=2)}")
-    else:
-        print("Lighter Available Balance: unavailable")
+    if to_console:
+        print(header)
+        print("-" * len(header))
+        print(f"Cycle PnL: {_format_decimal(cycle_pnl, places=2)}")
+        print(f"Cumulative PnL: {_format_decimal(cumulative_pnl, places=2)}")
+        print(f"Cycle Volume (USD): {_format_decimal(cycle_volume, places=2)}")
+        print(f"Cumulative Volume (USD): {_format_decimal(cumulative_volume, places=2)}")
+        print(f"Cycle Duration: {cycle_duration_seconds:.2f}s")
+        print(f"Runtime Since Start: {_format_duration(total_runtime_seconds)}")
+        if lighter_balance is not None:
+            print(f"Lighter Available Balance: {_format_decimal(lighter_balance, places=2)}")
+        else:
+            print("Lighter Available Balance: unavailable")
+    if logger and not to_console:
+        logger.log(header, "INFO")
+        logger.log(f"Cycle PnL: {_format_decimal(cycle_pnl, places=2)}", "INFO")
+        logger.log(f"Cumulative PnL: {_format_decimal(cumulative_pnl, places=2)}", "INFO")
+        logger.log(f"Cycle Volume (USD): {_format_decimal(cycle_volume, places=2)}", "INFO")
+        logger.log(f"Cumulative Volume (USD): {_format_decimal(cumulative_volume, places=2)}", "INFO")
+        logger.log(f"Cycle Duration: {cycle_duration_seconds:.2f}s", "INFO")
+        logger.log(f"Runtime Since Start: {_format_duration(total_runtime_seconds)}", "INFO")
+        if lighter_balance is not None:
+            logger.log(f"Lighter Available Balance: {_format_decimal(lighter_balance, places=2)}", "INFO")
+        else:
+            logger.log("Lighter Available Balance: unavailable", "INFO")
 
 
 
@@ -1707,6 +1740,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
         memory_clean_interval_seconds=args.memory_clean_interval,
         memory_warn_mb=args.memory_warn_mb,
+        log_to_console=bool(getattr(args, "log_to_console", False)),
     )
 
     executor = HedgingCycleExecutor(config)
@@ -1789,7 +1823,12 @@ async def _async_main(args: argparse.Namespace) -> None:
                     "INFO",
                 )
             else:
-                _print_summary(results, cycle_number=cycle_index, logger=executor.logger)
+                _print_summary(
+                    results,
+                    cycle_number=cycle_index,
+                    logger=executor.logger,
+                    to_console=bool(getattr(executor.config, "log_to_console", False)),
+                )
 
                 cycle_pnl = _calculate_cycle_pnl(results)
                 cumulative_pnl += cycle_pnl
@@ -1817,6 +1856,7 @@ async def _async_main(args: argparse.Namespace) -> None:
                     lighter_balance,
                     total_runtime,
                     logger=executor.logger,
+                    to_console=bool(getattr(executor.config, "log_to_console", False)),
                 )
 
             try:

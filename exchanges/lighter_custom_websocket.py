@@ -30,6 +30,9 @@ class LighterCustomWebSocketManager:
         self.order_book_offset = None
         self.order_book_sequence_gap = False
         self.order_book_lock = asyncio.Lock()
+        # Hard caps and housekeeping
+        self.max_levels = 50  # keep top-N levels per side to bound memory
+        self._cleanup_every_messages = 200  # aggressive periodic trim
 
         # WebSocket URL
         self.ws_url = "wss://mainnet.zklighter.elliot.ai/stream"
@@ -81,12 +84,31 @@ class LighterCustomWebSocketManager:
                     continue
 
                 if size == 0:
-                    ob.pop(price, None)
+                    # Remove level; if it was best, recompute lazily
+                    removed = ob.pop(price, None)
+                    if removed is not None:
+                        if side == "bids" and self.best_bid is not None and price >= self.best_bid:
+                            # recompute best bid
+                            self.best_bid = max(ob.keys()) if ob else None
+                        if side == "asks" and self.best_ask is not None and price <= self.best_ask:
+                            # recompute best ask
+                            self.best_ask = min(ob.keys()) if ob else None
                 else:
+                    # Upsert level and adjust best incrementally
                     ob[price] = size
+                    if side == "bids":
+                        if self.best_bid is None or price > self.best_bid:
+                            self.best_bid = price
+                    else:
+                        if self.best_ask is None or price < self.best_ask:
+                            self.best_ask = price
             except (KeyError, ValueError, TypeError) as e:
                 self._log(f"Error processing order book update: {e}, update: {update}", "ERROR")
                 continue
+
+        # Hard cap: if levels explode between cleanups, trim immediately
+        if len(ob) > self.max_levels * 2:
+            self._trim_side_inplace(side)
 
     def validate_order_book_offset(self, new_offset: int) -> bool:
         """Validate that the new offset is sequential and handle gaps."""
@@ -177,16 +199,14 @@ class LighterCustomWebSocketManager:
             raise
 
     def get_best_levels(self) -> Tuple[Tuple[Optional[float], Optional[float]], Tuple[Optional[float], Optional[float]]]:
-        """Get the best bid and ask levels from the current order book."""
+        """Get the best bid and ask levels using maintained best prices (O(1))."""
         try:
-            bids = list(self.order_book["bids"].items())
-            asks = list(self.order_book["asks"].items())
-
-            best_bid = max(bids) if bids else (None, None)
-            best_ask = min(asks) if asks else (None, None)
-
-            return best_bid, best_ask
-        except (ValueError, KeyError) as e:
+            bb = self.best_bid
+            ba = self.best_ask
+            bb_size = self.order_book["bids"].get(bb) if bb is not None else None
+            ba_size = self.order_book["asks"].get(ba) if ba is not None else None
+            return (bb, bb_size), (ba, ba_size)
+        except Exception as e:
             self._log(f"Error getting best levels: {e}", "ERROR")
             return (None, None), (None, None)
 
@@ -201,26 +221,33 @@ class LighterCustomWebSocketManager:
         except asyncio.TimeoutError:
             return False
 
-    def cleanup_old_order_book_levels(self):
-        """Clean up old order book levels to prevent memory leaks."""
+    def _trim_side_inplace(self, side: str) -> None:
+        """Trim a single side to max_levels keeping best prices."""
         try:
-            # Keep only the top 100 levels on each side to prevent memory bloat
-            max_levels = 100
+            ob = self.order_book[side]
+            if len(ob) <= self.max_levels:
+                return
+            # Use nlargest/nsmallest to avoid full sort
+            import heapq
+            if side == "bids":
+                keep_prices = set(heapq.nlargest(self.max_levels, ob.keys()))
+            else:
+                keep_prices = set(heapq.nsmallest(self.max_levels, ob.keys()))
+            # Rebuild dict with only kept levels
+            self.order_book[side] = {p: ob[p] for p in keep_prices}
+            # Recompute bests for the side
+            if side == "bids":
+                self.best_bid = max(self.order_book["bids"].keys()) if self.order_book["bids"] else None
+            else:
+                self.best_ask = min(self.order_book["asks"].keys()) if self.order_book["asks"] else None
+        except Exception as e:
+            self._log(f"Error trimming order book side {side}: {e}", "ERROR")
 
-            # Clean up bids (keep highest prices)
-            if len(self.order_book["bids"]) > max_levels:
-                sorted_bids = sorted(self.order_book["bids"].items(), reverse=True)
-                self.order_book["bids"].clear()
-                for price, size in sorted_bids[:max_levels]:
-                    self.order_book["bids"][price] = size
-
-            # Clean up asks (keep lowest prices)
-            if len(self.order_book["asks"]) > max_levels:
-                sorted_asks = sorted(self.order_book["asks"].items())
-                self.order_book["asks"].clear()
-                for price, size in sorted_asks[:max_levels]:
-                    self.order_book["asks"][price] = size
-
+    def cleanup_old_order_book_levels(self):
+        """Clean up old order book levels to prevent memory bloat (bounded to max_levels)."""
+        try:
+            self._trim_side_inplace("bids")
+            self._trim_side_inplace("asks")
         except Exception as e:
             self._log(f"Error cleaning up order book levels: {e}", "ERROR")
 
@@ -332,11 +359,13 @@ class LighterCustomWebSocketManager:
                                               f"{len(self.order_book['bids'])} bids and "
                                               f"{len(self.order_book['asks'])} asks", "INFO")
 
-                                    (snapshot_best_bid, _), (snapshot_best_ask, _) = self.get_best_levels()
-                                    if snapshot_best_bid is not None:
-                                        self.best_bid = snapshot_best_bid
-                                    if snapshot_best_ask is not None:
-                                        self.best_ask = snapshot_best_ask
+                                    # Ensure best levels set from current dicts in O(logN)
+                                    try:
+                                        self.best_bid = max(self.order_book["bids"].keys()) if self.order_book["bids"] else None
+                                        self.best_ask = min(self.order_book["asks"].keys()) if self.order_book["asks"] else None
+                                    except Exception:
+                                        self.best_bid = None
+                                        self.best_ask = None
                                     if self.best_bid is not None and self.best_ask is not None:
                                         self.ready_event.set()
 
@@ -375,15 +404,7 @@ class LighterCustomWebSocketManager:
                                         # Release lock before network I/O
                                         break
 
-                                    # Get the best bid and ask levels
-                                    (best_bid_price, best_bid_size), (best_ask_price, best_ask_size) = self.get_best_levels()
-
-                                    # Update global variables
-                                    if best_bid_price is not None:
-                                        self.best_bid = best_bid_price
-                                    if best_ask_price is not None:
-                                        self.best_ask = best_ask_price
-
+                                    # ready when both sides present
                                     if self.best_bid is not None and self.best_ask is not None:
                                         self.ready_event.set()
 
@@ -402,7 +423,7 @@ class LighterCustomWebSocketManager:
 
                             # Periodic cleanup outside the lock
                             cleanup_counter += 1
-                            if cleanup_counter >= 1000:  # Clean up every 1000 messages
+                            if cleanup_counter >= self._cleanup_every_messages:  # frequent cleanup to bound memory
                                 self.cleanup_old_order_book_levels()
                                 cleanup_counter = 0
 
