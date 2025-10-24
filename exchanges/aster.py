@@ -375,6 +375,22 @@ class AsterClient(BaseExchangeClient):
         # Initialize logger early
         self.logger = TradingLogger(exchange="aster", ticker=self.config.ticker, log_to_console=False)
         self._order_update_handler = None
+        # Reusable HTTP client session/connector (avoid per-request session churn)
+        self._http_connector: Optional[aiohttp.TCPConnector] = None
+        self._http_session: Optional[aiohttp.ClientSession] = None
+
+    def _ensure_http(self) -> aiohttp.ClientSession:
+        """Get or create a shared aiohttp session with bounded connector."""
+        if self._http_session is None or self._http_session.closed:
+            # Reasonable defaults to reduce socket/SSL churn and memory fragmentation
+            self._http_connector = aiohttp.TCPConnector(
+                limit=20,
+                ttl_dns_cache=300,
+                enable_cleanup_closed=True,
+            )
+            timeout = aiohttp.ClientTimeout(total=15)
+            self._http_session = aiohttp.ClientSession(connector=self._http_connector, timeout=timeout)
+        return self._http_session
 
     def _validate_config(self) -> None:
         """Validate Aster configuration."""
@@ -417,39 +433,39 @@ class AsterClient(BaseExchangeClient):
             'Content-Type': 'application/x-www-form-urlencoded'
         }
 
-        async with aiohttp.ClientSession() as session:
-            if method.upper() == 'GET':
-                # For GET requests, signature is based on query parameters only
-                signature = self._generate_signature(params)
-                params['signature'] = signature
+        session = self._ensure_http()
+        if method.upper() == 'GET':
+            # For GET requests, signature is based on query parameters only
+            signature = self._generate_signature(params)
+            params['signature'] = signature
 
-                async with session.get(url, params=params, headers=headers) as response:
-                    result = await response.json()
-                    if response.status != 200:
-                        raise Exception(f"API request failed: {result}")
-                    return result
-            elif method.upper() == 'POST':
-                # For POST requests, signature must include both query string and request body
-                # According to Aster API docs: totalParams = queryString + requestBody
-                all_params = {**params, **data}
-                signature = self._generate_signature(all_params)
-                all_params['signature'] = signature
+            async with session.get(url, params=params, headers=headers) as response:
+                result = await response.json()
+                if response.status != 200:
+                    raise Exception(f"API request failed: {result}")
+                return result
+        elif method.upper() == 'POST':
+            # For POST requests, signature must include both query string and request body
+            # According to Aster API docs: totalParams = queryString + requestBody
+            all_params = {**params, **data}
+            signature = self._generate_signature(all_params)
+            all_params['signature'] = signature
 
-                async with session.post(url, data=all_params, headers=headers) as response:
-                    result = await response.json()
-                    if response.status != 200:
-                        raise Exception(f"API request failed: {result}")
-                    return result
-            elif method.upper() == 'DELETE':
-                # For DELETE requests, signature is based on query parameters only
-                signature = self._generate_signature(params)
-                params['signature'] = signature
+            async with session.post(url, data=all_params, headers=headers) as response:
+                result = await response.json()
+                if response.status != 200:
+                    raise Exception(f"API request failed: {result}")
+                return result
+        elif method.upper() == 'DELETE':
+            # For DELETE requests, signature is based on query parameters only
+            signature = self._generate_signature(params)
+            params['signature'] = signature
 
-                async with session.delete(url, params=params, headers=headers) as response:
-                    result = await response.json()
-                    if response.status != 200:
-                        raise Exception(f"API request failed: {result}")
-                    return result
+            async with session.delete(url, params=params, headers=headers) as response:
+                result = await response.json()
+                if response.status != 200:
+                    raise Exception(f"API request failed: {result}")
+                return result
 
     async def connect(self) -> None:
         """Connect to Aster WebSocket."""
@@ -478,6 +494,14 @@ class AsterClient(BaseExchangeClient):
         try:
             if hasattr(self, 'ws_manager') and self.ws_manager:
                 await self.ws_manager.disconnect()
+            # Close shared HTTP session
+            if self._http_session is not None:
+                try:
+                    await self._http_session.close()
+                except Exception:
+                    pass
+                self._http_session = None
+                self._http_connector = None
         except Exception as e:
             self.logger.log(f"Error during Aster disconnect: {e}", "ERROR")
 
