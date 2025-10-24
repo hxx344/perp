@@ -497,12 +497,15 @@ class AsterClient(BaseExchangeClient):
             params['signature'] = signature
 
             async with session.get(url, params=params, headers=headers) as response:
-                # Fully read body to ensure buffers are released, then parse JSON
-                text = await response.text()
+                # Parse JSON directly to reduce memory overhead
                 try:
-                    result = json.loads(text)
-                except Exception:
+                    result = await response.json()
+                except aiohttp.ContentTypeError:
+                    text = await response.text()
                     result = {"raw": text}
+                except Exception:
+                    await response.read()
+                    raise
                 if response.status != 200:
                     raise Exception(f"API request failed ({response.status}): {result}")
                 return result
@@ -514,11 +517,14 @@ class AsterClient(BaseExchangeClient):
             all_params['signature'] = signature
 
             async with session.post(url, data=all_params, headers=headers) as response:
-                text = await response.text()
                 try:
-                    result = json.loads(text)
-                except Exception:
+                    result = await response.json()
+                except aiohttp.ContentTypeError:
+                    text = await response.text()
                     result = {"raw": text}
+                except Exception:
+                    await response.read()
+                    raise
                 if response.status != 200:
                     raise Exception(f"API request failed ({response.status}): {result}")
                 return result
@@ -528,11 +534,14 @@ class AsterClient(BaseExchangeClient):
             params['signature'] = signature
 
             async with session.delete(url, params=params, headers=headers) as response:
-                text = await response.text()
                 try:
-                    result = json.loads(text)
-                except Exception:
+                    result = await response.json()
+                except aiohttp.ContentTypeError:
+                    text = await response.text()
                     result = {"raw": text}
+                except Exception:
+                    await response.read()
+                    raise
                 if response.status != 200:
                     raise Exception(f"API request failed ({response.status}): {result}")
                 return result
