@@ -380,16 +380,24 @@ class AsterClient(BaseExchangeClient):
         self._http_session: Optional[aiohttp.ClientSession] = None
 
     def _ensure_http(self) -> aiohttp.ClientSession:
-        """Get or create a shared aiohttp session with bounded connector."""
+        """Get or create a shared aiohttp session with bounded connector and no cookie persistence."""
         if self._http_session is None or self._http_session.closed:
             # Reasonable defaults to reduce socket/SSL churn and memory fragmentation
+            # limit: cap total concurrent connections; limit_per_host: avoid too many to a single host
             self._http_connector = aiohttp.TCPConnector(
                 limit=20,
+                limit_per_host=10,
                 ttl_dns_cache=300,
                 enable_cleanup_closed=True,
             )
             timeout = aiohttp.ClientTimeout(total=15)
-            self._http_session = aiohttp.ClientSession(connector=self._http_connector, timeout=timeout)
+            # Disable cookie jar to avoid long-term cookie accumulation
+            cookie_jar = aiohttp.DummyCookieJar()
+            self._http_session = aiohttp.ClientSession(
+                connector=self._http_connector,
+                timeout=timeout,
+                cookie_jar=cookie_jar,
+            )
         return self._http_session
 
     def _validate_config(self) -> None:
@@ -434,17 +442,23 @@ class AsterClient(BaseExchangeClient):
         }
 
         session = self._ensure_http()
-        if method.upper() == 'GET':
+        method_upper = method.upper()
+        if method_upper == 'GET':
             # For GET requests, signature is based on query parameters only
             signature = self._generate_signature(params)
             params['signature'] = signature
 
             async with session.get(url, params=params, headers=headers) as response:
-                result = await response.json()
+                # Fully read body to ensure buffers are released, then parse JSON
+                text = await response.text()
+                try:
+                    result = json.loads(text)
+                except Exception:
+                    result = {"raw": text}
                 if response.status != 200:
-                    raise Exception(f"API request failed: {result}")
+                    raise Exception(f"API request failed ({response.status}): {result}")
                 return result
-        elif method.upper() == 'POST':
+        elif method_upper == 'POST':
             # For POST requests, signature must include both query string and request body
             # According to Aster API docs: totalParams = queryString + requestBody
             all_params = {**params, **data}
@@ -452,19 +466,27 @@ class AsterClient(BaseExchangeClient):
             all_params['signature'] = signature
 
             async with session.post(url, data=all_params, headers=headers) as response:
-                result = await response.json()
+                text = await response.text()
+                try:
+                    result = json.loads(text)
+                except Exception:
+                    result = {"raw": text}
                 if response.status != 200:
-                    raise Exception(f"API request failed: {result}")
+                    raise Exception(f"API request failed ({response.status}): {result}")
                 return result
-        elif method.upper() == 'DELETE':
+        elif method_upper == 'DELETE':
             # For DELETE requests, signature is based on query parameters only
             signature = self._generate_signature(params)
             params['signature'] = signature
 
             async with session.delete(url, params=params, headers=headers) as response:
-                result = await response.json()
+                text = await response.text()
+                try:
+                    result = json.loads(text)
+                except Exception:
+                    result = {"raw": text}
                 if response.status != 200:
-                    raise Exception(f"API request failed: {result}")
+                    raise Exception(f"API request failed ({response.status}): {result}")
                 return result
 
     async def connect(self) -> None:
