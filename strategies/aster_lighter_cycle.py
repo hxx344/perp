@@ -317,6 +317,8 @@ class HedgingCycleExecutor:
         self.lighter_client: Optional["LighterClient"] = None
         self._last_leg1_price: Optional[Decimal] = None
         self._housekeeping_task: Optional[asyncio.Task] = None
+        # Flag to indicate whether current cycle experienced a Lighter timeout
+        self._cycle_had_timeout: bool = False
 
     async def _memory_housekeeping_loop(self) -> None:
         """Periodically trigger GC and clean bounded in-memory states.
@@ -478,6 +480,8 @@ class HedgingCycleExecutor:
         results: List[LegResult] = []
 
         # Leg 1: Aster maker entry
+        # Reset per-cycle flags
+        self._cycle_had_timeout = False
         self._last_leg1_price = None
         self._current_cycle_lighter_quantity = None
         entry_direction = self.config.direction
@@ -950,6 +954,11 @@ class HedgingCycleExecutor:
             ),
             "WARNING",
         )
+        # Mark that this cycle had a Lighter timeout to avoid skewed summary/PNL later
+        try:
+            self._cycle_had_timeout = True
+        except Exception:
+            pass
 
         position_after: Optional[Decimal] = None
         try:
@@ -1771,35 +1780,44 @@ async def _async_main(args: argparse.Namespace) -> None:
             cycle_duration = time.time() - cycle_start_time
             total_runtime = time.time() - run_start_time
             executor.logger.log(f"Completed hedging cycle #{cycle_index}", "INFO")
-            _print_summary(results, cycle_number=cycle_index, logger=executor.logger)
+            if getattr(executor, "_cycle_had_timeout", False):
+                executor.logger.log(
+                    (
+                        f"Cycle {cycle_index} experienced Lighter timeout/position-based fill; "
+                        f"skipping summary and PnL/volume accumulation to avoid distortion"
+                    ),
+                    "INFO",
+                )
+            else:
+                _print_summary(results, cycle_number=cycle_index, logger=executor.logger)
 
-            cycle_pnl = _calculate_cycle_pnl(results)
-            cumulative_pnl += cycle_pnl
+                cycle_pnl = _calculate_cycle_pnl(results)
+                cumulative_pnl += cycle_pnl
 
-            cycle_volume = _calculate_cycle_volume(results)
-            cumulative_volume += cycle_volume
+                cycle_volume = _calculate_cycle_volume(results)
+                cumulative_volume += cycle_volume
 
-            lighter_balance: Optional[Decimal] = None
-            if executor.lighter_client:
-                try:
-                    lighter_balance = await executor.lighter_client.get_available_balance()
-                except Exception as exc:
-                    executor.logger.log(
-                        f"Unable to fetch Lighter balance after cycle {cycle_index}: {exc}",
-                        "WARNING",
-                    )
+                lighter_balance: Optional[Decimal] = None
+                if executor.lighter_client:
+                    try:
+                        lighter_balance = await executor.lighter_client.get_available_balance()
+                    except Exception as exc:
+                        executor.logger.log(
+                            f"Unable to fetch Lighter balance after cycle {cycle_index}: {exc}",
+                            "WARNING",
+                        )
 
-            _print_pnl_progress(
-                cycle_index,
-                cycle_pnl,
-                cumulative_pnl,
-                cycle_volume,
-                cumulative_volume,
-                cycle_duration,
-                lighter_balance,
-                total_runtime,
-                logger=executor.logger,
-            )
+                _print_pnl_progress(
+                    cycle_index,
+                    cycle_pnl,
+                    cumulative_pnl,
+                    cycle_volume,
+                    cumulative_volume,
+                    cycle_duration,
+                    lighter_balance,
+                    total_runtime,
+                    logger=executor.logger,
+                )
 
             try:
                 await executor.ensure_lighter_flat()
