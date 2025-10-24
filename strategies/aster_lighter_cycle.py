@@ -22,6 +22,7 @@ import sys
 import time
 import os
 import gc
+import tracemalloc
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -189,6 +190,12 @@ class CycleConfig:
     memory_warn_mb: float = 0.0
     # Logging
     log_to_console: bool = False
+    # Tracemalloc sampling for memory hotspot diagnostics
+    tracemalloc_enabled: bool = False
+    tracemalloc_top: int = 15
+    tracemalloc_group_by: str = "lineno"  # one of: lineno, traceback, filename
+    tracemalloc_filter: Optional[str] = None  # only include entries whose path/trace contains this substring
+    tracemalloc_frames: int = 25
 
 
 @dataclass
@@ -325,6 +332,9 @@ class HedgingCycleExecutor:
         self._housekeeping_task: Optional[asyncio.Task] = None
         # Flag to indicate whether current cycle experienced a Lighter timeout
         self._cycle_had_timeout: bool = False
+        # Tracemalloc state
+        self._tracemalloc_started: bool = False
+        self._last_tracemalloc_snapshot = None
 
     async def _memory_housekeeping_loop(self) -> None:
         """Periodically trigger GC and clean bounded in-memory states.
@@ -337,6 +347,17 @@ class HedgingCycleExecutor:
         warn_mb = float(getattr(self.config, "memory_warn_mb", 0.0) or 0.0)
         # Clamp interval to sensible bounds
         interval_s = max(30.0, min(interval_s, 3600.0))
+
+        # Initialize tracemalloc if requested
+        try:
+            if getattr(self.config, "tracemalloc_enabled", False) and not tracemalloc.is_tracing():
+                frames = int(getattr(self.config, "tracemalloc_frames", 25) or 25)
+                frames = max(1, min(frames, 50))
+                tracemalloc.start(frames)
+                self._tracemalloc_started = True
+                self.logger.log(f"Tracemalloc started with {frames} frames", "INFO")
+        except Exception as exc:
+            self.logger.log(f"Failed to start tracemalloc: {exc}", "WARNING")
 
         while True:
             try:
@@ -379,6 +400,57 @@ class HedgingCycleExecutor:
                         self.lighter_client.prune_caches()
                 except Exception:
                     pass
+
+                # Tracemalloc snapshot and top-N stats (best-effort)
+                try:
+                    if getattr(self.config, "tracemalloc_enabled", False) and tracemalloc.is_tracing():
+                        group_by = (getattr(self.config, "tracemalloc_group_by", "lineno") or "lineno").lower()
+                        top_n = int(getattr(self.config, "tracemalloc_top", 15) or 15)
+                        top_n = max(5, min(top_n, 50))
+                        filt_sub = getattr(self.config, "tracemalloc_filter", None)
+
+                        snap = tracemalloc.take_snapshot()
+                        stats = None
+                        if self._last_tracemalloc_snapshot is not None:
+                            stats = snap.compare_to(self._last_tracemalloc_snapshot, group_by)
+                        else:
+                            stats = snap.statistics(group_by)
+
+                        # Optional filtering by substring in traceback or filename
+                        if filt_sub:
+                            fs = []
+                            for st in stats:
+                                try:
+                                    tb = st.traceback
+                                    if any((filt_sub in str(fr.filename)) for fr in tb):
+                                        fs.append(st)
+                                except Exception:
+                                    continue
+                            stats = fs
+
+                        # Log top-N entries
+                        self.logger.log("Tracemalloc top allocations:", "INFO")
+                        for i, st in enumerate(stats[:top_n], start=1):
+                            try:
+                                size_mb = float(getattr(st, "size", 0)) / (1024 * 1024)
+                                count = int(getattr(st, "count", 0)) if hasattr(st, "count") else 0
+                                # First frame summary
+                                frame = None
+                                try:
+                                    frame = st.traceback[0]
+                                except Exception:
+                                    frame = None
+                                loc = f"{frame.filename}:{frame.lineno}" if frame else "<unknown>"
+                                self.logger.log(
+                                    f"#{i:02d} {size_mb:.3f} MB in {count} blocks at {loc}",
+                                    "INFO",
+                                )
+                            except Exception:
+                                continue
+
+                        self._last_tracemalloc_snapshot = snap
+                except Exception as exc:
+                    self.logger.log(f"Tracemalloc sampling failed: {exc}", "WARNING")
 
             except asyncio.CancelledError:
                 break
@@ -1498,6 +1570,33 @@ def _parse_args() -> argparse.Namespace:
         default=0.0,
         help="If > 0, emit a WARNING log when process RSS exceeds this threshold in MB (0 disables)",
     )
+    parser.add_argument(
+        "--tracemalloc",
+        action="store_true",
+        help="Enable periodic tracemalloc snapshots in housekeeping to find allocation hotspots",
+    )
+    parser.add_argument(
+        "--tracemalloc-top",
+        type=int,
+        default=15,
+        help="Number of top allocation entries to log per snapshot (5..50)",
+    )
+    parser.add_argument(
+        "--tracemalloc-group-by",
+        choices=["lineno", "traceback", "filename"],
+        default="lineno",
+        help="Group statistics by this key for tracemalloc reporting",
+    )
+    parser.add_argument(
+        "--tracemalloc-filter",
+        help="Only include allocations whose traceback contains this substring (e.g., 'perp-dex-tools')",
+    )
+    parser.add_argument(
+        "--tracemalloc-frames",
+        type=int,
+        default=25,
+        help="Number of frames to capture per allocation (1..50)",
+    )
     return parser.parse_args()
 
 
@@ -1741,6 +1840,11 @@ async def _async_main(args: argparse.Namespace) -> None:
         memory_clean_interval_seconds=args.memory_clean_interval,
         memory_warn_mb=args.memory_warn_mb,
         log_to_console=bool(getattr(args, "log_to_console", False)),
+        tracemalloc_enabled=bool(getattr(args, "tracemalloc", False)),
+        tracemalloc_top=int(getattr(args, "tracemalloc_top", 15) or 15),
+        tracemalloc_group_by=str(getattr(args, "tracemalloc_group_by", "lineno") or "lineno"),
+        tracemalloc_filter=getattr(args, "tracemalloc_filter", None),
+        tracemalloc_frames=int(getattr(args, "tracemalloc_frames", 25) or 25),
     )
 
     executor = HedgingCycleExecutor(config)
