@@ -189,7 +189,7 @@ class CycleConfig:
     memory_clean_interval_seconds: float = 300.0
     memory_warn_mb: float = 0.0
     # Logging
-    log_to_console: bool = False
+    log_to_console: bool = True
     # Tracemalloc sampling for memory hotspot diagnostics
     tracemalloc_enabled: bool = False
     tracemalloc_top: int = 15
