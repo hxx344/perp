@@ -434,27 +434,47 @@ class HedgingCycleExecutor:
                             try:
                                 size_mb = float(getattr(st, "size", 0)) / (1024 * 1024)
                                 count = int(getattr(st, "count", 0)) if hasattr(st, "count") else 0
-                                # Prefer the deepest frame (most specific). If filter is set, prefer last frame matching filter.
-                                display = None
+
+                                # Extract traceback frames (most-recent allocation frame first)
                                 try:
                                     tb_frames = list(st.traceback)
                                 except Exception:
                                     tb_frames = []
-                                if tb_frames:
-                                    display = tb_frames[-1]
-                                    if filt_sub:
-                                        for fr in reversed(tb_frames):
-                                            try:
-                                                if filt_sub in str(fr.filename):
-                                                    display = fr
-                                                    break
-                                            except Exception:
-                                                continue
-                                loc = f"{display.filename}:{display.lineno}" if display else "<unknown>"
-                                self.logger.log(
-                                    f"#{i:02d} {size_mb:.3f} MB in {count} blocks at {loc}",
-                                    "INFO",
-                                )
+
+                                # Allocation site: closest frame to the actual allocation
+                                alloc_fr = tb_frames[0] if tb_frames else None
+
+                                # Business site: the first frame whose filename contains the filter substring (closest to allocation)
+                                app_fr = None
+                                if filt_sub and tb_frames:
+                                    try:
+                                        for fr in tb_frames:
+                                            if filt_sub in str(fr.filename):
+                                                app_fr = fr
+                                                break
+                                    except Exception:
+                                        app_fr = None
+
+                                # Fallback when no filter provided: try to pick a non-site-packages frame near the allocation
+                                if app_fr is None and tb_frames:
+                                    try:
+                                        for fr in tb_frames:
+                                            fname = str(fr.filename)
+                                            if "site-packages" not in fname and "/env/" not in fname and "\\env\\" not in fname:
+                                                app_fr = fr
+                                                break
+                                    except Exception:
+                                        app_fr = None
+
+                                # Compose locations
+                                alloc_loc = f"{alloc_fr.filename}:{alloc_fr.lineno}" if alloc_fr else "<unknown>"
+                                if app_fr and (not alloc_fr or (app_fr.filename != alloc_fr.filename or app_fr.lineno != alloc_fr.lineno)):
+                                    app_loc = f"{app_fr.filename}:{app_fr.lineno}"
+                                    msg = f"#{i:02d} {size_mb:.3f} MB in {count} blocks at {alloc_loc} | app {app_loc}"
+                                else:
+                                    msg = f"#{i:02d} {size_mb:.3f} MB in {count} blocks at {alloc_loc}"
+
+                                self.logger.log(msg, "INFO")
                             except Exception:
                                 continue
 
