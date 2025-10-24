@@ -1585,8 +1585,16 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--log-to-console",
+        dest="log_to_console",
         action="store_true",
-        help="Also log strategy messages to stdout/stderr (increases tmux scrollback); default off",
+        default=None,
+        help="Also log strategy messages to stdout/stderr (default on; use --no-log-to-console to disable)",
+    )
+    parser.add_argument(
+        "--no-log-to-console",
+        dest="log_to_console",
+        action="store_false",
+        help="Disable console logging for the strategy output",
     )
     parser.add_argument(
         "--memory-clean-interval",
@@ -1846,6 +1854,10 @@ async def _async_main(args: argparse.Namespace) -> None:
     else:
         lighter_quantity_base = args.quantity
 
+    log_to_console_option = getattr(args, "log_to_console", None)
+    if log_to_console_option is None:
+        log_to_console_option = True
+
     config = CycleConfig(
         aster_ticker=args.aster_ticker,
         lighter_ticker=args.lighter_ticker,
@@ -1869,7 +1881,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
         memory_clean_interval_seconds=args.memory_clean_interval,
         memory_warn_mb=args.memory_warn_mb,
-        log_to_console=bool(getattr(args, "log_to_console", False)),
+    log_to_console=bool(log_to_console_option),
         tracemalloc_enabled=bool(getattr(args, "tracemalloc", False)),
         tracemalloc_top=int(getattr(args, "tracemalloc_top", 15) or 15),
         tracemalloc_group_by=str(getattr(args, "tracemalloc_group_by", "lineno") or "lineno"),
