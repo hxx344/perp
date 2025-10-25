@@ -26,9 +26,14 @@ import tracemalloc
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING, Tuple, cast
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, cast
 
 import aiohttp
+from eth_account import Account
+from web3 import Web3
+from web3.exceptions import TimeExhausted
+
+from lighter.signer_client import SignerClient, create_api_key
 
 import dotenv
 
@@ -480,6 +485,591 @@ def _format_decimal(value: Optional[Decimal], places: int = 6) -> str:
     return text
 
 
+_LEADERBOARD_ENDPOINT = "/api/v1/leaderboard"
+
+
+def _extract_leaderboard_points(entries: Any, target_address: str) -> Optional[Decimal]:
+    if not isinstance(entries, list):
+        return None
+
+    candidate: Optional[Dict[str, Any]] = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = entry.get("entryId") or entry.get("entry_id")
+        if entry_id == 11:
+            candidate = entry
+            break
+
+    if candidate is None and target_address:
+        target_lower = target_address.lower()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            address = str(entry.get("l1_address") or entry.get("address") or "").lower()
+            if address == target_lower:
+                candidate = entry
+                break
+
+    if candidate is None:
+        return None
+
+    points_raw = candidate.get("points")
+    if points_raw is None:
+        return None
+
+    try:
+        return Decimal(str(points_raw))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+async def _fetch_lighter_leaderboard_points(
+    l1_address: str,
+    *,
+    base_url: Optional[str] = None,
+    timeout_seconds: float = 10.0,
+) -> Tuple[Optional[Decimal], Optional[Decimal]]:
+    address = (l1_address or "").strip()
+    if not address:
+        return None, None
+
+    leaderboard_base = (base_url or os.getenv("LIGHTER_BASE_URL") or LIGHTER_MAINNET_BASE_URL).strip()
+    if not leaderboard_base:
+        leaderboard_base = LIGHTER_MAINNET_BASE_URL
+
+    leaderboard_base = leaderboard_base.rstrip("/")
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    session = aiohttp.ClientSession(timeout=timeout)
+    close_session = True
+
+    async def _request_points(board_type: str) -> Optional[Decimal]:
+        url = f"{leaderboard_base}{_LEADERBOARD_ENDPOINT}"
+        params = {"type": board_type, "l1_address": address}
+        async with session.get(url, params=params) as response:
+            body_text = await response.text()
+            try:
+                payload = await response.json(content_type=None)
+            except aiohttp.ContentTypeError as exc:
+                raise RuntimeError(
+                    f"Leaderboard response for type '{board_type}' is not JSON: {body_text}"
+                ) from exc
+
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Leaderboard request for type '{board_type}' failed with HTTP {response.status}: {body_text}"
+                )
+
+            entries = payload.get("entries") if isinstance(payload, dict) else None
+            return _extract_leaderboard_points(entries, address)
+
+    try:
+        weekly_points = await _request_points("weekly")
+        total_points = await _request_points("all")
+        return weekly_points, total_points
+    finally:
+        if close_session and not session.closed:
+            await session.close()
+
+
+LIGHTER_MAINNET_BASE_URL = "https://mainnet.zklighter.elliot.ai"
+ARBITRUM_CHAIN_ID = 42161
+# Native USDC on Arbitrum One (deployed by Circle, not the legacy bridged USDC.e)
+ARBITRUM_USDC_CONTRACT = Web3.to_checksum_address("0xaf88d065e77c8cc2239327c5edb3a432268e5831")
+_REQUIRED_LIGHTER_ENV = (
+    "API_KEY_PRIVATE_KEY",
+    "LIGHTER_ACCOUNT_INDEX",
+    "LIGHTER_API_KEY_INDEX",
+)
+DEFAULT_LIGHTER_LEVERAGE = 50
+
+_ERC20_TRANSFER_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "account", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "decimals",
+        "outputs": [{"name": "", "type": "uint8"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "constant": False,
+        "inputs": [
+            {"name": "recipient", "type": "address"},
+            {"name": "amount", "type": "uint256"},
+        ],
+        "name": "transfer",
+        "outputs": [{"name": "", "type": "bool"}],
+        "stateMutability": "nonpayable",
+        "type": "function",
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "symbol",
+        "outputs": [{"name": "", "type": "string"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+]
+
+
+class LighterProvisioningError(RuntimeError):
+    """Raised when automated provisioning for Lighter credentials fails."""
+
+
+def _persist_env_value(env_path: Path, key: str, value: str) -> None:
+    normalized = value.strip()
+    dotenv.set_key(str(env_path), key, normalized, quote_mode="never")
+    os.environ[key] = normalized
+
+
+def _normalize_private_key_hex(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        return cleaned
+    return cleaned if cleaned.startswith("0x") else f"0x{cleaned}"
+
+
+async def _request_lighter_intent_address(
+    base_url: str,
+    from_address: str,
+    *,
+    chain_id: int = ARBITRUM_CHAIN_ID,
+    session: Optional[aiohttp.ClientSession] = None,
+) -> str:
+    close_session = False
+    if session is None or session.closed:
+        timeout = aiohttp.ClientTimeout(total=15)
+        session = aiohttp.ClientSession(timeout=timeout)
+        close_session = True
+
+    try:
+        url = f"{base_url.rstrip('/')}/api/v1/createIntentAddress"
+        form_payload = {
+            "from_addr": from_address,
+            "is_external_deposit": "true",
+            "amount": "0",
+            "chain_id": str(chain_id),
+        }
+        async with session.post(url, data=form_payload) as response:
+            body_text = await response.text()
+            try:
+                payload = await response.json(content_type=None)
+            except aiohttp.ContentTypeError:
+                payload = None
+
+            if response.status != 200:
+                raise LighterProvisioningError(
+                    f"createIntentAddress failed with HTTP {response.status}: {body_text}"
+                )
+
+            if isinstance(payload, dict):
+                intent_address = (
+                    payload.get("intent_address")
+                    or payload.get("deposit_address")
+                    or payload.get("address")
+                )
+                if intent_address:
+                    return Web3.to_checksum_address(intent_address)
+
+            raise LighterProvisioningError(
+                f"createIntentAddress response missing deposit address: {payload or body_text}"
+            )
+    finally:
+        if close_session and session is not None:
+            await session.close()
+
+
+async def _fetch_lighter_account_overview(
+    base_url: str,
+    l1_address: str,
+    *,
+    session: Optional[aiohttp.ClientSession] = None,
+) -> Optional[Dict[str, Any]]:
+    close_session = False
+    if session is None or session.closed:
+        timeout = aiohttp.ClientTimeout(total=15)
+        session = aiohttp.ClientSession(timeout=timeout)
+        close_session = True
+
+    try:
+        url = f"{base_url.rstrip('/')}/api/v1/account"
+        params = {"by": "l1_address", "value": l1_address}
+        async with session.get(url, params=params) as response:
+            body_text = await response.text()
+            payload: Any
+            try:
+                payload = await response.json(content_type=None)
+            except aiohttp.ContentTypeError:
+                payload = None
+
+            if response.status != 200:
+                raise LighterProvisioningError(
+                    f"account query failed with HTTP {response.status}: {body_text}"
+                )
+
+            accounts_raw: Any = None
+            if isinstance(payload, dict):
+                accounts_raw = payload.get("accounts")
+
+            if isinstance(accounts_raw, list):
+                for item in accounts_raw:
+                    if isinstance(item, dict):
+                        return item
+            return None
+    finally:
+        if close_session and session is not None:
+            await session.close()
+
+
+def _build_usdc_contract(web3: Web3):
+    return web3.eth.contract(address=ARBITRUM_USDC_CONTRACT, abi=_ERC20_TRANSFER_ABI)
+
+
+def _send_full_usdc_transfer(
+    web3: Web3,
+    private_key: str,
+    from_address: str,
+    destination: str,
+) -> Tuple[str, int, int]:
+    checksum_from = Web3.to_checksum_address(from_address)
+    checksum_dest = Web3.to_checksum_address(destination)
+    contract = _build_usdc_contract(web3)
+
+    balance = contract.functions.balanceOf(checksum_from).call()
+    if balance <= 0:
+        raise LighterProvisioningError(
+            "Arbitrum wallet native USDC (0xaf88...) balance is zero; cannot fund Lighter account"
+        )
+
+    decimals = int(contract.functions.decimals().call())
+
+    nonce = web3.eth.get_transaction_count(checksum_from)
+    gas_price = web3.eth.gas_price
+    transfer_fn = contract.functions.transfer(checksum_dest, balance)
+    gas_estimate = transfer_fn.estimate_gas({"from": checksum_from})
+    tx = transfer_fn.build_transaction(
+        {
+            "from": checksum_from,
+            "nonce": nonce,
+            "gas": gas_estimate,
+            "gasPrice": gas_price,
+            "chainId": ARBITRUM_CHAIN_ID,
+        }
+    )
+
+    signed_tx = web3.eth.account.sign_transaction(tx, private_key=private_key)
+    raw_tx = getattr(signed_tx, "rawTransaction", None)
+    if raw_tx is None:
+        raw_tx = getattr(signed_tx, "raw_transaction", None)
+    if raw_tx is None:
+        raise LighterProvisioningError("Signed transaction missing raw transaction payload")
+    tx_hash = web3.eth.send_raw_transaction(raw_tx)
+    try:
+        receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=600)
+    except TimeExhausted as exc:
+        raise LighterProvisioningError(
+            f"USDC transfer transaction {tx_hash.hex()} not confirmed within timeout"
+        ) from exc
+
+    if getattr(receipt, "status", 0) != 1:
+        raise LighterProvisioningError(
+            f"USDC transfer transaction {tx_hash.hex()} failed with status {getattr(receipt, 'status', 'unknown')}"
+        )
+
+    return tx_hash.hex(), balance, decimals
+
+
+async def _transfer_full_usdc_balance(
+    web3: Web3,
+    private_key: str,
+    from_address: str,
+    destination: str,
+) -> Tuple[str, int, int]:
+    return await asyncio.to_thread(
+        _send_full_usdc_transfer,
+        web3,
+        private_key,
+        from_address,
+        destination,
+    )
+
+
+def _format_usdc_amount_raw(amount: int, decimals: int) -> str:
+    quant = Decimal(amount) / (Decimal(10) ** Decimal(decimals))
+    return f"{quant.normalize():f} USDC" if quant else "0 USDC"
+
+
+def _extract_available_balance(account_obj: object) -> Decimal:
+    candidate = getattr(account_obj, "available_balance", None)
+    if candidate is None:
+        candidate = getattr(account_obj, "availableBalance", None)
+    if candidate is None and isinstance(account_obj, dict):
+        candidate = account_obj.get("available_balance") or account_obj.get("availableBalance")
+    to_dict_fn = getattr(account_obj, "to_dict", None)
+    if candidate is None and callable(to_dict_fn):
+        try:
+            account_dict_raw = to_dict_fn()
+        except Exception:
+            account_dict_raw = None
+        account_dict: Dict[str, Any] = {}
+        if isinstance(account_dict_raw, dict):
+            account_dict = cast(Dict[str, Any], account_dict_raw)
+        candidate = account_dict.get("available_balance") or account_dict.get("availableBalance")
+
+    if candidate is None:
+        return Decimal("0")
+
+    try:
+        return Decimal(str(candidate))
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal("0")
+
+
+async def _wait_for_lighter_account_ready(
+    base_url: str,
+    l1_address: str,
+    *,
+    expected_balance: Optional[Decimal],
+    logger: logging.Logger,
+    timeout_seconds: float = 900.0,
+    poll_interval: float = 60.0,
+) -> Tuple[int, Decimal]:
+    deadline = time.time() + timeout_seconds
+    tolerance = Decimal("0.000001")
+    if expected_balance is not None and expected_balance > 0:
+        tolerance = max(tolerance, expected_balance * Decimal("0.000001"))
+
+    last_error: Optional[str] = None
+    timeout = aiohttp.ClientTimeout(total=15)
+    session = aiohttp.ClientSession(timeout=timeout)
+
+    try:
+        while time.time() < deadline:
+            try:
+                account_data = await _fetch_lighter_account_overview(
+                    base_url,
+                    l1_address,
+                    session=session,
+                )
+            except LighterProvisioningError as exc:
+                last_error = str(exc)
+                logger.warning("Account status request failed: %s", exc)
+                await asyncio.sleep(poll_interval)
+                continue
+            except Exception as exc:
+                last_error = str(exc)
+                await asyncio.sleep(poll_interval)
+                continue
+
+            if not account_data:
+                last_error = "account not found"
+                await asyncio.sleep(poll_interval)
+                continue
+
+            account_index_raw = account_data.get("account_index") or account_data.get("index")
+            account_index: Optional[int] = None
+            if account_index_raw is not None:
+                try:
+                    account_index = int(account_index_raw)
+                except (TypeError, ValueError):
+                    account_index = None
+
+            if account_index is None:
+                last_error = "invalid account index"
+                await asyncio.sleep(poll_interval)
+                continue
+
+            available_balance = _extract_available_balance(account_data)
+            if expected_balance is None:
+                if available_balance > Decimal("0"):
+                    return account_index, available_balance
+                last_error = "available balance still zero"
+            else:
+                if available_balance >= expected_balance - tolerance:
+                    return account_index, available_balance
+                logger.info(
+                    "Lighter balance %s below expected %s; retrying in %.1fs",
+                    f"{available_balance.normalize():f}",
+                    f"{expected_balance.normalize():f}",
+                    poll_interval,
+                )
+
+            await asyncio.sleep(poll_interval)
+
+        raise LighterProvisioningError(
+            f"Timed out waiting for Lighter balance for {l1_address}: {last_error or 'balance not reached'}"
+        )
+    finally:
+        if not session.closed:
+            await session.close()
+
+
+async def _auto_provision_lighter_credentials(env_path: Path) -> None:
+    if all(os.getenv(key) for key in _REQUIRED_LIGHTER_ENV):
+        return
+
+    logger = logging.getLogger("lighter.provisioning")
+    logger.info("Missing Lighter credentials detected; starting auto provisioning")
+
+    base_url = (os.getenv("LIGHTER_BASE_URL") or LIGHTER_MAINNET_BASE_URL).strip()
+    if not base_url:
+        base_url = LIGHTER_MAINNET_BASE_URL
+
+    if "mainnet" not in base_url.lower():
+        raise LighterProvisioningError("Auto provisioning currently supports only Lighter mainnet")
+
+    rpc_url = (
+        os.getenv("ARBITRUM_RPC_URL")
+        or os.getenv("L1_RPC_URL")
+        or os.getenv("ARBITRUM_ONE_RPC_URL")
+    )
+    if not rpc_url:
+        raise LighterProvisioningError(
+            "ARBITRUM_RPC_URL (or L1_RPC_URL / ARBITRUM_ONE_RPC_URL) must be configured"
+        )
+
+    l1_private_key_env = (
+        os.getenv("L1_WALLET_PRIVATE_KEY")
+        or os.getenv("LIGHTER_L1_PRIVATE_KEY")
+        or ""
+    )
+    if not l1_private_key_env:
+        raise LighterProvisioningError("L1_WALLET_PRIVATE_KEY is required for provisioning")
+
+    l1_private_key = _normalize_private_key_hex(l1_private_key_env)
+    _persist_env_value(env_path, "L1_WALLET_PRIVATE_KEY", l1_private_key)
+
+    account = Account.from_key(l1_private_key)
+    l1_address = Web3.to_checksum_address(account.address)
+    _persist_env_value(env_path, "L1_WALLET_ADDRESS", l1_address)
+
+    web3 = Web3(Web3.HTTPProvider(rpc_url))
+    if not web3.is_connected():
+        raise LighterProvisioningError(f"Unable to connect to Arbitrum RPC at {rpc_url}")
+
+    try:
+        existing_account = await _fetch_lighter_account_overview(base_url, l1_address)
+    except Exception as exc:
+        logger.warning("Failed to query existing Lighter account: %s", exc)
+        existing_account = None
+
+    existing_balance = Decimal("0")
+    if existing_account is not None:
+        existing_balance = _extract_available_balance(existing_account)
+
+    expected_balance: Optional[Decimal] = None
+    if existing_balance > Decimal("0"):
+        expected_balance = existing_balance
+        logger.info(
+            "Detected existing Lighter balance %s; skipping USDC transfer",
+            f"{existing_balance.normalize():f}",
+        )
+    else:
+        logger.info("Requesting Lighter intent deposit address for %s", l1_address)
+        intent_address = await _request_lighter_intent_address(base_url, l1_address)
+        logger.info("Received Lighter intent address %s", intent_address)
+
+        logger.info("Transferring full USDC balance from %s to intent address", l1_address)
+        tx_hash, raw_amount, decimals = await _transfer_full_usdc_balance(
+            web3,
+            l1_private_key,
+            l1_address,
+            intent_address,
+        )
+        transfer_amount = Decimal(raw_amount) / (Decimal(10) ** Decimal(decimals))
+        expected_balance = existing_balance + transfer_amount
+
+        logger.info(
+            "Submitted USDC bridge transaction %s for %s",
+            tx_hash,
+            _format_usdc_amount_raw(raw_amount, decimals),
+        )
+
+    logger.info("Waiting for Lighter account readiness")
+    account_index, credited_balance = await _wait_for_lighter_account_ready(
+        base_url,
+        l1_address,
+        expected_balance=expected_balance,
+        logger=logger,
+    )
+
+    balance_display = f"{credited_balance.normalize():f}" if credited_balance else "0"
+    if expected_balance is not None:
+        logger.info(
+            "Lighter account ready: balance=%s (expected≈%s) account_index=%s",
+            balance_display,
+            f"{expected_balance.normalize():f}",
+            account_index,
+        )
+    else:
+        logger.info(
+            "Lighter account ready: balance=%s (account index %s)",
+            balance_display,
+            account_index,
+        )
+
+    logger.info("Generating new Lighter API key pair")
+    private_key, public_key, err = create_api_key()
+    if err:
+        raise LighterProvisioningError(f"Failed to create Lighter API key: {err}")
+
+    if not isinstance(private_key, str) or not isinstance(public_key, str):
+        raise LighterProvisioningError("Lighter SDK returned invalid API key pair")
+
+    private_key = _normalize_private_key_hex(private_key)
+    public_key = _normalize_private_key_hex(public_key)
+
+    api_key_index = random.randint(2, 253)
+    logger.info("Assigning API key index %s", api_key_index)
+
+    signer_client = SignerClient(
+        url=base_url,
+        private_key=private_key,
+        account_index=account_index,
+        api_key_index=api_key_index,
+    )
+    try:
+        logger.info("Submitting change_api_key transaction to bind API key")
+        _, error = await signer_client.change_api_key(
+            eth_private_key=l1_private_key,
+            new_pubkey=public_key,
+        )
+        if error is not None:
+            raise LighterProvisioningError(f"Failed to bind API key: {error}")
+
+        logger.info("Waiting for API key propagation on Lighter")
+        deadline = time.time() + 120
+        wait_error: Optional[str] = None
+        while time.time() < deadline:
+            check_error = signer_client.check_client()
+            if check_error is None:
+                break
+            wait_error = check_error
+            await asyncio.sleep(6)
+        else:
+            raise LighterProvisioningError(
+                f"API key verification failed: {wait_error or 'unknown error'}"
+            )
+    finally:
+        await signer_client.close()
+
+    _persist_env_value(env_path, "API_KEY_PRIVATE_KEY", private_key)
+    _persist_env_value(env_path, "LIGHTER_API_KEY_INDEX", str(api_key_index))
+    _persist_env_value(env_path, "LIGHTER_ACCOUNT_INDEX", str(account_index))
+
+    logger.info("Lighter provisioning complete. Credentials persisted to %s", env_path)
+
+
 class HedgingCycleExecutor:
     """Coordinates the four-leg hedging cycle between Aster and Lighter."""
 
@@ -553,6 +1143,7 @@ class HedgingCycleExecutor:
         # Tracemalloc state
         self._tracemalloc_started: bool = False
         self._last_tracemalloc_snapshot = None
+        self._lighter_l1_address = (os.getenv("L1_WALLET_ADDRESS") or "").strip()
 
     async def _memory_housekeeping_loop(self) -> None:
         """Periodically trigger GC and clean bounded in-memory states.
@@ -710,6 +1301,88 @@ class HedgingCycleExecutor:
     def _lighter_initial_direction(self) -> str:
         return "sell" if self.config.direction == "buy" else "buy"
 
+    async def _ensure_lighter_leverage(self, leverage: int) -> None:
+        if leverage <= 0:
+            return
+
+        if not self.lighter_client:
+            raise RuntimeError("Lighter client is not initialized")
+
+        signer_client = getattr(self.lighter_client, "lighter_client", None)
+        if signer_client is None:
+            raise RuntimeError("Lighter signer client is not initialized")
+
+        contract_id = getattr(self.lighter_client.config, "contract_id", None)
+        if contract_id is None:
+            raise RuntimeError("Lighter contract id not resolved yet")
+
+        try:
+            market_index = int(contract_id)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Invalid Lighter market index: {contract_id}") from exc
+
+        margin_mode = getattr(signer_client, "CROSS_MARGIN_MODE", None)
+        if margin_mode is None:
+            raise RuntimeError("Unable to determine Lighter margin mode for leverage update")
+
+        self.logger.log(
+            f"Updating Lighter leverage to {leverage}x (market {market_index})",
+            "INFO",
+        )
+
+        tx_info, _, err = await signer_client.update_leverage(
+            market_index,
+            margin_mode,
+            int(leverage),
+        )
+
+        if err is not None:
+            message = str(err)
+            lowered = message.lower()
+            if "same" in lowered or "already" in lowered:
+                self.logger.log(
+                    f"Lighter leverage already set to {leverage}x; no change required",
+                    "INFO",
+                )
+                return
+
+            raise RuntimeError(f"Failed to update Lighter leverage to {leverage}x: {message}")
+
+        self.logger.log(
+            f"Lighter leverage updated to {leverage}x (tx={tx_info})",
+            "INFO",
+        )
+
+    async def _log_leaderboard_points(self, cycle_number: int) -> None:
+        if not self._lighter_l1_address:
+            return
+
+        try:
+            weekly_points, total_points = await _fetch_lighter_leaderboard_points(
+                self._lighter_l1_address
+            )
+        except Exception as exc:
+            self.logger.log(
+                f"Failed to retrieve Lighter leaderboard points for {self._lighter_l1_address}: {exc}",
+                "WARNING",
+            )
+            return
+
+        if weekly_points is None and total_points is None:
+            self.logger.log(
+                f"Lighter leaderboard points unavailable for {self._lighter_l1_address}",
+                "INFO",
+            )
+            return
+
+        _print_leaderboard_points(
+            cycle_number,
+            weekly_points,
+            total_points,
+            logger=self.logger,
+            to_console=bool(getattr(self.config, "log_to_console", False)),
+        )
+
     async def setup(self) -> None:
         """Instantiate exchange clients, connect, and hydrate contract metadata."""
 
@@ -757,6 +1430,8 @@ class HedgingCycleExecutor:
             ),
             "INFO",
         )
+
+        await self._ensure_lighter_leverage(DEFAULT_LIGHTER_LEVERAGE)
 
         if not self._virtual_reference_symbol:
             self._virtual_reference_symbol = aster_contract_id
@@ -2094,6 +2769,29 @@ def _print_pnl_progress(
             logger.log("Lighter Available Balance: unavailable", "INFO")
 
 
+def _print_leaderboard_points(
+    cycle_number: int,
+    weekly_points: Optional[Decimal],
+    total_points: Optional[Decimal],
+    logger: Optional[TradingLogger] = None,
+    *,
+    to_console: bool = True,
+) -> None:
+    header = f"Lighter Leaderboard Points After Cycle {cycle_number}"
+    weekly_text = _format_decimal(weekly_points, places=2) if weekly_points is not None else "N/A"
+    total_text = _format_decimal(total_points, places=2) if total_points is not None else "N/A"
+
+    if to_console:
+        print(header)
+        print("-" * len(header))
+        print(f"Weekly Points: {weekly_text}")
+        print(f"Total Points: {total_text}")
+
+    if logger and not to_console:
+        logger.log(header, "INFO")
+        logger.log(f"Weekly Points: {weekly_text}", "INFO")
+        logger.log(f"Total Points: {total_text}", "INFO")
+
 
 async def _async_main(args: argparse.Namespace) -> None:
     env_path = Path(args.env_file)
@@ -2101,6 +2799,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"Env file not found: {env_path.resolve()}")
 
     dotenv.load_dotenv(env_path)
+    await _auto_provision_lighter_credentials(env_path)
+    dotenv.load_dotenv(env_path, override=True)
 
     lighter_quantity_min = args.lighter_quantity_min
     lighter_quantity_max = args.lighter_quantity_max
@@ -2284,6 +2984,8 @@ async def _async_main(args: argparse.Namespace) -> None:
                     logger=executor.logger,
                     to_console=bool(getattr(executor.config, "log_to_console", False)),
                 )
+
+                await executor._log_leaderboard_points(cycle_index)
 
             try:
                 await executor.ensure_lighter_flat()

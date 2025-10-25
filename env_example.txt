@@ -30,9 +30,14 @@ ASTER_API_KEY=your_aster_api_key
 ASTER_SECRET_KEY=your_aster_secret_key
 
 # Lighter Configuration
-API_KEY_PRIVATE_KEY=your_api_key_private_key_here
-LIGHTER_ACCOUNT_INDEX=0
-LIGHTER_API_KEY_INDEX=0
+API_KEY_PRIVATE_KEY=
+LIGHTER_ACCOUNT_INDEX=
+LIGHTER_API_KEY_INDEX=
+
+# Lighter Provisioning Wallet (required for automated setup)
+L1_WALLET_PRIVATE_KEY=0xyour_l1_private_key_here
+ARBITRUM_RPC_URL=https://arb1.arbitrum.io/rpc
+# Note: the script expects native Arbitrum USDC (contract 0xaf88d065e77c8cc2239327c5edb3a432268e5831)
 
 # Notification (optional)
 # guide: https://www.feishu.cn/hc/zh-CN/articles/185289387886-%E6%B6%88%E6%81%AF%E5%8A%A9%E6%89%8B-%E6%9C%BA%E5%99%A8%E4%BA%BA
