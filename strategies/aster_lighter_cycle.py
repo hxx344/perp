@@ -33,6 +33,9 @@ from eth_account import Account
 from web3 import Web3
 from web3.exceptions import TimeExhausted
 
+from lighter.api.account_api import AccountApi
+from lighter.api_client import ApiClient
+from lighter.configuration import Configuration
 from lighter.signer_client import SignerClient, create_api_key
 
 import dotenv
@@ -1144,6 +1147,9 @@ class HedgingCycleExecutor:
         self._tracemalloc_started: bool = False
         self._last_tracemalloc_snapshot = None
         self._lighter_l1_address = (os.getenv("L1_WALLET_ADDRESS") or "").strip()
+        self._leaderboard_address_warning_emitted = False
+        self._cached_leaderboard_points: Optional[Tuple[Optional[Decimal], Optional[Decimal]]] = None
+        self._leaderboard_points_cycle: int = 0
 
     async def _memory_housekeeping_loop(self) -> None:
         """Periodically trigger GC and clean bounded in-memory states.
@@ -1353,32 +1359,117 @@ class HedgingCycleExecutor:
             "INFO",
         )
 
-    async def _log_leaderboard_points(self, cycle_number: int) -> None:
-        if not self._lighter_l1_address:
-            return
+    async def _resolve_lighter_l1_address(self) -> Optional[str]:
+        if self._lighter_l1_address:
+            return self._lighter_l1_address
 
+        lighter_client = self.lighter_client
+        base_url = LIGHTER_MAINNET_BASE_URL
+        account_index: Optional[int] = None
+
+        if lighter_client is not None:
+            base_url = getattr(lighter_client, "base_url", base_url) or base_url
+            account_index = getattr(lighter_client, "account_index", None)
+
+        if account_index is None:
+            raw_index = os.getenv("LIGHTER_ACCOUNT_INDEX")
+            if raw_index:
+                try:
+                    account_index = int(raw_index)
+                except (TypeError, ValueError):
+                    account_index = None
+
+        if account_index is None:
+            return None
+
+        api_client = getattr(lighter_client, "api_client", None)
+        close_client = False
+        if api_client is None:
+            config = Configuration(host=base_url.rstrip("/"))
+            api_client = ApiClient(configuration=config)
+            close_client = True
+
+        account_api = AccountApi(api_client=api_client)
+        response: Optional[object] = None
         try:
-            weekly_points, total_points = await _fetch_lighter_leaderboard_points(
-                self._lighter_l1_address
-            )
+            response = await account_api.account(by="index", value=str(account_index))
         except Exception as exc:
             self.logger.log(
-                f"Failed to retrieve Lighter leaderboard points for {self._lighter_l1_address}: {exc}",
+                f"Failed to resolve Lighter L1 address for account index {account_index}: {exc}",
                 "WARNING",
             )
-            return
+            return None
+        finally:
+            if close_client and api_client is not None:
+                try:
+                    await api_client.close()
+                except Exception:
+                    pass
 
-        if weekly_points is None and total_points is None:
-            self.logger.log(
-                f"Lighter leaderboard points unavailable for {self._lighter_l1_address}",
-                "INFO",
-            )
+        accounts = getattr(response, "accounts", None) or []
+        for account in accounts:
+            l1_candidate = getattr(account, "l1_address", None) or getattr(account, "l1Address", None)
+            if not l1_candidate:
+                continue
+            try:
+                normalized = Web3.to_checksum_address(str(l1_candidate))
+            except Exception:
+                normalized = str(l1_candidate)
+
+            self._lighter_l1_address = normalized
+            os.environ["L1_WALLET_ADDRESS"] = normalized
+            return self._lighter_l1_address
+
+        return None
+
+    async def _log_leaderboard_points(self, cycle_number: int) -> None:
+        address = await self._resolve_lighter_l1_address()
+        if not address:
+            if not self._leaderboard_address_warning_emitted:
+                self.logger.log(
+                    "Lighter L1 address unavailable; skipping leaderboard lookup",
+                    "INFO",
+                )
+                self._leaderboard_address_warning_emitted = True
+            return
+        self._leaderboard_address_warning_emitted = False
+
+        refresh_needed = False
+        cached_points = self._cached_leaderboard_points
+        if cached_points is None:
+            refresh_needed = True
+        elif cycle_number - self._leaderboard_points_cycle >= 20:
+            refresh_needed = True
+
+        if refresh_needed:
+            try:
+                weekly_points, total_points = await _fetch_lighter_leaderboard_points(
+                    address,
+                    base_url=getattr(self.lighter_client, "base_url", None) if self.lighter_client else None,
+                )
+            except Exception as exc:
+                self.logger.log(
+                    f"Failed to retrieve Lighter leaderboard points for {address}: {exc}",
+                    "WARNING",
+                )
+            else:
+                if weekly_points is None and total_points is None:
+                    self.logger.log(
+                        f"Lighter leaderboard points unavailable for {address}",
+                        "INFO",
+                    )
+                else:
+                    self._cached_leaderboard_points = (weekly_points, total_points)
+                    self._leaderboard_points_cycle = cycle_number
+                    cached_points = self._cached_leaderboard_points
+
+        if cached_points is None:
             return
 
         _print_leaderboard_points(
             cycle_number,
-            weekly_points,
-            total_points,
+            cached_points[0],
+            cached_points[1],
             logger=self.logger,
             to_console=bool(getattr(self.config, "log_to_console", False)),
         )
