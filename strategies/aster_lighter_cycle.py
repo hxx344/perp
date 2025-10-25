@@ -33,6 +33,7 @@ import aiohttp
 import dotenv
 
 from exchanges import ExchangeFactory
+from exchanges.aster import AsterMarketDataWebSocket
 from exchanges.base import OrderInfo
 from helpers.logger import TradingLogger
 from trading_bot import TradingConfig
@@ -152,6 +153,222 @@ class _BinanceFuturesPriceSource:
     async def aclose(self) -> None:
         if self._session is not None and not self._session.closed:
             await self._session.close()
+
+
+class _AsterPublicDataClient:
+    """Minimal Aster market data helper that avoids authenticated endpoints."""
+
+    _BASE_URL = "https://fapi.asterdex.com"
+    _WS_URL = "wss://fstream.asterdex.com"
+
+    def __init__(self, ticker: str, logger: TradingLogger, depth_levels: int = 20) -> None:
+        self.ticker = ticker.upper().strip()
+        self.logger = logger
+        self.depth_levels = max(5, min(depth_levels, 50))
+        self.contract_id: Optional[str] = None
+        self.tick_size: Decimal = Decimal("0")
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws: Optional[AsterMarketDataWebSocket] = None
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=10)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+        return self._session
+
+    async def initialize(self) -> Tuple[str, Decimal]:
+        if not self.ticker:
+            raise ValueError("Aster ticker must be provided for virtual mode")
+
+        session = await self._ensure_session()
+        async with session.get(f"{self._BASE_URL}/fapi/v1/exchangeInfo") as response:
+            try:
+                payload = await response.json()
+            except aiohttp.ContentTypeError as exc:
+                text = await response.text()
+                raise RuntimeError(f"Aster exchangeInfo response not JSON: {text}") from exc
+
+            if response.status != 200:
+                message = payload if isinstance(payload, dict) else str(payload)
+                raise RuntimeError(f"Failed to fetch Aster exchangeInfo ({response.status}): {message}")
+
+        symbols = payload.get("symbols") if isinstance(payload, dict) else None
+        if not symbols:
+            raise RuntimeError("Aster exchangeInfo missing symbols array")
+
+        for symbol_info in symbols:
+            if not isinstance(symbol_info, dict):
+                continue
+            status = symbol_info.get("status")
+            base_asset = symbol_info.get("baseAsset", "").upper()
+            quote_asset = symbol_info.get("quoteAsset", "")
+            if status != "TRADING" or base_asset != self.ticker or quote_asset != "USDT":
+                continue
+
+            contract_id = symbol_info.get("symbol", "")
+            if not contract_id:
+                continue
+
+            tick_size = Decimal("0")
+            for filter_info in symbol_info.get("filters", []):
+                if isinstance(filter_info, dict) and filter_info.get("filterType") == "PRICE_FILTER":
+                    tick_raw = str(filter_info.get("tickSize", "0")).strip()
+                    try:
+                        tick_size = Decimal(tick_raw)
+                    except (InvalidOperation, ValueError):
+                        tick_size = Decimal("0")
+                    break
+
+            if tick_size <= 0:
+                raise RuntimeError(f"Failed to resolve tick size for Aster ticker {self.ticker}")
+
+            self.contract_id = contract_id
+            self.tick_size = tick_size
+            await self._ensure_market_stream()
+            return contract_id, tick_size
+
+        raise RuntimeError(f"Unable to locate trading symbol for Aster ticker {self.ticker}")
+
+    async def _ensure_market_stream(self) -> bool:
+        if not self.contract_id:
+            return False
+
+        symbol = self.contract_id.lower()
+        try:
+            if self._ws is None or self._ws.symbol != symbol:
+                if self._ws is not None:
+                    await self._ws.stop()
+                self._ws = AsterMarketDataWebSocket(
+                    symbol=symbol,
+                    base_ws_url=self._WS_URL,
+                    logger=self.logger,
+                    depth_levels=self.depth_levels,
+                )
+                await self._ws.start()
+
+            if self._ws:
+                return await self._ws.wait_until_ready(timeout=2.0)
+        except Exception as exc:
+            if self.logger:
+                self.logger.log(f"Failed to start Aster public market stream: {exc}", "WARNING")
+        return False
+
+    async def fetch_order_book(self, limit: int = 20) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
+        limit = max(5, min(limit, 500))
+        ws_ready = await self._ensure_market_stream()
+        if ws_ready and self._ws is not None:
+            bids, asks = await self._ws.get_depth(limit)
+            if bids and asks:
+                return bids, asks
+
+        if not self.contract_id:
+            raise RuntimeError("Aster contract id not initialized")
+
+        session = await self._ensure_session()
+        params = {"symbol": self.contract_id, "limit": str(limit)}
+        async with session.get(f"{self._BASE_URL}/fapi/v1/depth", params=params) as response:
+            try:
+                payload = await response.json()
+            except aiohttp.ContentTypeError as exc:
+                text = await response.text()
+                raise RuntimeError(f"Aster depth response not JSON: {text}") from exc
+
+            if response.status != 200:
+                raise RuntimeError(f"Failed to fetch Aster depth ({response.status}): {payload}")
+
+        bids_raw = payload.get("bids", []) if isinstance(payload, dict) else []
+        asks_raw = payload.get("asks", []) if isinstance(payload, dict) else []
+
+        def _parse(levels: List[List[str]]) -> List[Tuple[Decimal, Decimal]]:
+            parsed: List[Tuple[Decimal, Decimal]] = []
+            for entry in levels:
+                if not isinstance(entry, list) or len(entry) < 2:
+                    continue
+                price_raw, qty_raw = entry[0], entry[1]
+                try:
+                    price = Decimal(str(price_raw))
+                    qty = Decimal(str(qty_raw))
+                except (InvalidOperation, ValueError, TypeError):
+                    continue
+                if price <= 0 or qty < 0:
+                    continue
+                parsed.append((price, qty))
+                if len(parsed) >= limit:
+                    break
+            return parsed
+
+        return _parse(bids_raw), _parse(asks_raw)
+
+    async def fetch_bbo_prices(self) -> Tuple[Decimal, Decimal]:
+        ws_ready = await self._ensure_market_stream()
+        if ws_ready and self._ws is not None:
+            bid, ask = await self._ws.get_bbo()
+            if bid and bid > 0 and ask and ask > 0:
+                return bid, ask
+
+        if not self.contract_id:
+            raise RuntimeError("Aster contract id not initialized")
+
+        session = await self._ensure_session()
+        params = {"symbol": self.contract_id}
+        async with session.get(f"{self._BASE_URL}/fapi/v1/ticker/bookTicker", params=params) as response:
+            try:
+                payload = await response.json()
+            except aiohttp.ContentTypeError as exc:
+                text = await response.text()
+                raise RuntimeError(f"Aster bookTicker response not JSON: {text}") from exc
+
+            if response.status != 200:
+                raise RuntimeError(f"Failed to fetch Aster bookTicker ({response.status}): {payload}")
+
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"Unexpected Aster bookTicker payload: {payload}")
+
+        try:
+            bid = Decimal(payload.get("bidPrice", "0"))
+        except (InvalidOperation, ValueError, TypeError):
+            bid = Decimal("0")
+        try:
+            ask = Decimal(payload.get("askPrice", "0"))
+        except (InvalidOperation, ValueError, TypeError):
+            ask = Decimal("0")
+
+        return bid, ask
+
+    async def get_depth_level_price(self, direction: str, level: int) -> Tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+        bids, asks = await self.fetch_order_book(limit=max(level, 20))
+
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+
+        def _select(levels: List[Tuple[Decimal, Decimal]]) -> Optional[Decimal]:
+            if level <= 0 or not levels:
+                return None
+            index = level - 1
+            if 0 <= index < len(levels):
+                return levels[index][0]
+            return levels[-1][0]
+
+        direction_lower = direction.lower()
+        if direction_lower == "buy":
+            depth_price = _select(bids)
+        elif direction_lower == "sell":
+            depth_price = _select(asks)
+        else:
+            depth_price = None
+
+        return depth_price, best_bid, best_ask
+
+    async def aclose(self) -> None:
+        if self._ws is not None:
+            try:
+                await self._ws.stop()
+            except Exception:
+                pass
+            self._ws = None
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+            self._session = None
 
 def _decimal_type(value: str) -> Decimal:
     """Argparse helper that parses Decimal values with validation."""
@@ -328,6 +545,7 @@ class HedgingCycleExecutor:
 
         self.aster_client: Optional["AsterClient"] = None
         self.lighter_client: Optional["LighterClient"] = None
+        self._aster_public_data: Optional[_AsterPublicDataClient] = None
         self._last_leg1_price: Optional[Decimal] = None
         self._housekeeping_task: Optional[asyncio.Task] = None
         # Flag to indicate whether current cycle experienced a Lighter timeout
@@ -494,16 +712,43 @@ class HedgingCycleExecutor:
 
     async def setup(self) -> None:
         """Instantiate exchange clients, connect, and hydrate contract metadata."""
-        aster_client = ExchangeFactory.create_exchange("aster", self.aster_config)  # type: ignore[arg-type]
-        lighter_client = ExchangeFactory.create_exchange("lighter", self.lighter_config)  # type: ignore[arg-type]
-        self.aster_client = cast("AsterClient", aster_client)
-        self.lighter_client = cast("LighterClient", lighter_client)
 
-        await self.aster_client.connect()
+        lighter_client = ExchangeFactory.create_exchange("lighter", self.lighter_config)  # type: ignore[arg-type]
+        self.lighter_client = cast("LighterClient", lighter_client)
         await self.lighter_client.connect()
 
-        aster_contract_id, aster_tick = await self.aster_client.get_contract_attributes()
+        if self.config.virtual_aster_maker:
+            self.aster_client = None
+            if self._aster_public_data is not None:
+                try:
+                    await self._aster_public_data.aclose()
+                except Exception:
+                    pass
+            self._aster_public_data = _AsterPublicDataClient(
+                ticker=self.config.aster_ticker,
+                logger=self.logger,
+            )
+            aster_contract_id, aster_tick = await self._aster_public_data.initialize()
+            self.logger.log(
+                "Aster virtual maker enabled: using public market data without API keys",
+                "INFO",
+            )
+        else:
+            if self._aster_public_data is not None:
+                try:
+                    await self._aster_public_data.aclose()
+                except Exception:
+                    pass
+                self._aster_public_data = None
+            aster_client = ExchangeFactory.create_exchange("aster", self.aster_config)  # type: ignore[arg-type]
+            self.aster_client = cast("AsterClient", aster_client)
+            await self.aster_client.connect()
+            aster_contract_id, aster_tick = await self.aster_client.get_contract_attributes()
+
         lighter_contract_id, lighter_tick = await self.lighter_client.get_contract_attributes()
+
+        self.aster_config.contract_id = aster_contract_id
+        self.aster_config.tick_size = aster_tick
 
         self.logger.log(
             (
@@ -570,6 +815,12 @@ class HedgingCycleExecutor:
             tasks.append(self.aster_client.disconnect())
         if self.lighter_client:
             tasks.append(self.lighter_client.disconnect())
+        if self._aster_public_data is not None:
+            try:
+                await self._aster_public_data.aclose()
+            except Exception:
+                pass
+            self._aster_public_data = None
         # Close Binance client session if used
         if self._binance_price_client is not None:
             try:
@@ -582,8 +833,12 @@ class HedgingCycleExecutor:
 
     async def execute_cycle(self) -> List[LegResult]:
         """Run a single four-leg hedging cycle and return execution summaries."""
-        if not self.aster_client or not self.lighter_client:
-            raise RuntimeError("Exchange clients are not initialized. Call setup() first.")
+        if not self.lighter_client:
+            raise RuntimeError("Lighter client is not initialized. Call setup() first.")
+        if not self.config.virtual_aster_maker and not self.aster_client:
+            raise RuntimeError("Aster client is not initialized. Call setup() first.")
+        if self.config.virtual_aster_maker and not (self._aster_public_data or self.aster_client):
+            raise RuntimeError("Aster market data helper is not initialized. Call setup() first.")
 
         results: List[LegResult] = []
 
@@ -623,15 +878,15 @@ class HedgingCycleExecutor:
         return results
 
     async def _execute_aster_maker(self, leg_name: str, direction: str) -> LegResult:
-        if not self.aster_client:
-            raise RuntimeError("Aster client is not connected")
-
         if self.config.virtual_aster_maker:
             return await self._simulate_virtual_aster_leg(
                 leg_name=leg_name,
                 direction=direction,
                 quantity=self.config.aster_quantity,
             )
+
+        if not self.aster_client:
+            raise RuntimeError("Aster client is not connected")
 
         overall_start = time.time()
         attempt = 0
@@ -689,15 +944,15 @@ class HedgingCycleExecutor:
     async def _execute_aster_reverse_maker(
         self, leg_name: str, direction: str
     ) -> LegResult:
-        if not self.aster_client:
-            raise RuntimeError("Aster client is not connected")
-
         if self.config.virtual_aster_maker:
             return await self._simulate_virtual_aster_leg(
                 leg_name=leg_name,
                 direction=direction,
                 quantity=self.config.aster_quantity,
             )
+
+        if not self.aster_client:
+            raise RuntimeError("Aster client is not connected")
 
         reverse_quantity = await self.aster_client.get_account_positions()
         if reverse_quantity <= 0:
@@ -770,8 +1025,10 @@ class HedgingCycleExecutor:
         direction: str,
         quantity: Decimal,
     ) -> LegResult:
-        if not self.aster_client:
-            raise RuntimeError("Aster client is not connected")
+        if not self._has_aster_market_data() and not (
+            self._virtual_price_source == "bn" and self._binance_price_client
+        ):
+            raise RuntimeError("Aster market data source is not available")
 
         overall_start = time.time()
         attempt = 0
@@ -844,12 +1101,14 @@ class HedgingCycleExecutor:
         direction: str,
         target_price: Decimal,
     ) -> Tuple[Decimal, float]:
-        if not self.aster_client:
-            raise RuntimeError("Aster client is not connected")
-
-        contract_id = self.aster_config.contract_id
-        if not contract_id and not (self._virtual_price_source == "bn" and self._binance_price_client):
-            raise RuntimeError("Aster contract id is not initialized")
+        has_aster_data = self._has_aster_market_data()
+        if not has_aster_data and not (
+            self._virtual_price_source == "bn" and self._binance_price_client
+        ):
+            raise RuntimeError("Aster market data source is not available")
+        if has_aster_data:
+            # Ensure contract id is present for downstream logging/behaviour.
+            self._ensure_aster_contract_id()
 
         deadline = time.time() + self.config.max_wait_seconds
         poll_interval = max(self.config.poll_interval, 0.05)
@@ -858,7 +1117,7 @@ class HedgingCycleExecutor:
             if self._virtual_price_source == "bn" and self._binance_price_client:
                 best_bid, best_ask = await self._binance_price_client.fetch_bbo_prices()
             else:
-                best_bid, best_ask = await self.aster_client.fetch_bbo_prices(contract_id)
+                best_bid, best_ask = await self._fetch_aster_bbo_prices()
             now = time.time()
 
             if direction == "buy":
@@ -1175,27 +1434,48 @@ class HedgingCycleExecutor:
                 "ERROR",
             )
 
-    
+    def _ensure_aster_contract_id(self) -> str:
+        contract_id = self.aster_config.contract_id
+        if not contract_id:
+            raise RuntimeError("Aster contract id is not initialized")
+        return contract_id
+
+    def _has_aster_market_data(self) -> bool:
+        return bool(self.aster_client or self._aster_public_data)
+
+    async def _get_aster_depth_level_price(
+        self, direction: str, level: int
+    ) -> Tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+        if self._aster_public_data is not None:
+            return await self._aster_public_data.get_depth_level_price(direction, level)
+        if self.aster_client is not None:
+            contract_id = self._ensure_aster_contract_id()
+            return await self.aster_client.get_depth_level_price(contract_id, direction, level)
+        raise RuntimeError("Aster market data source is unavailable")
+
+    async def _fetch_aster_bbo_prices(self) -> Tuple[Decimal, Decimal]:
+        if self._aster_public_data is not None:
+            return await self._aster_public_data.fetch_bbo_prices()
+        if self.aster_client is not None:
+            contract_id = self._ensure_aster_contract_id()
+            return await self.aster_client.fetch_bbo_prices(contract_id)
+        raise RuntimeError("Aster market data source is unavailable")
 
     async def _calculate_aster_maker_price(self, direction: str) -> Decimal:
-        if not self.aster_client:
-            raise RuntimeError("Aster client is not connected")
+        if not self._has_aster_market_data():
+            raise RuntimeError("Aster market data source is not available")
 
         tick = self.aster_config.tick_size if self.aster_config.tick_size > 0 else Decimal("0")
         level = 4
 
-        depth_price, best_bid, best_ask = await self.aster_client.get_depth_level_price(
-            self.aster_config.contract_id,
-            direction,
-            level,
-        )
+        depth_price, best_bid, best_ask = await self._get_aster_depth_level_price(direction, level)
 
         best_bid = best_bid if best_bid is not None else Decimal("0")
         best_ask = best_ask if best_ask is not None else Decimal("0")
 
         # If no usable depth price, fetch fallback BBO
         if depth_price is None or depth_price <= 0:
-            fb_bid, fb_ask = await self.aster_client.fetch_bbo_prices(self.aster_config.contract_id)
+            fb_bid, fb_ask = await self._fetch_aster_bbo_prices()
             best_bid = fb_bid if fb_bid > 0 else best_bid
             best_ask = fb_ask if fb_ask > 0 else best_ask
 
