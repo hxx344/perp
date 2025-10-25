@@ -1,8 +1,8 @@
 import asyncio
 from decimal import Decimal
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
-
-import pytest
 
 from strategies.aster_lighter_cycle import CycleConfig, HedgingCycleExecutor
 from strategies.aster_lighter_cycle import _extract_leaderboard_points
@@ -68,10 +68,27 @@ def test_log_leaderboard_points_refreshes_every_20_cycles(monkeypatch):
     cached_address = "0x1234567890abcdef1234567890abcdef12345678"
     executor._resolve_lighter_l1_address = AsyncMock(return_value=cached_address)
 
+    tokens = iter(["token-1", "token-2"])
+
+    def _create_auth_token_with_expiry():
+        try:
+            token_value = next(tokens)
+        except StopIteration:
+            return None, "no-token"
+        return token_value, None
+
+    executor.lighter_client = cast(
+        Any,
+        SimpleNamespace(
+        base_url="https://example.zklighter.elliot.ai",
+        lighter_client=SimpleNamespace(create_auth_token_with_expiry=_create_auth_token_with_expiry),
+        ),
+    )
+
     fetch_calls = []
 
-    async def fake_fetch(address, *, base_url=None, timeout_seconds=10.0):
-        fetch_calls.append((address, len(fetch_calls)))
+    async def fake_fetch(address, *, base_url=None, timeout_seconds=10.0, auth_token=None):
+        fetch_calls.append((address, len(fetch_calls), base_url, auth_token))
         index = len(fetch_calls)
         return Decimal(str(index)), Decimal(str(index * 10))
 
@@ -93,6 +110,8 @@ def test_log_leaderboard_points_refreshes_every_20_cycles(monkeypatch):
     # Fetch should only occur on first call and when refresh threshold reached
     assert len(fetch_calls) == 2
     assert all(call[0] == cached_address for call in fetch_calls)
+    assert [call[2] for call in fetch_calls] == ["https://example.zklighter.elliot.ai", "https://example.zklighter.elliot.ai"]
+    assert [call[3] for call in fetch_calls] == ["token-1", "token-2"]
 
     assert print_calls[0][0] == 1
     assert print_calls[0][1:] == (Decimal("1"), Decimal("10"))

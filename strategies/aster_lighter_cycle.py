@@ -532,6 +532,7 @@ async def _fetch_lighter_leaderboard_points(
     *,
     base_url: Optional[str] = None,
     timeout_seconds: float = 10.0,
+    auth_token: Optional[str] = None,
 ) -> Tuple[Optional[Decimal], Optional[Decimal]]:
     address = (l1_address or "").strip()
     if not address:
@@ -549,7 +550,12 @@ async def _fetch_lighter_leaderboard_points(
     async def _request_points(board_type: str) -> Optional[Decimal]:
         url = f"{leaderboard_base}{_LEADERBOARD_ENDPOINT}"
         params = {"type": board_type, "l1_address": address}
-        async with session.get(url, params=params) as response:
+        if auth_token:
+            params["auth"] = auth_token
+        headers = {}
+        if auth_token:
+            headers["Authorization"] = auth_token
+        async with session.get(url, params=params, headers=headers or None) as response:
             body_text = await response.text()
             try:
                 payload = await response.json(content_type=None)
@@ -1442,10 +1448,32 @@ class HedgingCycleExecutor:
             refresh_needed = True
 
         if refresh_needed:
+            auth_token: Optional[str] = None
+            lighter_exchange = self.lighter_client
+            if lighter_exchange is not None:
+                signer_client = getattr(lighter_exchange, "lighter_client", None)
+                if signer_client is not None and hasattr(signer_client, "create_auth_token_with_expiry"):
+                    try:
+                        generated_token, token_error = signer_client.create_auth_token_with_expiry()
+                    except Exception as exc:
+                        self.logger.log(
+                            f"Failed to create Lighter auth token for leaderboard request: {exc}",
+                            "WARNING",
+                        )
+                    else:
+                        if token_error:
+                            self.logger.log(
+                                f"Lighter auth token generation returned error: {token_error}",
+                                "WARNING",
+                            )
+                        else:
+                            auth_token = (generated_token or "").strip() or None
+
             try:
                 weekly_points, total_points = await _fetch_lighter_leaderboard_points(
                     address,
                     base_url=getattr(self.lighter_client, "base_url", None) if self.lighter_client else None,
+                    auth_token=auth_token,
                 )
             except Exception as exc:
                 self.logger.log(
