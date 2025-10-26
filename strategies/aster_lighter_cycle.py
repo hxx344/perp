@@ -32,6 +32,7 @@ import aiohttp
 from eth_account import Account
 from web3 import Web3
 from web3.exceptions import TimeExhausted
+from web3.types import TxParams, Wei
 
 from lighter.api.account_api import AccountApi
 from lighter.api_client import ApiClient
@@ -766,17 +767,17 @@ def _send_full_usdc_transfer(
 
     nonce = web3.eth.get_transaction_count(checksum_from)
     gas_price = web3.eth.gas_price
+    buffered_gas_price: Wei = cast(Wei, max(gas_price * 2, gas_price + 1))
     transfer_fn = contract.functions.transfer(checksum_dest, balance)
     gas_estimate = transfer_fn.estimate_gas({"from": checksum_from})
-    tx = transfer_fn.build_transaction(
-        {
-            "from": checksum_from,
-            "nonce": nonce,
-            "gas": gas_estimate,
-            "gasPrice": gas_price,
-            "chainId": ARBITRUM_CHAIN_ID,
-        }
-    )
+    tx_params: TxParams = {
+        "from": checksum_from,
+        "nonce": nonce,
+        "gas": gas_estimate,
+        "gasPrice": buffered_gas_price,
+        "chainId": ARBITRUM_CHAIN_ID,
+    }
+    tx = transfer_fn.build_transaction(tx_params)
 
     signed_tx = web3.eth.account.sign_transaction(tx, private_key=private_key)
     raw_tx = getattr(signed_tx, "rawTransaction", None)
