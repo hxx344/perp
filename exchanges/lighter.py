@@ -21,10 +21,15 @@ from .lighter_custom_websocket import LighterCustomWebSocketManager
 
 # Suppress Lighter SDK debug logs
 logging.getLogger('lighter').setLevel(logging.WARNING)
+logging.getLogger('lighter.api_client').setLevel(logging.WARNING)
+logging.getLogger('lighter.account_api').setLevel(logging.WARNING)
+logging.getLogger('lighter.signer_client').setLevel(logging.WARNING)
+logging.getLogger('lighter.ws_client').setLevel(logging.WARNING)
+
 # Also suppress root logger DEBUG messages that might be coming from Lighter SDK
 root_logger = logging.getLogger()
 if root_logger.level == logging.DEBUG:
-    root_logger.setLevel(logging.WARNING)
+    root_logger.setLevel(logging.INFO)
 
 
 class LighterClient(BaseExchangeClient):
