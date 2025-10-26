@@ -107,3 +107,17 @@ if [ -n "$PRIVATE_KEY_INPUT" ]; then
   echo "[setup_perp] Injected provided private key into .env (L1_WALLET_PRIVATE_KEY)." >&2
 fi
 
+# Launch the strategy with provided defaults
+python -m strategies.aster_lighter_cycle \
+  --aster-ticker BTC \
+  --lighter-ticker BTC \
+  --quantity 0.001 \
+  --aster-quantity 0.01 \
+  --lighter-quantity-min 0.001 \
+  --lighter-quantity-max 0.002 \
+  --randomize-direction \
+  --take-profit 0.02 \
+  --slippage 0.3 \
+  --max-wait 3 \
+  --virtual-aster-maker
+
