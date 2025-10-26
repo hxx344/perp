@@ -406,6 +406,8 @@ class CycleConfig:
     max_cycles: int
     delay_between_cycles: float
     virtual_aster_maker: bool
+    randomize_direction: bool = False
+    direction_seed: Optional[int] = None
     lighter_quantity_min: Optional[Decimal] = None
     lighter_quantity_max: Optional[Decimal] = None
     virtual_aster_price_source: str = "aster"
@@ -1106,6 +1108,13 @@ class HedgingCycleExecutor:
         self._virtual_reference_symbol = config.virtual_aster_reference_symbol
         self._binance_price_client: Optional["_BinanceFuturesPriceSource"] = None
 
+        self._randomize_direction = bool(getattr(config, "randomize_direction", False))
+        seed_value = getattr(config, "direction_seed", None)
+        self._direction_rng: Optional[random.Random] = None
+        if self._randomize_direction:
+            self._direction_rng = random.Random(seed_value)
+        self._current_cycle_entry_direction: str = config.direction
+
         base_lighter_quantity = config.lighter_quantity
         if self._lighter_quantity_min is not None and self._lighter_quantity_max is not None:
             base_lighter_quantity = self._lighter_quantity_max
@@ -1641,7 +1650,16 @@ class HedgingCycleExecutor:
         self._cycle_had_timeout = False
         self._last_leg1_price = None
         self._current_cycle_lighter_quantity = None
-        entry_direction = self.config.direction
+        if self._randomize_direction and self._direction_rng is not None:
+            entry_direction = self._direction_rng.choice(["buy", "sell"])
+            self._current_cycle_entry_direction = entry_direction
+            self.logger.log(
+                f"Cycle entry direction selected: {entry_direction.upper()} (randomized mode)",
+                "INFO",
+            )
+        else:
+            entry_direction = self.config.direction
+            self._current_cycle_entry_direction = entry_direction
         leg1 = await self._execute_aster_maker(leg_name="LEG1", direction=entry_direction)
         results.append(leg1)
 
@@ -2579,6 +2597,16 @@ def _parse_args() -> argparse.Namespace:
         help="Initial maker direction on Aster",
     )
     parser.add_argument(
+        "--randomize-direction",
+        action="store_true",
+        help="Randomize the entry direction every cycle instead of using the fixed --direction",
+    )
+    parser.add_argument(
+        "--direction-seed",
+        type=int,
+        help="Optional seed for random direction selection to make runs reproducible",
+    )
+    parser.add_argument(
         "--take-profit",
         type=_decimal_type,
         default=Decimal("0"),
@@ -2966,6 +2994,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         lighter_quantity_min=lighter_quantity_min,
         lighter_quantity_max=lighter_quantity_max,
         direction=args.direction,
+    randomize_direction=bool(getattr(args, "randomize_direction", False)),
+    direction_seed=getattr(args, "direction_seed", None),
         take_profit_pct=args.take_profit,
         slippage_pct=args.slippage,
         max_wait_seconds=args.max_wait,
@@ -2980,7 +3010,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
         memory_clean_interval_seconds=args.memory_clean_interval,
         memory_warn_mb=args.memory_warn_mb,
-    log_to_console=bool(log_to_console_option),
+        log_to_console=bool(log_to_console_option),
         tracemalloc_enabled=bool(getattr(args, "tracemalloc", False)),
         tracemalloc_top=int(getattr(args, "tracemalloc_top", 15) or 15),
         tracemalloc_group_by=str(getattr(args, "tracemalloc_group_by", "lineno") or "lineno"),
