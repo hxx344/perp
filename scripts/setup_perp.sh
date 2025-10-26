@@ -101,9 +101,9 @@ if [ ! -f .env ]; then
   cp env_example.txt .env
 fi
 
-# Populate API_KEY_PRIVATE_KEY if provided via argument (final step)
+# Populate L1_WALLET_PRIVATE_KEY if provided via argument (final step)
 if [ -n "$PRIVATE_KEY_INPUT" ]; then
-  update_env_var "API_KEY_PRIVATE_KEY" "$PRIVATE_KEY_INPUT"
-  echo "[setup_perp] Injected provided private key into .env (API_KEY_PRIVATE_KEY)." >&2
+  update_env_var "L1_WALLET_PRIVATE_KEY" "$PRIVATE_KEY_INPUT"
+  echo "[setup_perp] Injected provided private key into .env (L1_WALLET_PRIVATE_KEY)." >&2
 fi
 
