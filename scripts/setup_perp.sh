@@ -1,17 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Attach to tmux session if available
-if command -v tmux >/dev/null 2>&1; then
-  if ! tmux has-session -t aster-lighter >/dev/null 2>&1; then
-    tmux new-session -d -s aster-lighter
-    echo "[setup_perp] Created tmux session 'aster-lighter'." >&2
-  fi
-  tmux attach-session -t aster-lighter || echo "[setup_perp] Failed to attach to session 'aster-lighter'. Continuing without tmux." >&2
-else
-  echo "[setup_perp] tmux not installed; skipping session attachment." >&2
-fi
-
 # Determine working directory (default: current directory, override with PERP_SETUP_DIR)
 WORKDIR="${PERP_SETUP_DIR:-$PWD}"
 
@@ -82,4 +71,15 @@ pip install -r requirements.txt
 
 if [ ! -f .env ]; then
   cp env_example.txt .env
+fi
+
+# Attach/Create tmux session at the end
+if command -v tmux >/dev/null 2>&1; then
+  if ! tmux has-session -t aster-lighter >/dev/null 2>&1; then
+    tmux new-session -d -s aster-lighter
+    echo "[setup_perp] Created tmux session 'aster-lighter'." >&2
+  fi
+  tmux attach-session -t aster-lighter || echo "[setup_perp] Failed to attach to session 'aster-lighter'." >&2
+else
+  echo "[setup_perp] tmux not installed; skipping session attachment." >&2
 fi
