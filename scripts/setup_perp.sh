@@ -1,6 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PRIVATE_KEY_INPUT=${1-""}
+
+update_env_var() {
+  local key="$1"
+  local value="$2"
+  local env_file=".env"
+
+  if [ ! -f "$env_file" ]; then
+    printf '%s=%s\n' "$key" "$value" > "$env_file"
+    return
+  fi
+
+  local tmp_file
+  if command -v mktemp >/dev/null 2>&1; then
+    tmp_file=$(mktemp "${env_file}.XXXXXX")
+  else
+    tmp_file="${env_file}.tmp.$$"
+  fi
+
+  if grep -q "^${key}=" "$env_file"; then
+    awk -v key="$key" -v value="$value" 'index($0, key "=")==1 { print key "=" value; next } { print }' "$env_file" > "$tmp_file"
+    mv "$tmp_file" "$env_file"
+  else
+    rm -f "$tmp_file"
+    printf '%s=%s\n' "$key" "$value" >> "$env_file"
+  fi
+}
+
 # Determine working directory (default: current directory, override with PERP_SETUP_DIR)
 WORKDIR="${PERP_SETUP_DIR:-$PWD}"
 
@@ -71,5 +99,11 @@ pip install -r requirements.txt
 
 if [ ! -f .env ]; then
   cp env_example.txt .env
+fi
+
+# Populate API_KEY_PRIVATE_KEY if provided via argument (final step)
+if [ -n "$PRIVATE_KEY_INPUT" ]; then
+  update_env_var "API_KEY_PRIVATE_KEY" "$PRIVATE_KEY_INPUT"
+  echo "[setup_perp] Injected provided private key into .env (API_KEY_PRIVATE_KEY)." >&2
 fi
 
