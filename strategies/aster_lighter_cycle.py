@@ -48,6 +48,7 @@ from helpers.logger import TradingLogger
 from trading_bot import TradingConfig
 
 DEFAULT_ASTER_MAKER_DEPTH_LEVEL = 10
+MIN_CYCLE_INTERVAL_SECONDS = 60.0
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from exchanges.aster import AsterClient
@@ -492,6 +493,12 @@ def _format_decimal(value: Optional[Decimal], places: int = 6) -> str:
         text = text.rstrip("0").rstrip(".")
 
     return text
+
+
+def _compute_cycle_pause_seconds(cycle_start_time: float, configured_delay: float) -> float:
+    elapsed = max(0.0, time.time() - cycle_start_time)
+    remaining_for_min = max(0.0, MIN_CYCLE_INTERVAL_SECONDS - elapsed)
+    return float(max(configured_delay, remaining_for_min))
 
 
 _LEADERBOARD_ENDPOINT = "/api/v1/leaderboard"
@@ -2862,7 +2869,10 @@ def _parse_args() -> argparse.Namespace:
         "--cycle-delay",
         type=float,
         default=0.0,
-        help="Optional delay in seconds between successive hedging cycles",
+        help=(
+            "Additional delay in seconds between successive hedging cycles. "
+            "Actual cadence enforces at least 60 seconds between cycle starts"
+        ),
     )
     parser.add_argument(
         "--env-file",
@@ -3247,12 +3257,19 @@ async def _async_main(args: argparse.Namespace) -> None:
                         "ERROR",
                     )
 
-                if config.delay_between_cycles > 0:
+                sleep_seconds = _compute_cycle_pause_seconds(
+                    cycle_start_time,
+                    config.delay_between_cycles,
+                )
+                if sleep_seconds > 0:
                     executor.logger.log(
-                        f"Waiting {config.delay_between_cycles} seconds before next cycle",
+                        (
+                            f"Waiting {sleep_seconds:.2f} seconds before next cycle "
+                            f"(minimum interval {MIN_CYCLE_INTERVAL_SECONDS:.0f}s enforced)"
+                        ),
                         "INFO",
                     )
-                    await asyncio.sleep(config.delay_between_cycles)
+                    await asyncio.sleep(sleep_seconds)
                 continue
             except network_error_exceptions as exc:
                 network_error_count += 1
@@ -3275,9 +3292,18 @@ async def _async_main(args: argparse.Namespace) -> None:
                     )
                     break
 
-                pause_seconds = 30
+                pause_seconds = max(
+                    30.0,
+                    _compute_cycle_pause_seconds(
+                        cycle_start_time,
+                        config.delay_between_cycles,
+                    ),
+                )
                 executor.logger.log(
-                    f"Pausing {pause_seconds} seconds before attempting next cycle",
+                    (
+                        f"Pausing {pause_seconds:.2f} seconds before attempting next cycle "
+                        f"(minimum interval {MIN_CYCLE_INTERVAL_SECONDS:.0f}s enforced)"
+                    ),
                     "WARNING",
                 )
                 await asyncio.sleep(pause_seconds)
@@ -3350,12 +3376,19 @@ async def _async_main(args: argparse.Namespace) -> None:
                 )
                 break
 
-            if config.delay_between_cycles > 0:
+            sleep_seconds = _compute_cycle_pause_seconds(
+                cycle_start_time,
+                config.delay_between_cycles,
+            )
+            if sleep_seconds > 0:
                 executor.logger.log(
-                    f"Waiting {config.delay_between_cycles} seconds before next cycle",
+                    (
+                        f"Waiting {sleep_seconds:.2f} seconds before next cycle "
+                        f"(minimum interval {MIN_CYCLE_INTERVAL_SECONDS:.0f}s enforced)"
+                    ),
                     "INFO",
                 )
-                await asyncio.sleep(config.delay_between_cycles)
+                await asyncio.sleep(sleep_seconds)
     finally:
         try:
             await executor.ensure_lighter_flat()
