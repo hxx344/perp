@@ -597,6 +597,7 @@ _REQUIRED_LIGHTER_ENV = (
     "LIGHTER_API_KEY_INDEX",
 )
 DEFAULT_LIGHTER_LEVERAGE = 50
+L1_USDC_TOPUP_THRESHOLD = Decimal("1")
 
 _ERC20_TRANSFER_ABI = [
     {
@@ -1197,6 +1198,7 @@ class HedgingCycleExecutor:
         self._tracemalloc_started: bool = False
         self._last_tracemalloc_snapshot = None
         self._lighter_l1_address = (os.getenv("L1_WALLET_ADDRESS") or "").strip()
+        self._lighter_intent_address: Optional[str] = None
         self._leaderboard_address_warning_emitted = False
         self._cached_leaderboard_points: Optional[Tuple[Optional[Decimal], Optional[Decimal]]] = None
         self._leaderboard_points_cycle: int = 0
@@ -1471,6 +1473,152 @@ class HedgingCycleExecutor:
             return self._lighter_l1_address
 
         return None
+
+    async def ensure_l1_top_up_if_needed(self) -> None:
+        if not self.lighter_client:
+            return
+
+        rpc_url = (
+            os.getenv("ARBITRUM_RPC_URL")
+            or os.getenv("L1_RPC_URL")
+            or os.getenv("ARBITRUM_ONE_RPC_URL")
+            or ""
+        ).strip()
+
+        if not rpc_url:
+            self.logger.log(
+                "ARBITRUM RPC endpoint not configured; skipping L1 USDC top-up check",
+                "WARNING",
+            )
+            return
+
+        private_key_env = (
+            os.getenv("L1_WALLET_PRIVATE_KEY")
+            or os.getenv("LIGHTER_L1_PRIVATE_KEY")
+            or ""
+        ).strip()
+
+        address = await self._resolve_lighter_l1_address()
+        if not address:
+            address = (os.getenv("L1_WALLET_ADDRESS") or "").strip()
+
+        normalized_private_key = _normalize_private_key_hex(private_key_env) if private_key_env else ""
+
+        if not address and normalized_private_key:
+            try:
+                account = Account.from_key(normalized_private_key)
+                address = Web3.to_checksum_address(account.address)
+                self._lighter_l1_address = address
+            except Exception as exc:
+                self.logger.log(
+                    f"Failed to derive L1 address from private key: {exc}",
+                    "WARNING",
+                )
+
+        if not address:
+            self.logger.log("Unable to resolve L1 wallet address; skipping top-up check", "WARNING")
+            return
+
+        web3 = Web3(Web3.HTTPProvider(rpc_url))
+        if not web3.is_connected():
+            raise SkipCycleError(f"Cannot reach Arbitrum RPC at {rpc_url}; deferring cycle")
+
+        try:
+            checksum_address = Web3.to_checksum_address(address)
+        except Exception as exc:
+            raise SkipCycleError(f"Invalid L1 wallet address '{address}': {exc}") from exc
+
+        contract = _build_usdc_contract(web3)
+
+        try:
+            decimals_raw = contract.functions.decimals().call()
+            decimals = int(decimals_raw)
+            raw_balance = int(contract.functions.balanceOf(checksum_address).call())
+        except Exception as exc:
+            raise SkipCycleError(f"Failed to query L1 USDC balance: {exc}") from exc
+
+        threshold_raw = 10 ** decimals
+        if raw_balance <= threshold_raw:
+            return
+
+        if not normalized_private_key:
+            raise SkipCycleError("L1 wallet private key missing; cannot top-up automatically")
+
+        human_balance = _format_usdc_amount_raw(raw_balance, decimals)
+        self.logger.log(
+            f"Detected L1 USDC balance {human_balance} above {L1_USDC_TOPUP_THRESHOLD} USDC; initiating transfer",
+            "INFO",
+        )
+
+        base_url = (
+            getattr(self.lighter_client, "base_url", None)
+            or os.getenv("LIGHTER_BASE_URL")
+            or LIGHTER_MAINNET_BASE_URL
+        ).strip()
+        if not base_url:
+            base_url = LIGHTER_MAINNET_BASE_URL
+
+        intent_address = self._lighter_intent_address
+        if not intent_address:
+            try:
+                intent_address = await _request_lighter_intent_address(base_url, checksum_address)
+            except Exception as exc:
+                raise SkipCycleError(f"Failed to obtain Lighter deposit address: {exc}") from exc
+            self._lighter_intent_address = intent_address
+
+        pre_balance: Optional[Decimal] = None
+        try:
+            pre_balance = await self.lighter_client.get_available_balance()
+        except Exception as exc:
+            self.logger.log(
+                f"Unable to fetch Lighter available balance before top-up: {exc}",
+                "WARNING",
+            )
+
+        tx_hash, transferred_raw, transfer_decimals = await _transfer_full_usdc_balance(
+            web3,
+            normalized_private_key,
+            checksum_address,
+            intent_address,
+        )
+
+        transfer_display = _format_usdc_amount_raw(transferred_raw, transfer_decimals)
+        self.logger.log(
+            f"Submitted L1→Lighter USDC transfer tx={tx_hash} amount={transfer_display}",
+            "INFO",
+        )
+
+        expected_balance: Optional[Decimal] = None
+        if pre_balance is not None:
+            try:
+                transfer_amount = Decimal(transferred_raw) / (Decimal(10) ** Decimal(transfer_decimals))
+                expected_balance = pre_balance + transfer_amount
+            except (InvalidOperation, ValueError):
+                expected_balance = None
+
+        wait_logger = logging.getLogger("lighter.topup")
+        wait_logger.setLevel(logging.INFO)
+
+        try:
+            _, credited_balance = await _wait_for_lighter_account_ready(
+                base_url,
+                checksum_address,
+                expected_balance=expected_balance,
+                logger=wait_logger,
+                timeout_seconds=600.0,
+                poll_interval=30.0,
+            )
+        except Exception as exc:
+            self.logger.log(
+                f"Lighter balance confirmation after top-up incomplete: {exc}",
+                "WARNING",
+            )
+        else:
+            balance_display = f"{credited_balance.normalize():f}" if credited_balance else "0"
+            self.logger.log(
+                f"Lighter balance confirmed at {balance_display} USDC after top-up",
+                "INFO",
+            )
 
     async def _log_leaderboard_points(self, cycle_number: int) -> None:
         address = await self._resolve_lighter_l1_address()
@@ -3086,6 +3234,7 @@ async def _async_main(args: argparse.Namespace) -> None:
             executor.logger.log(f"Starting hedging cycle #{cycle_index}", "INFO")
             cycle_start_time = time.time()
             try:
+                await executor.ensure_l1_top_up_if_needed()
                 results = await executor.execute_cycle()
             except SkipCycleError as exc:
                 network_error_count = 0

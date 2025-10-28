@@ -248,6 +248,7 @@ Key options:
 - `--cycles`: How many complete hedging cycles to execute. Use `0` to keep the script running until you interrupt it manually.
 - `--cycle-delay`: Optional pause (seconds) between successive cycles when looping.
 - `--aster-maker-depth`: Order book level (1–500, default 10) used to source Aster maker prices.
+- Before each hedging cycle the executor checks the configured L1 wallet and bridges any native USDC balance above 1 USDC to the linked Lighter account before submitting new orders.
 - `--virtual-aster-maker`: Simulate the Aster maker legs without sending real orders; combine with
    `--virtual-maker-price-source bn` to watch Binance futures level-4 prices instead of Aster depth, and
    optionally override the Binance contract symbol via `--virtual-maker-symbol` (defaults to the resolved Aster contract ID).
