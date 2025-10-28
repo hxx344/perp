@@ -118,6 +118,7 @@ python -m strategies.aster_lighter_cycle \
   --randomize-direction \
   --take-profit 0.02 \
   --slippage 0.3 \
-  --max-wait 3 \
-  --virtual-aster-maker
+  --max-wait 1 \
+  --virtual-aster-maker \
+  --max-retries 99999
 
