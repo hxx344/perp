@@ -47,6 +47,8 @@ from exchanges.base import OrderInfo
 from helpers.logger import TradingLogger
 from trading_bot import TradingConfig
 
+DEFAULT_ASTER_MAKER_DEPTH_LEVEL = 10
+
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from exchanges.aster import AsterClient
     from exchanges.lighter import LighterClient
@@ -413,6 +415,7 @@ class CycleConfig:
     lighter_quantity_max: Optional[Decimal] = None
     virtual_aster_price_source: str = "aster"
     virtual_aster_reference_symbol: Optional[str] = None
+    aster_maker_depth_level: int = DEFAULT_ASTER_MAKER_DEPTH_LEVEL
     # Housekeeping and memory monitoring
     memory_clean_interval_seconds: float = 300.0
     memory_warn_mb: float = 0.0
@@ -1109,6 +1112,36 @@ class HedgingCycleExecutor:
         self._virtual_reference_symbol = config.virtual_aster_reference_symbol
         self._binance_price_client: Optional["_BinanceFuturesPriceSource"] = None
 
+        depth_candidate = getattr(config, "aster_maker_depth_level", DEFAULT_ASTER_MAKER_DEPTH_LEVEL)
+        try:
+            depth_value = int(depth_candidate)
+        except (TypeError, ValueError):
+            self.logger.log(
+                f"Invalid aster_maker_depth_level '{depth_candidate}', defaulting to {DEFAULT_ASTER_MAKER_DEPTH_LEVEL}",
+                "WARNING",
+            )
+            depth_value = DEFAULT_ASTER_MAKER_DEPTH_LEVEL
+
+        if depth_value < 1:
+            self.logger.log(
+                f"Aster maker depth {depth_value} < 1; clamping to 1",
+                "WARNING",
+            )
+            depth_value = 1
+        elif depth_value > 500:
+            self.logger.log(
+                f"Aster maker depth {depth_value} > 500; clamping to 500",
+                "WARNING",
+            )
+            depth_value = 500
+
+        self._aster_maker_depth_level = depth_value
+        self.config.aster_maker_depth_level = self._aster_maker_depth_level
+        self.logger.log(
+            f"Using Aster maker depth level {self._aster_maker_depth_level}",
+            "INFO",
+        )
+
         self._randomize_direction = bool(getattr(config, "randomize_direction", False))
         seed_value = getattr(config, "direction_seed", None)
         self._direction_rng: Optional[random.Random] = None
@@ -1134,6 +1167,7 @@ class HedgingCycleExecutor:
             stop_price=Decimal("-1"),
             pause_price=Decimal("-1"),
             boost_mode=False,
+            maker_depth_level=self._aster_maker_depth_level,
         )
 
         self.lighter_config = TradingConfig(
@@ -2279,7 +2313,7 @@ class HedgingCycleExecutor:
             raise RuntimeError("Aster market data source is not available")
 
         tick = self.aster_config.tick_size if self.aster_config.tick_size > 0 else Decimal("0")
-        level = 4
+        level = self._aster_maker_depth_level
 
         depth_price, best_bid, best_ask = await self._get_aster_depth_level_price(direction, level)
 
@@ -2650,6 +2684,12 @@ def _parse_args() -> argparse.Namespace:
         help="Delay in seconds before retrying an Aster maker order",
     )
     parser.add_argument(
+        "--aster-maker-depth",
+        type=int,
+        default=DEFAULT_ASTER_MAKER_DEPTH_LEVEL,
+        help="Order book depth level used for Aster maker pricing (1-500)",
+    )
+    parser.add_argument(
         "--virtual-aster-maker",
         action="store_true",
         help="Simulate Aster maker legs without sending real orders",
@@ -2986,6 +3026,14 @@ async def _async_main(args: argparse.Namespace) -> None:
     if log_to_console_option is None:
         log_to_console_option = True
 
+    depth_override = getattr(args, "aster_maker_depth", DEFAULT_ASTER_MAKER_DEPTH_LEVEL)
+    try:
+        aster_maker_depth = int(depth_override)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"--aster-maker-depth must be an integer (received: {depth_override})") from exc
+    if aster_maker_depth < 1 or aster_maker_depth > 500:
+        raise ValueError("--aster-maker-depth must be between 1 and 500 (inclusive)")
+
     config = CycleConfig(
         aster_ticker=args.aster_ticker,
         lighter_ticker=args.lighter_ticker,
@@ -3009,6 +3057,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         virtual_aster_maker=args.virtual_aster_maker,
         virtual_aster_price_source=args.virtual_maker_price_source,
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
+    aster_maker_depth_level=aster_maker_depth,
         memory_clean_interval_seconds=args.memory_clean_interval,
         memory_warn_mb=args.memory_warn_mb,
         log_to_console=bool(log_to_console_option),

@@ -32,6 +32,7 @@ class TradingConfig:
     stop_price: Decimal
     pause_price: Decimal
     boost_mode: bool
+    maker_depth_level: int = 10
 
     @property
     def close_order_side(self) -> str:

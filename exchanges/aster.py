@@ -549,6 +549,8 @@ class AsterMarketDataWebSocket:
 class AsterClient(BaseExchangeClient):
     """Aster exchange client implementation."""
 
+    MAKER_DEPTH_LEVEL = 10
+
     def __init__(self, config: Dict[str, Any]):
         """Initialize Aster client."""
         super().__init__(config)
@@ -572,6 +574,19 @@ class AsterClient(BaseExchangeClient):
         # Public market data websocket (lazy)
         self._market_ws_url = "wss://fstream.asterdex.com"
         self._market_data_ws: Optional[AsterMarketDataWebSocket] = None
+
+        depth_candidate = getattr(self.config, 'maker_depth_level', self.MAKER_DEPTH_LEVEL)
+        try:
+            depth_value = int(depth_candidate)
+        except (TypeError, ValueError):
+            depth_value = self.MAKER_DEPTH_LEVEL
+
+        if depth_value < 1:
+            depth_value = 1
+        elif depth_value > 500:
+            depth_value = 500
+
+        self._maker_depth_level = depth_value
 
     def _ensure_http(self) -> aiohttp.ClientSession:
         """Get or create a shared aiohttp session with bounded connector and no cookie persistence."""
@@ -903,7 +918,7 @@ class AsterClient(BaseExchangeClient):
             depth_price, best_bid, best_ask = await self.get_depth_level_price(
                 contract_id,
                 direction,
-                level=4,
+                level=self._maker_depth_level,
             )
 
             best_bid = best_bid if best_bid is not None else Decimal(0)
