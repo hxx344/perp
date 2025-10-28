@@ -95,6 +95,8 @@ fi
 python3 -m venv env
 source env/bin/activate
 
+git pull
+
 pip install -r requirements.txt
 
 if [ ! -f .env ]; then
