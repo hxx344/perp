@@ -3414,7 +3414,31 @@ async def _async_main(args: argparse.Namespace) -> None:
                         executor.apply_depth_config(payload)
                     except Exception as exc:
                         executor.logger.log(f"Failed to apply hot depth config: {exc}", "WARNING")
-            executor.logger.log(f"Starting hedging cycle #{cycle_index}", "INFO")
+            depth_levels = {
+                "maker": getattr(
+                    executor.config,
+                    "aster_maker_depth_level",
+                    getattr(executor, "_aster_maker_depth_level", None),
+                ),
+                "leg1": getattr(
+                    executor.config,
+                    "aster_leg1_depth_level",
+                    getattr(executor, "_aster_leg1_depth_level", None),
+                ),
+                "leg3": getattr(
+                    executor.config,
+                    "aster_leg3_depth_level",
+                    getattr(executor, "_aster_leg3_depth_level", None),
+                ),
+            }
+            depth_display = ", ".join(
+                f"{name}={value if value is not None else 'N/A'}"
+                for name, value in depth_levels.items()
+            )
+            executor.logger.log(
+                f"Starting hedging cycle #{cycle_index} | depth levels: {depth_display}",
+                "INFO",
+            )
             cycle_start_time = time.time()
             try:
                 await executor.ensure_l1_top_up_if_needed()
