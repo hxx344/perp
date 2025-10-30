@@ -281,6 +281,8 @@ python strategies/aster_lighter_cycle.py \
 - `--cycles` 决定执行的循环次数，设置为 `0` 表示脚本会一直运行直到手动中断。
 - `--cycle-delay` 用于在每次循环后增加额外的暂停时间（秒）。脚本现在会强制保证两次循环启动之间至少间隔 60 秒，该参数会叠加在这个基础间隔之上。
 - `--aster-maker-depth` 用于指定 Aster Maker 挂单参考的深度级别（1-500，默认 10）。
+- `--aster-leg1-depth` 可为第一条 Aster Maker 挂单单独设置深度，未提供时默认跟随 `--aster-maker-depth`。
+- `--aster-leg3-depth` 可为第三条 Aster 反向 Maker 挂单单独设置深度，未提供时默认跟随 `--aster-maker-depth`。
 - 每轮执行前脚本会自动检查配置的 L1 钱包，如果原生 USDC 余额大于 1 USDC，会先发起充值到 Lighter 账户后再开始下一轮。
 - `--take-profit` 参数目前保留兼容性，但不会影响 Aster 反向 Maker 的挂单价格。
 - 默认等待超时为 5 秒，可通过 `--max-wait` 调整。

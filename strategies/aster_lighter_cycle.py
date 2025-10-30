@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import random
+import subprocess
 import sys
 import time
 import os
@@ -417,6 +419,9 @@ class CycleConfig:
     virtual_aster_price_source: str = "aster"
     virtual_aster_reference_symbol: Optional[str] = None
     aster_maker_depth_level: int = DEFAULT_ASTER_MAKER_DEPTH_LEVEL
+    aster_leg1_depth_level: Optional[int] = None
+    aster_leg3_depth_level: Optional[int] = None
+    hot_depth_url: Optional[str] = None
     # Housekeeping and memory monitoring
     memory_clean_interval_seconds: float = 300.0
     memory_warn_mb: float = 0.0
@@ -597,6 +602,55 @@ async def _fetch_lighter_leaderboard_points(
 LIGHTER_MAINNET_BASE_URL = "https://mainnet.zklighter.elliot.ai"
 ARBITRUM_CHAIN_ID = 42161
 # Native USDC on Arbitrum One (deployed by Circle, not the legacy bridged USDC.e)
+
+
+def _fetch_hot_depth_payload(url: Optional[str], logger: Optional[TradingLogger]) -> Optional[Dict[str, Any]]:
+    if not url:
+        return None
+
+    trimmed = url.strip()
+    if not trimmed:
+        return None
+
+    try:
+        result = subprocess.run(
+            ["curl", "-fsSL", trimmed],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        if logger:
+            logger.log(f"curl command not found for hot depth fetch: {exc}", "ERROR")
+        return None
+    except subprocess.CalledProcessError as exc:
+        if logger:
+            logger.log(
+                f"Failed to download hot depth config from {trimmed}: {exc.stderr.strip() or exc}",
+                "WARNING",
+            )
+        return None
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        if logger:
+            logger.log(
+                f"Invalid JSON in hot depth config from {trimmed}: {exc}",
+                "WARNING",
+            )
+        return None
+
+    if not isinstance(payload, dict):
+        if logger:
+            logger.log(
+                f"Hot depth config from {trimmed} is not an object: {type(payload).__name__}",
+                "WARNING",
+            )
+        return None
+
+    return payload
 ARBITRUM_USDC_CONTRACT = Web3.to_checksum_address("0xaf88d065e77c8cc2239327c5edb3a432268e5831")
 _REQUIRED_LIGHTER_ENV = (
     "API_KEY_PRIVATE_KEY",
@@ -1120,33 +1174,36 @@ class HedgingCycleExecutor:
         self._virtual_reference_symbol = config.virtual_aster_reference_symbol
         self._binance_price_client: Optional["_BinanceFuturesPriceSource"] = None
 
-        depth_candidate = getattr(config, "aster_maker_depth_level", DEFAULT_ASTER_MAKER_DEPTH_LEVEL)
-        try:
-            depth_value = int(depth_candidate)
-        except (TypeError, ValueError):
-            self.logger.log(
-                f"Invalid aster_maker_depth_level '{depth_candidate}', defaulting to {DEFAULT_ASTER_MAKER_DEPTH_LEVEL}",
-                "WARNING",
-            )
-            depth_value = DEFAULT_ASTER_MAKER_DEPTH_LEVEL
+        base_depth_candidate = getattr(config, "aster_maker_depth_level", DEFAULT_ASTER_MAKER_DEPTH_LEVEL)
+        self._aster_maker_depth_level = self._normalize_depth_value(
+            base_depth_candidate,
+            "aster_maker_depth_level",
+            DEFAULT_ASTER_MAKER_DEPTH_LEVEL,
+        )
 
-        if depth_value < 1:
-            self.logger.log(
-                f"Aster maker depth {depth_value} < 1; clamping to 1",
-                "WARNING",
-            )
-            depth_value = 1
-        elif depth_value > 500:
-            self.logger.log(
-                f"Aster maker depth {depth_value} > 500; clamping to 500",
-                "WARNING",
-            )
-            depth_value = 500
+        leg1_candidate = getattr(config, "aster_leg1_depth_level", None)
+        leg3_candidate = getattr(config, "aster_leg3_depth_level", None)
 
-        self._aster_maker_depth_level = depth_value
+        self._aster_leg1_depth_level = self._normalize_depth_value(
+            leg1_candidate,
+            "aster_leg1_depth_level",
+            self._aster_maker_depth_level,
+        )
+        self._aster_leg3_depth_level = self._normalize_depth_value(
+            leg3_candidate,
+            "aster_leg3_depth_level",
+            self._aster_maker_depth_level,
+        )
+
         self.config.aster_maker_depth_level = self._aster_maker_depth_level
+        self.config.aster_leg1_depth_level = self._aster_leg1_depth_level
+        self.config.aster_leg3_depth_level = self._aster_leg3_depth_level
         self.logger.log(
-            f"Using Aster maker depth level {self._aster_maker_depth_level}",
+            (
+                "Using Aster depth levels -> leg1: "
+                f"{self._aster_leg1_depth_level}, leg3: {self._aster_leg3_depth_level} "
+                f"(default {self._aster_maker_depth_level})"
+            ),
             "INFO",
         )
 
@@ -1175,7 +1232,7 @@ class HedgingCycleExecutor:
             stop_price=Decimal("-1"),
             pause_price=Decimal("-1"),
             boost_mode=False,
-            maker_depth_level=self._aster_maker_depth_level,
+            maker_depth_level=self._aster_leg1_depth_level,
         )
 
         self.lighter_config = TradingConfig(
@@ -1209,6 +1266,68 @@ class HedgingCycleExecutor:
         self._leaderboard_address_warning_emitted = False
         self._cached_leaderboard_points: Optional[Tuple[Optional[Decimal], Optional[Decimal]]] = None
         self._leaderboard_points_cycle: int = 0
+
+    def _normalize_depth_value(self, raw_value: Optional[int], label: str, fallback: int) -> int:
+        candidate = fallback if raw_value is None else raw_value
+        try:
+            depth = int(candidate)
+        except (TypeError, ValueError):
+            self.logger.log(
+                f"Invalid {label} '{candidate}', defaulting to {fallback}",
+                "WARNING",
+            )
+            depth = fallback
+
+        if depth < 1:
+            self.logger.log(
+                f"{label} {depth} < 1; clamping to 1",
+                "WARNING",
+            )
+            depth = 1
+        elif depth > 500:
+            self.logger.log(
+                f"{label} {depth} > 500; clamping to 500",
+                "WARNING",
+            )
+            depth = 500
+
+        return depth
+
+    def apply_depth_config(self, payload: Dict[str, Any]) -> None:
+        if not payload:
+            return
+
+        base_candidate = payload.get("aster_maker_depth_level", self._aster_maker_depth_level)
+        leg1_candidate = payload.get("aster_leg1_depth_level", base_candidate)
+        leg3_candidate = payload.get("aster_leg3_depth_level", base_candidate)
+
+        new_base = self._normalize_depth_value(base_candidate, "hot_aster_maker_depth_level", self._aster_maker_depth_level)
+        new_leg1 = self._normalize_depth_value(leg1_candidate, "hot_aster_leg1_depth_level", new_base)
+        new_leg3 = self._normalize_depth_value(leg3_candidate, "hot_aster_leg3_depth_level", new_base)
+
+        if (
+            new_base == self._aster_maker_depth_level
+            and new_leg1 == self._aster_leg1_depth_level
+            and new_leg3 == self._aster_leg3_depth_level
+        ):
+            return
+
+        self._aster_maker_depth_level = new_base
+        self._aster_leg1_depth_level = new_leg1
+        self._aster_leg3_depth_level = new_leg3
+
+        self.config.aster_maker_depth_level = new_base
+        self.config.aster_leg1_depth_level = new_leg1
+        self.config.aster_leg3_depth_level = new_leg3
+        self.aster_config.maker_depth_level = new_leg1
+
+        self.logger.log(
+            (
+                "Hot depth update applied -> "
+                f"maker={new_base}, leg1={new_leg1}, leg3={new_leg3}"
+            ),
+            "INFO",
+        )
 
     async def _memory_housekeeping_loop(self) -> None:
         """Periodically trigger GC and clean bounded in-memory states.
@@ -1885,6 +2004,7 @@ class HedgingCycleExecutor:
                 leg_name=leg_name,
                 direction=direction,
                 quantity=self.config.aster_quantity,
+                depth_level=self._aster_leg1_depth_level,
             )
 
         if not self.aster_client:
@@ -1951,6 +2071,7 @@ class HedgingCycleExecutor:
                 leg_name=leg_name,
                 direction=direction,
                 quantity=self.config.aster_quantity,
+                depth_level=self._aster_leg3_depth_level,
             )
 
         if not self.aster_client:
@@ -1978,7 +2099,10 @@ class HedgingCycleExecutor:
                 await asyncio.sleep(self.config.retry_delay_seconds)
             skip_retry_delay = False
 
-            target_price = await self._calculate_aster_maker_price(direction)
+            target_price = await self._calculate_aster_maker_price(
+                direction,
+                depth_level=self._aster_leg3_depth_level,
+            )
             self.logger.log(
                 f"{leg_name} | Placing Aster reverse close: qty={reverse_quantity}, side={direction}, limit={target_price}",
                 "DEBUG",
@@ -2026,6 +2150,8 @@ class HedgingCycleExecutor:
         leg_name: str,
         direction: str,
         quantity: Decimal,
+        *,
+        depth_level: int,
     ) -> LegResult:
         if not self._has_aster_market_data() and not (
             self._virtual_price_source == "bn" and self._binance_price_client
@@ -2044,7 +2170,10 @@ class HedgingCycleExecutor:
             skip_retry_delay = False
 
             try:
-                target_price = await self._calculate_virtual_maker_price(direction)
+                target_price = await self._calculate_virtual_maker_price(
+                    direction,
+                    depth_level=depth_level,
+                )
             except Exception as exc:  # pragma: no cover - defensive logging
                 last_error = str(exc)
                 self.logger.log(
@@ -2463,12 +2592,12 @@ class HedgingCycleExecutor:
             return await self.aster_client.fetch_bbo_prices(contract_id)
         raise RuntimeError("Aster market data source is unavailable")
 
-    async def _calculate_aster_maker_price(self, direction: str) -> Decimal:
+    async def _calculate_aster_maker_price(self, direction: str, *, depth_level: Optional[int] = None) -> Decimal:
         if not self._has_aster_market_data():
             raise RuntimeError("Aster market data source is not available")
 
         tick = self.aster_config.tick_size if self.aster_config.tick_size > 0 else Decimal("0")
-        level = self._aster_maker_depth_level
+        level = depth_level if depth_level is not None else self._aster_leg3_depth_level
 
         depth_price, best_bid, best_ask = await self._get_aster_depth_level_price(direction, level)
 
@@ -2582,10 +2711,18 @@ class HedgingCycleExecutor:
         )
         return price
 
-    async def _calculate_virtual_maker_price(self, direction: str) -> Decimal:
+    async def _calculate_virtual_maker_price(
+        self,
+        direction: str,
+        *,
+        depth_level: int,
+    ) -> Decimal:
         if self._virtual_price_source == "bn" and self._binance_price_client:
             return await self._calculate_binance_maker_price(direction)
-        return await self._calculate_aster_maker_price(direction)
+        return await self._calculate_aster_maker_price(
+            direction,
+            depth_level=depth_level,
+        )
 
     def _calculate_taker_price_from_reference(
         self,
@@ -2845,6 +2982,16 @@ def _parse_args() -> argparse.Namespace:
         help="Order book depth level used for Aster maker pricing (1-500)",
     )
     parser.add_argument(
+        "--aster-leg1-depth",
+        type=int,
+        help="Override depth level for Aster leg1 maker entry (1-500). Defaults to --aster-maker-depth.",
+    )
+    parser.add_argument(
+        "--aster-leg3-depth",
+        type=int,
+        help="Override depth level for Aster leg3 reverse maker (1-500). Defaults to --aster-maker-depth.",
+    )
+    parser.add_argument(
         "--virtual-aster-maker",
         action="store_true",
         help="Simulate Aster maker legs without sending real orders",
@@ -2858,6 +3005,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--virtual-maker-symbol",
         help="Optional contract symbol used by the virtual maker price source (defaults to the resolved Aster contract id)",
+    )
+    parser.add_argument(
+        "--hot-depth-url",
+        help="Optional HTTP(S) URL returning JSON overrides for Aster depth levels (fetched with curl before each cycle)",
     )
     parser.add_argument(
         "--cycles",
@@ -3192,6 +3343,18 @@ async def _async_main(args: argparse.Namespace) -> None:
     if aster_maker_depth < 1 or aster_maker_depth > 500:
         raise ValueError("--aster-maker-depth must be between 1 and 500 (inclusive)")
 
+    leg1_depth_arg = getattr(args, "aster_leg1_depth", None)
+    if leg1_depth_arg is not None and (leg1_depth_arg < 1 or leg1_depth_arg > 500):
+        raise ValueError("--aster-leg1-depth must be between 1 and 500 (inclusive)")
+
+    leg3_depth_arg = getattr(args, "aster_leg3_depth", None)
+    if leg3_depth_arg is not None and (leg3_depth_arg < 1 or leg3_depth_arg > 500):
+        raise ValueError("--aster-leg3-depth must be between 1 and 500 (inclusive)")
+
+    hot_depth_url = getattr(args, "hot_depth_url", None)
+    if hot_depth_url is not None:
+        hot_depth_url = hot_depth_url.strip() or None
+
     config = CycleConfig(
         aster_ticker=args.aster_ticker,
         lighter_ticker=args.lighter_ticker,
@@ -3201,8 +3364,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         lighter_quantity_min=lighter_quantity_min,
         lighter_quantity_max=lighter_quantity_max,
         direction=args.direction,
-    randomize_direction=bool(getattr(args, "randomize_direction", False)),
-    direction_seed=getattr(args, "direction_seed", None),
+        randomize_direction=bool(getattr(args, "randomize_direction", False)),
+        direction_seed=getattr(args, "direction_seed", None),
         take_profit_pct=args.take_profit,
         slippage_pct=args.slippage,
         max_wait_seconds=args.max_wait,
@@ -3215,7 +3378,10 @@ async def _async_main(args: argparse.Namespace) -> None:
         virtual_aster_maker=args.virtual_aster_maker,
         virtual_aster_price_source=args.virtual_maker_price_source,
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
-    aster_maker_depth_level=aster_maker_depth,
+        aster_maker_depth_level=aster_maker_depth,
+        aster_leg1_depth_level=leg1_depth_arg,
+        aster_leg3_depth_level=leg3_depth_arg,
+    hot_depth_url=hot_depth_url,
         memory_clean_interval_seconds=args.memory_clean_interval,
         memory_warn_mb=args.memory_warn_mb,
         log_to_console=bool(log_to_console_option),
@@ -3241,6 +3407,13 @@ async def _async_main(args: argparse.Namespace) -> None:
     try:
         while True:
             cycle_index += 1
+            if config.hot_depth_url:
+                payload = _fetch_hot_depth_payload(config.hot_depth_url, executor.logger)
+                if payload:
+                    try:
+                        executor.apply_depth_config(payload)
+                    except Exception as exc:
+                        executor.logger.log(f"Failed to apply hot depth config: {exc}", "WARNING")
             executor.logger.log(f"Starting hedging cycle #{cycle_index}", "INFO")
             cycle_start_time = time.time()
             try:
