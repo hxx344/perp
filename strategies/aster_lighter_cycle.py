@@ -1857,6 +1857,31 @@ class HedgingCycleExecutor:
 
         lighter_contract_id, lighter_tick = await self.lighter_client.get_contract_attributes()
 
+        lighter_step = Decimal("0.001")
+        base_amount_multiplier = getattr(self.lighter_client, "base_amount_multiplier", None)
+        try:
+            if base_amount_multiplier and base_amount_multiplier > 0:
+                lighter_step = Decimal("1") / Decimal(base_amount_multiplier)
+        except (InvalidOperation, ValueError, TypeError):
+            lighter_step = Decimal("0.001")
+
+        if lighter_step <= 0:
+            lighter_step = Decimal("0.001")
+
+        self._lighter_quantity_step = lighter_step
+        quantized_lighter_qty = self._quantize_quantity(self.config.lighter_quantity, lighter_step)
+        if quantized_lighter_qty is not None:
+            self.config.lighter_quantity = quantized_lighter_qty
+
+        if self._lighter_quantity_min is not None:
+            quantized_min = self._quantize_quantity(self._lighter_quantity_min, lighter_step)
+            if quantized_min is not None:
+                self._lighter_quantity_min = quantized_min
+        if self._lighter_quantity_max is not None:
+            quantized_max = self._quantize_quantity(self._lighter_quantity_max, lighter_step)
+            if quantized_max is not None:
+                self._lighter_quantity_max = quantized_max
+
         self.aster_config.contract_id = aster_contract_id
         self.aster_config.tick_size = aster_tick
 
@@ -2782,6 +2807,22 @@ class HedgingCycleExecutor:
         selected_units = random.randint(min_units, max_units)
         quantity = Decimal(selected_units) * self._lighter_quantity_step
         return quantity.quantize(self._lighter_quantity_step)
+
+    @staticmethod
+    def _quantize_quantity(quantity: Optional[Decimal], step: Decimal) -> Optional[Decimal]:
+        if quantity is None or step <= 0:
+            return quantity
+
+        try:
+            units = (quantity / step).to_integral_value(rounding=ROUND_HALF_UP)
+        except (InvalidOperation, ZeroDivisionError):
+            return quantity
+
+        quantized = units * step
+        try:
+            return quantized.quantize(step)
+        except (InvalidOperation, ValueError):
+            return quantized
 
     def _calculate_emergency_limit_price(self, base_price: Decimal, side: str) -> Decimal:
         if base_price <= 0:
