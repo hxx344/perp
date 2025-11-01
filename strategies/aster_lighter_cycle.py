@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, cast
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import aiohttp
 from eth_account import Account
@@ -612,9 +613,20 @@ def _fetch_hot_depth_payload(url: Optional[str], logger: Optional[TradingLogger]
     if not trimmed:
         return None
 
+    cache_bust_url = trimmed
+    try:
+        parsed = urlparse(trimmed)
+        if parsed.scheme in {"http", "https"}:
+            query_items = parse_qsl(parsed.query, keep_blank_values=True)
+            query_items.append(("_", str(int(time.time()))))
+            cache_bust_query = urlencode(query_items)
+            cache_bust_url = urlunparse(parsed._replace(query=cache_bust_query))
+    except Exception:
+        cache_bust_url = trimmed
+
     try:
         result = subprocess.run(
-            ["curl", "-fsSL", trimmed],
+            ["curl", "-fsSL", cache_bust_url],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
