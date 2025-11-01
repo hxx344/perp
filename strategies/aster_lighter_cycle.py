@@ -1979,6 +1979,12 @@ class HedgingCycleExecutor:
         )
         results.append(leg2)
 
+        self.logger.log(
+            "Inserted pause between LEG2 and LEG3: sleeping 30 seconds",
+            "INFO",
+        )
+        await asyncio.sleep(30.0)
+
         # Leg 3: Aster reverse maker to flatten
         reverse_direction = "sell" if entry_direction == "buy" else "buy"
         leg3 = await self._execute_aster_reverse_maker(
