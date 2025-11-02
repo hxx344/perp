@@ -669,6 +669,14 @@ _REQUIRED_LIGHTER_ENV = (
     "LIGHTER_ACCOUNT_INDEX",
     "LIGHTER_API_KEY_INDEX",
 )
+_ENV_KEYS_TO_CLEAR = (
+    "L1_WALLET_PRIVATE_KEY",
+    "LIGHTER_L1_PRIVATE_KEY",
+    "API_KEY_PRIVATE_KEY",
+    "LIGHTER_ACCOUNT_INDEX",
+    "LIGHTER_API_KEY_INDEX",
+    "L1_WALLET_ADDRESS",
+)
 DEFAULT_LIGHTER_LEVERAGE = 50
 L1_USDC_TOPUP_THRESHOLD = Decimal("1")
 
@@ -726,6 +734,40 @@ def _normalize_private_key_hex(value: str) -> str:
     if not cleaned:
         return cleaned
     return cleaned if cleaned.startswith("0x") else f"0x{cleaned}"
+
+
+def _clear_env_credentials(env_path: Path, *, logger: Optional[logging.Logger] = None) -> bool:
+    removed_any = False
+    if not env_path.exists():
+        if logger:
+            logger.warning("Env file %s does not exist; nothing to clear", env_path)
+        return False
+
+    for key in _ENV_KEYS_TO_CLEAR:
+        try:
+            previous_value = dotenv.get_key(str(env_path), key)
+        except Exception:
+            previous_value = None
+        try:
+            result = dotenv.set_key(str(env_path), key, "", quote_mode="never")
+        except Exception as exc:
+            if logger:
+                logger.warning("Failed to clear %s in %s: %s", key, env_path, exc)
+            continue
+
+        os.environ[key] = ""
+
+        success = bool(result)
+
+        if success:
+            if logger:
+                logger.info("Cleared %s in %s", key, env_path)
+            if previous_value not in (None, ""):
+                removed_any = True
+        elif logger:
+            logger.info("Ensured blank value for %s in %s", key, env_path)
+
+    return removed_any
 
 
 async def _request_lighter_intent_address(
@@ -3084,6 +3126,13 @@ def _parse_args() -> argparse.Namespace:
         help="Path to the environment file containing both exchange credentials",
     )
     parser.add_argument(
+        "--l1-private-key",
+        help=(
+            "Optional L1 wallet private key. When provided, existing private key and Lighter API credentials "
+            "are cleared, the new key is saved, and initialization continues"
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         help="Console logging level (DEBUG, INFO, WARNING, ERROR)",
@@ -3139,6 +3188,11 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=25,
         help="Number of frames to capture per allocation (1..50)",
+    )
+    parser.add_argument(
+        "--reset-credentials",
+        action="store_true",
+        help="Remove L1 wallet private key and Lighter API credentials from the env file, then exit",
     )
     return parser.parse_args()
 
@@ -3653,6 +3707,50 @@ async def _async_main(args: argparse.Namespace) -> None:
 def main() -> None:
     args = _parse_args()
     _configure_logging(args.log_level)
+
+    if getattr(args, "reset_credentials", False) and getattr(args, "l1_private_key", None):
+        logging.error("--reset-credentials cannot be combined with --l1-private-key")
+        sys.exit(2)
+
+    new_private_key_arg = getattr(args, "l1_private_key", None)
+    if new_private_key_arg:
+        env_path = Path(args.env_file)
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        if not env_path.exists():
+            try:
+                env_path.touch()
+            except Exception as exc:
+                logging.error("Unable to create env file at %s: %s", env_path.resolve(), exc)
+                sys.exit(1)
+
+        rotation_logger = logging.getLogger("hedge.rekey")
+        rotation_logger.info(
+            "CLI provided new L1 wallet private key; rotating credentials in %s", env_path
+        )
+
+        normalized_key = _normalize_private_key_hex(str(new_private_key_arg))
+        if not normalized_key:
+            rotation_logger.error("Provided L1 private key is empty after normalization")
+            sys.exit(1)
+
+        _clear_env_credentials(env_path, logger=rotation_logger)
+        _persist_env_value(env_path, "L1_WALLET_PRIVATE_KEY", normalized_key)
+        _persist_env_value(env_path, "LIGHTER_L1_PRIVATE_KEY", normalized_key)
+        rotation_logger.info("Stored new L1 wallet private key from CLI input")
+
+    if getattr(args, "reset_credentials", False):
+        env_path = Path(args.env_file)
+        reset_logger = logging.getLogger("hedge.reset")
+        if not env_path.exists():
+            reset_logger.error("Env file not found: %s", env_path.resolve())
+            sys.exit(1)
+
+        removed = _clear_env_credentials(env_path, logger=reset_logger)
+        if removed:
+            reset_logger.info("Selected credentials cleared from %s", env_path)
+        else:
+            reset_logger.info("No matching credentials found in %s", env_path)
+        sys.exit(0)
 
     try:
         asyncio.run(_async_main(args))

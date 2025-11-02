@@ -34,6 +34,10 @@ ASTER_API_KEY=your_aster_api_key
 ASTER_SECRET_KEY=your_aster_secret_key
 
 # Lighter Configuration
+# 若需清除下列凭证，可运行：
+# python strategies/aster_lighter_cycle.py --env-file .env --reset-credentials
+# 若需在启动时替换私钥，可在命令行添加：
+# --l1-private-key 新私钥
 API_KEY_PRIVATE_KEY=
 LIGHTER_ACCOUNT_INDEX=
 LIGHTER_API_KEY_INDEX=
