@@ -434,6 +434,7 @@ class CycleConfig:
     tracemalloc_group_by: str = "lineno"  # one of: lineno, traceback, filename
     tracemalloc_filter: Optional[str] = None  # only include entries whose path/trace contains this substring
     tracemalloc_frames: int = 25
+    lighter_leverage: int = 50
 
 
 @dataclass
@@ -1947,7 +1948,12 @@ class HedgingCycleExecutor:
             "INFO",
         )
 
-        await self._ensure_lighter_leverage(DEFAULT_LIGHTER_LEVERAGE)
+        target_leverage = getattr(self.config, "lighter_leverage", DEFAULT_LIGHTER_LEVERAGE) or DEFAULT_LIGHTER_LEVERAGE
+        try:
+            target_leverage = int(target_leverage)
+        except (TypeError, ValueError):
+            target_leverage = DEFAULT_LIGHTER_LEVERAGE
+        await self._ensure_lighter_leverage(target_leverage)
 
         if not self._virtual_reference_symbol:
             self._virtual_reference_symbol = aster_contract_id
@@ -3126,6 +3132,12 @@ def _parse_args() -> argparse.Namespace:
         help="Path to the environment file containing both exchange credentials",
     )
     parser.add_argument(
+        "--lighter-leverage",
+        type=int,
+        default=DEFAULT_LIGHTER_LEVERAGE,
+        help="Target leverage to enforce on Lighter before each run (1-125)",
+    )
+    parser.add_argument(
         "--l1-private-key",
         help=(
             "Optional L1 wallet private key. When provided, existing private key and Lighter API credentials "
@@ -3408,6 +3420,14 @@ async def _async_main(args: argparse.Namespace) -> None:
 
     lighter_quantity_min = args.lighter_quantity_min
     lighter_quantity_max = args.lighter_quantity_max
+    lighter_leverage = getattr(args, "lighter_leverage", DEFAULT_LIGHTER_LEVERAGE)
+    try:
+        lighter_leverage = int(lighter_leverage)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("--lighter-leverage must be an integer") from exc
+
+    if lighter_leverage < 1 or lighter_leverage > 125:
+        raise ValueError("--lighter-leverage must be between 1 and 125 (inclusive)")
 
     if (lighter_quantity_min is None) != (lighter_quantity_max is None):
         raise ValueError("Both --lighter-quantity-min and --lighter-quantity-max must be provided together")
@@ -3497,6 +3517,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         tracemalloc_group_by=str(getattr(args, "tracemalloc_group_by", "lineno") or "lineno"),
         tracemalloc_filter=getattr(args, "tracemalloc_filter", None),
         tracemalloc_frames=int(getattr(args, "tracemalloc_frames", 25) or 25),
+        lighter_leverage=lighter_leverage,
     )
 
     executor = HedgingCycleExecutor(config)
