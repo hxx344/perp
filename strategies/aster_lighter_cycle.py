@@ -25,6 +25,7 @@ import time
 import os
 import gc
 import tracemalloc
+import math
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -422,7 +423,7 @@ class CycleConfig:
     aster_maker_depth_level: int = DEFAULT_ASTER_MAKER_DEPTH_LEVEL
     aster_leg1_depth_level: Optional[int] = None
     aster_leg3_depth_level: Optional[int] = None
-    hot_depth_url: Optional[str] = None
+    hot_update_url: Optional[str] = None
     # Housekeeping and memory monitoring
     memory_clean_interval_seconds: float = 300.0
     memory_warn_mb: float = 0.0
@@ -510,6 +511,60 @@ def _compute_cycle_pause_seconds(cycle_start_time: float, configured_delay: floa
 
 _LEADERBOARD_ENDPOINT = "/api/v1/leaderboard"
 _LEADERBOARD_REFRESH_CYCLES = 100
+
+_HOT_UPDATE_SWITCH_KEYS = (
+    "cycle_enabled",
+    "hedge_enabled",
+    "hedging_enabled",
+    "enable_cycles",
+)
+_HOT_UPDATE_SWITCH_RECHECK_SECONDS = 60.0
+
+
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float, Decimal)):
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        if value == 0:
+            return False
+        if value == 1:
+            return True
+        return None
+
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if normalized in {"1", "true", "yes", "on", "enable", "enabled"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "disable", "disabled"}:
+            return False
+
+    return None
+
+
+def _extract_cycle_switch(payload: Optional[Dict[str, Any]]) -> Optional[bool]:
+    if not isinstance(payload, dict):
+        return None
+
+    for key in _HOT_UPDATE_SWITCH_KEYS:
+        if key in payload:
+            coerced = _coerce_optional_bool(payload.get(key))
+            if coerced is not None:
+                return coerced
+
+    nested = payload.get("controls")
+    if isinstance(nested, dict):
+        for key in _HOT_UPDATE_SWITCH_KEYS:
+            if key in nested:
+                coerced = _coerce_optional_bool(nested.get(key))
+                if coerced is not None:
+                    return coerced
+
+    return None
 
 
 def _extract_leaderboard_points(entries: Any, target_address: str) -> Optional[Decimal]:
@@ -607,7 +662,7 @@ ARBITRUM_CHAIN_ID = 42161
 # Native USDC on Arbitrum One (deployed by Circle, not the legacy bridged USDC.e)
 
 
-def _fetch_hot_depth_payload(url: Optional[str], logger: Optional[TradingLogger]) -> Optional[Dict[str, Any]]:
+def _fetch_hot_update_payload(url: Optional[str], logger: Optional[TradingLogger]) -> Optional[Dict[str, Any]]:
     if not url:
         return None
 
@@ -636,12 +691,12 @@ def _fetch_hot_depth_payload(url: Optional[str], logger: Optional[TradingLogger]
         )
     except FileNotFoundError as exc:
         if logger:
-            logger.log(f"curl command not found for hot depth fetch: {exc}", "ERROR")
+            logger.log(f"curl command not found for hot update fetch: {exc}", "ERROR")
         return None
     except subprocess.CalledProcessError as exc:
         if logger:
             logger.log(
-                f"Failed to download hot depth config from {trimmed}: {exc.stderr.strip() or exc}",
+                f"Failed to download hot update config from {trimmed}: {exc.stderr.strip() or exc}",
                 "WARNING",
             )
         return None
@@ -651,7 +706,7 @@ def _fetch_hot_depth_payload(url: Optional[str], logger: Optional[TradingLogger]
     except json.JSONDecodeError as exc:
         if logger:
             logger.log(
-                f"Invalid JSON in hot depth config from {trimmed}: {exc}",
+                f"Invalid JSON in hot update config from {trimmed}: {exc}",
                 "WARNING",
             )
         return None
@@ -659,10 +714,46 @@ def _fetch_hot_depth_payload(url: Optional[str], logger: Optional[TradingLogger]
     if not isinstance(payload, dict):
         if logger:
             logger.log(
-                f"Hot depth config from {trimmed} is not an object: {type(payload).__name__}",
+                f"Hot update config from {trimmed} is not an object: {type(payload).__name__}",
                 "WARNING",
             )
         return None
+
+    return payload
+
+
+async def _wait_for_hot_update_enabled(
+    hot_update_url: str,
+    logger: TradingLogger,
+    *,
+    sleep_seconds: float = _HOT_UPDATE_SWITCH_RECHECK_SECONDS,
+) -> Optional[Dict[str, Any]]:
+    if not hot_update_url:
+        return None
+
+    while True:
+        payload = _fetch_hot_update_payload(hot_update_url, logger)
+
+        if payload is None:
+            logger.log(
+                "Hot update payload unavailable; proceeding without switch enforcement",
+                "WARNING",
+            )
+            return None
+
+        switch_state = _extract_cycle_switch(payload)
+        if switch_state is False:
+            logger.log(
+                (
+                    "Hot update cycle switch disabled; pausing %.0f seconds before rechecking"
+                    % sleep_seconds
+                ),
+                "WARNING",
+            )
+            await asyncio.sleep(max(0.0, sleep_seconds))
+            continue
+
+        return payload
 
     return payload
 ARBITRUM_USDC_CONTRACT = Web3.to_checksum_address("0xaf88d065e77c8cc2239327c5edb3a432268e5831")
@@ -1379,7 +1470,7 @@ class HedgingCycleExecutor:
 
         self.logger.log(
             (
-                "Hot depth update applied -> "
+                "Hot update applied -> "
                 f"maker={new_base}, leg1={new_leg1}, leg3={new_leg3}"
             ),
             "INFO",
@@ -3109,8 +3200,13 @@ def _parse_args() -> argparse.Namespace:
         help="Optional contract symbol used by the virtual maker price source (defaults to the resolved Aster contract id)",
     )
     parser.add_argument(
+        "--hot-update-url",
         "--hot-depth-url",
-        help="Optional HTTP(S) URL returning JSON overrides for Aster depth levels (fetched with curl before each cycle)",
+        dest="hot_update_url",
+        help=(
+            "Optional HTTP(S) URL returning JSON overrides for hedging configuration (depth levels, cycle switch, etc.). "
+            "Fetched with curl before each cycle"
+        ),
     )
     parser.add_argument(
         "--cycles",
@@ -3479,9 +3575,9 @@ async def _async_main(args: argparse.Namespace) -> None:
     if leg3_depth_arg is not None and (leg3_depth_arg < 1 or leg3_depth_arg > 500):
         raise ValueError("--aster-leg3-depth must be between 1 and 500 (inclusive)")
 
-    hot_depth_url = getattr(args, "hot_depth_url", None)
-    if hot_depth_url is not None:
-        hot_depth_url = hot_depth_url.strip() or None
+    hot_update_url = getattr(args, "hot_update_url", None)
+    if hot_update_url is not None:
+        hot_update_url = hot_update_url.strip() or None
 
     config = CycleConfig(
         aster_ticker=args.aster_ticker,
@@ -3509,7 +3605,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         aster_maker_depth_level=aster_maker_depth,
         aster_leg1_depth_level=leg1_depth_arg,
         aster_leg3_depth_level=leg3_depth_arg,
-    hot_depth_url=hot_depth_url,
+    hot_update_url=hot_update_url,
         memory_clean_interval_seconds=args.memory_clean_interval,
         memory_warn_mb=args.memory_warn_mb,
         log_to_console=bool(log_to_console_option),
@@ -3535,14 +3631,16 @@ async def _async_main(args: argparse.Namespace) -> None:
     )
     try:
         while True:
-            cycle_index += 1
-            if config.hot_depth_url:
-                payload = _fetch_hot_depth_payload(config.hot_depth_url, executor.logger)
+            payload: Optional[Dict[str, Any]] = None
+            if config.hot_update_url:
+                payload = await _wait_for_hot_update_enabled(config.hot_update_url, executor.logger)
                 if payload:
                     try:
                         executor.apply_depth_config(payload)
                     except Exception as exc:
-                        executor.logger.log(f"Failed to apply hot depth config: {exc}", "WARNING")
+                        executor.logger.log(f"Failed to apply hot update config: {exc}", "WARNING")
+
+            cycle_index += 1
             depth_levels = {
                 "maker": getattr(
                     executor.config,
