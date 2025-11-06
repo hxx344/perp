@@ -62,7 +62,7 @@ def _make_executor() -> HedgingCycleExecutor:
     return HedgingCycleExecutor(config)
 
 
-def test_log_leaderboard_points_refreshes_every_20_cycles(monkeypatch):
+def test_log_leaderboard_points_refreshes_every_100_cycles(monkeypatch):
     executor = _make_executor()
 
     cached_address = "0x1234567890abcdef1234567890abcdef12345678"
@@ -103,7 +103,7 @@ def test_log_leaderboard_points_refreshes_every_20_cycles(monkeypatch):
     async def _run():
         await executor._log_leaderboard_points(1)
         await executor._log_leaderboard_points(5)
-        await executor._log_leaderboard_points(21)
+        await executor._log_leaderboard_points(101)
 
     asyncio.run(_run())
 
@@ -120,6 +120,6 @@ def test_log_leaderboard_points_refreshes_every_20_cycles(monkeypatch):
     assert print_calls[1][0] == 5
     assert print_calls[1][1:] == print_calls[0][1:]
 
-    # Cycle 21 uses refreshed values
-    assert print_calls[2][0] == 21
+    # Cycle 101 uses refreshed values
+    assert print_calls[2][0] == 101
     assert print_calls[2][1:] == (Decimal("2"), Decimal("20"))

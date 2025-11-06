@@ -509,6 +509,7 @@ def _compute_cycle_pause_seconds(cycle_start_time: float, configured_delay: floa
 
 
 _LEADERBOARD_ENDPOINT = "/api/v1/leaderboard"
+_LEADERBOARD_REFRESH_CYCLES = 100
 
 
 def _extract_leaderboard_points(entries: Any, target_address: str) -> Optional[Decimal]:
@@ -1817,7 +1818,7 @@ class HedgingCycleExecutor:
         cached_points = self._cached_leaderboard_points
         if cached_points is None:
             refresh_needed = True
-        elif cycle_number - self._leaderboard_points_cycle >= 20:
+        elif cycle_number - self._leaderboard_points_cycle >= _LEADERBOARD_REFRESH_CYCLES:
             refresh_needed = True
 
         if refresh_needed:
