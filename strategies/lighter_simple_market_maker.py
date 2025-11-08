@@ -750,6 +750,22 @@ class SimpleMarketMaker:
         self._latest_metrics = metrics
         self._latest_net_position = metrics.get("position_size", self._latest_net_position)
         self._latest_net_position_time = time.time()
+
+        position_size = metrics.get("position_size")
+        if isinstance(position_size, Decimal):
+            self._lighter_inventory_base = position_size
+            if position_size == 0:
+                self._lighter_avg_entry_price = Decimal("0")
+            else:
+                position_value = metrics.get("position_value", Decimal("0"))
+                if isinstance(position_value, Decimal) and position_value != 0:
+                    try:
+                        derived_avg = abs(position_value) / abs(position_size)
+                    except (InvalidOperation, ZeroDivisionError):
+                        derived_avg = None
+                    if derived_avg and derived_avg > 0:
+                        self._lighter_avg_entry_price = derived_avg
+
         if force:
             self._last_metrics_time = 0.0
 
