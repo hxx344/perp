@@ -287,6 +287,7 @@ class SimpleMarketMaker:
         self._latest_metrics: Dict[str, Decimal] = {}
         self._latest_net_position: Decimal = Decimal("0")
         self._latest_net_position_time: float = 0.0
+        self._state_update_lock = asyncio.Lock()
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -351,7 +352,7 @@ class SimpleMarketMaker:
 
         self._running = True
         await self._shutdown_state_task()
-        await self._update_state_once(force=True)
+        await self._update_state_guarded(force=True)
         self._state_task = asyncio.create_task(self._state_maintainer())
 
         self.logger.log(
@@ -531,22 +532,12 @@ class SimpleMarketMaker:
             self.logger.log("Invalid Lighter depth snapshot; skipping iteration", "WARNING")
             return
 
-        net_position = self._latest_net_position
         now = time.time()
-        should_refresh_position = (now - self._latest_net_position_time) > (self._state_refresh_interval * 2.0)
+        max_age = self._state_refresh_interval * 2.0
+        if (now - self._latest_net_position_time) > max_age:
+            await self._refresh_state_if_needed(max_age=max_age)
 
-        if should_refresh_position:
-            try:
-                net_position = await self._lighter_client.get_account_positions()
-                self._latest_net_position = net_position
-                self._latest_net_position_time = time.time()
-            except Exception as exc:
-                self.logger.log(f"Failed to refresh Lighter account position: {exc}", "ERROR")
-                # Fall back to the last known value; if none, default to zero.
-                if net_position is None:
-                    net_position = Decimal("0")
-
-        self._latest_net_position = net_position
+        net_position = self._latest_net_position
 
         mid_price = (best_bid + best_ask) / 2
         self._lighter_last_mark_price = mid_price
@@ -716,10 +707,25 @@ class SimpleMarketMaker:
 
         await self._maybe_report_metrics(metrics, force=force)
 
+    async def _update_state_guarded(self, *, force: bool = False) -> None:
+        async with self._state_update_lock:
+            await self._update_state_once(force=force)
+
+    async def _refresh_state_if_needed(self, *, max_age: float) -> None:
+        now = time.time()
+        if now - self._latest_net_position_time <= max_age:
+            return
+
+        async with self._state_update_lock:
+            now = time.time()
+            if now - self._latest_net_position_time <= max_age:
+                return
+            await self._update_state_once()
+
     async def _state_maintainer(self) -> None:
         while self._running:
             try:
-                await self._update_state_once()
+                await self._update_state_guarded()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
