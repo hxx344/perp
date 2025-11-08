@@ -199,6 +199,9 @@ class SimpleMarketMaker:
         self._lighter_session_volume_quote: Decimal = Decimal("0")
         self._lighter_session_volume_base: Decimal = Decimal("0")
         self._binance_position_estimate: Decimal = Decimal("0")
+        self._base_rate_limit_backoff_seconds = max(float(self.settings.loop_sleep_seconds), 1.0)
+        self._rate_limit_backoff_seconds = self._base_rate_limit_backoff_seconds
+        self._max_rate_limit_backoff_seconds = 60.0
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -283,7 +286,16 @@ class SimpleMarketMaker:
 
         try:
             while self._running:
-                await self._iteration()
+                try:
+                    await self._iteration()
+                except Exception as exc:  # noqa: BLE001
+                    delay = self._handle_iteration_failure(exc)
+                    if delay is None:
+                        raise
+                    await asyncio.sleep(delay)
+                    continue
+
+                self._reset_rate_limit_backoff()
                 await asyncio.sleep(self.settings.loop_sleep_seconds)
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             self.logger.log("Maker loop cancelled", "WARNING")
@@ -584,6 +596,57 @@ class SimpleMarketMaker:
         if not value:
             raise EnvironmentError(f"Environment variable '{name}' is required")
         return value
+
+    def _reset_rate_limit_backoff(self) -> None:
+        self._rate_limit_backoff_seconds = self._base_rate_limit_backoff_seconds
+
+    def _handle_iteration_failure(self, exc: Exception) -> Optional[float]:
+        if isinstance(exc, asyncio.CancelledError):  # pragma: no cover - handled upstream
+            raise
+
+        if self._is_rate_limit_error(exc):
+            delay = self._rate_limit_backoff_seconds
+            self._rate_limit_backoff_seconds = min(
+                self._rate_limit_backoff_seconds * 2,
+                self._max_rate_limit_backoff_seconds,
+            )
+            self.logger.log(
+                f"Lighter rate limit encountered; backing off for {delay:.1f}s",
+                "WARNING",
+            )
+            return delay
+
+        if isinstance(exc, aiohttp.ClientError):
+            delay = min(self._rate_limit_backoff_seconds, 10.0)
+            self.logger.log(
+                f"Transient network error during iteration: {exc}; sleeping {delay:.1f}s",
+                "WARNING",
+            )
+            return delay
+
+        self.logger.log(f"Iteration failed with unrecoverable error: {exc}", "ERROR")
+        return None
+
+    @staticmethod
+    def _extract_status_code(exc: BaseException) -> Optional[int]:
+        visited = set()
+        current: Optional[BaseException] = exc
+        while current is not None and id(current) not in visited:
+            visited.add(id(current))
+            for attr in ("status", "status_code", "code"):
+                value = getattr(current, attr, None)
+                if isinstance(value, int):
+                    return value
+            current = current.__cause__ or current.__context__  # type: ignore[assignment]
+        return None
+
+    @classmethod
+    def _is_rate_limit_error(cls, exc: Exception) -> bool:
+        status = cls._extract_status_code(exc)
+        if status == 429:
+            return True
+        message = str(exc)
+        return "Too Many Requests" in message or "HTTP 429" in message
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:

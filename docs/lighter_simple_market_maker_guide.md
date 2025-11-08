@@ -93,6 +93,11 @@ python lighter_simple_market_maker.py --lighter-ticker ETH-PERP --binance-symbol
 - 若配置了 Binance 对冲密钥，会额外输出对应合约在 Binance USDT 永续上的持仓、名义价值、未实现盈亏、钱包余额与可用余额，方便与 Lighter 侧对照。
 - 监控日志会写入 `logs/` 目录，同时可选输出到控制台（默认开启，可用 `--no-console-log` 禁用）。
 
+### 异常与限速处理
+
+- Lighter 返回 `429 Too Many Requests` 时，循环会自动进入指数退避（默认从当前 `--loop-sleep` 起步，最多延长至 60 秒），等待后再重试，避免直接退出程序。
+- 其他网络类错误也会触发短暂休眠再试；真正不可恢复的异常仍会抛出，确保问题不会被静默吞掉。
+
 ## 快速验证
 
 ```powershell

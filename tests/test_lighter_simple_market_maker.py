@@ -1,4 +1,5 @@
 import asyncio
+import aiohttp
 import time
 from decimal import Decimal
 from types import SimpleNamespace
@@ -186,3 +187,37 @@ def test_maybe_execute_hedge_respects_existing_binance_position():
     asyncio.run(maker._maybe_execute_hedge(Decimal("0")))
     assert stub_hedger.orders == [("SELL", Decimal("0.012"))]
     assert maker._binance_position_estimate == Decimal("0")
+
+
+class StubRateLimitError(Exception):
+    def __init__(self, status: int = 429, message: str = "Too Many Requests"):
+        super().__init__(message)
+        self.status = status
+
+
+def test_handle_iteration_failure_rate_limit_backoff(tmp_path):
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("10"),
+        config_path=str(tmp_path / "hot_update.json"),
+        loop_sleep_seconds=1.5,
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker.logger = cast(TradingLogger, SimpleNamespace(log=lambda *args, **kwargs: None))
+
+    initial_backoff = maker._rate_limit_backoff_seconds
+    assert initial_backoff == max(settings.loop_sleep_seconds, 1.0)
+
+    delay = maker._handle_iteration_failure(StubRateLimitError())
+    assert delay == initial_backoff
+    assert maker._rate_limit_backoff_seconds == min(initial_backoff * 2, maker._max_rate_limit_backoff_seconds)
+
+    maker._reset_rate_limit_backoff()
+    assert maker._rate_limit_backoff_seconds == maker._base_rate_limit_backoff_seconds
+
+    delay = maker._handle_iteration_failure(aiohttp.ClientError("network"))
+    assert delay is not None
