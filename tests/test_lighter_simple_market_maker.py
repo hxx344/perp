@@ -101,8 +101,8 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
 
     base_metrics = {
-        "position_size": Decimal("1"),
-        "position_value": Decimal("100"),
+        "position_size": Decimal("0"),
+        "position_value": Decimal("0"),
         "unrealized_pnl": Decimal("2"),
         "realized_pnl": Decimal("1"),
         "available_balance": Decimal("50"),
@@ -111,9 +111,12 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
         "monthly_volume": Decimal("0"),
     }
 
+    maker._lighter_last_mark_price = Decimal("100")
     asyncio.run(maker._maybe_report_metrics(base_metrics))
     assert logs, "Expected monitoring log output"
     assert "sessionVol=0.000000" in logs[0][1]
+    assert "sessionReal=0.00" in logs[0][1]
+    assert "sessionPnl=0.00" in logs[0][1]
 
     maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
     logs.clear()
@@ -124,6 +127,7 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
             "status": "PARTIALLY_FILLED",
             "filled_size": "0.02",
             "price": "100",
+            "side": "buy",
         }
     )
     maker._handle_lighter_order_update(
@@ -133,11 +137,141 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
             "status": "FILLED",
             "filled_size": "0.05",
             "price": "100",
+            "side": "buy",
         }
     )
+    maker._lighter_last_mark_price = Decimal("100")
+    base_metrics["position_size"] = Decimal("0.05")
+    base_metrics["position_value"] = Decimal("5")
     asyncio.run(maker._maybe_report_metrics(base_metrics))
     assert logs
     assert "sessionVol=5.000000" in logs[0][1]
+    assert "sessionReal=0.00" in logs[0][1]
+    assert "sessionUnreal=0.00" in logs[0][1]
+
+    maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
+    logs.clear()
+    maker._handle_lighter_order_update(
+        {
+            "contract_id": "MARKET",
+            "order_id": "2",
+            "status": "FILLED",
+            "filled_size": "0.05",
+            "price": "101",
+            "side": "sell",
+        }
+    )
+    maker._lighter_last_mark_price = Decimal("101")
+    base_metrics["position_size"] = Decimal("0")
+    base_metrics["position_value"] = Decimal("0")
+    asyncio.run(maker._maybe_report_metrics(base_metrics))
+    assert logs
+    assert "sessionReal=0.05" in logs[0][1]
+    assert "sessionUnreal=0.00" in logs[0][1]
+    assert "sessionPnl=0.05" in logs[0][1]
+
+
+def test_apply_fill_to_session_pnl_tracks_realized_and_inventory(tmp_path):
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("10"),
+        config_path=str(tmp_path / "hot_update.json"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+
+    maker._apply_fill_to_session_pnl(Decimal("0.5"), Decimal("100"))
+    assert maker._lighter_inventory_base == Decimal("0.5")
+    assert maker._lighter_avg_entry_price == Decimal("100")
+    assert maker._lighter_session_realized_pnl == Decimal("0")
+
+    maker._apply_fill_to_session_pnl(Decimal("-0.2"), Decimal("101"))
+    assert maker._lighter_inventory_base == Decimal("0.3")
+    assert maker._lighter_avg_entry_price == Decimal("100")
+    assert maker._lighter_session_realized_pnl == Decimal("0.2")
+
+    maker._apply_fill_to_session_pnl(Decimal("-0.6"), Decimal("99"))
+    # Remaining 0.3 closes, new short 0.3 opens at 99
+    assert maker._lighter_inventory_base == Decimal("-0.3")
+    assert maker._lighter_avg_entry_price == Decimal("99")
+    expected_realized = Decimal("0.2") + (Decimal("99") - Decimal("100")) * Decimal("0.3")
+    assert maker._lighter_session_realized_pnl == expected_realized
+
+
+def test_maybe_report_metrics_combines_binance_pnl(tmp_path):
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("10"),
+        config_path=str(tmp_path / "hot_update.json"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = TradingConfig(
+        ticker="TEST",
+        contract_id="MARKET",
+        quantity=Decimal("1"),
+        take_profit=Decimal("0"),
+        tick_size=Decimal("0.01"),
+        direction="buy",
+        max_orders=1,
+        wait_time=1,
+        exchange="lighter",
+        grid_step=Decimal("0"),
+        stop_price=Decimal("0"),
+        pause_price=Decimal("0"),
+        boost_mode=False,
+    )
+
+    logs = []
+    maker.logger = cast(
+        TradingLogger,
+        SimpleNamespace(log=lambda message, level="INFO": logs.append((level, message))),
+    )
+
+    maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
+    maker._lighter_session_realized_pnl = Decimal("1")
+    maker._lighter_inventory_base = Decimal("0")
+    maker._lighter_last_mark_price = Decimal("0")
+    maker._lighter_avg_entry_price = Decimal("0")
+
+    hedger_metrics = {
+        "wallet_balance": Decimal("102"),
+        "available_balance": Decimal("80"),
+        "position_unrealized_pnl": Decimal("0.5"),
+        "position_size": Decimal("0"),
+        "position_notional": Decimal("0"),
+    }
+
+    class HedgerStub:
+        async def get_account_metrics(self) -> dict:
+            return dict(hedger_metrics)
+
+    maker._hedger = HedgerStub()  # type: ignore[assignment]
+    maker._binance_initial_wallet_balance = Decimal("100")
+
+    base_metrics = {
+        "position_size": Decimal("0"),
+        "position_value": Decimal("0"),
+        "unrealized_pnl": Decimal("0"),
+        "realized_pnl": Decimal("1"),
+        "available_balance": Decimal("50"),
+        "daily_volume": Decimal("4"),
+        "weekly_volume": Decimal("0"),
+        "monthly_volume": Decimal("0"),
+    }
+
+    asyncio.run(maker._maybe_report_metrics(base_metrics))
+    combined_logs = [msg for _lvl, msg in logs if msg.startswith("Combined")]
+    assert combined_logs, "Expected combined metrics log entry"
+    assert "sessionReal=3.00" in combined_logs[-1]
+    assert "sessionUnreal=0.50" in combined_logs[-1]
+    assert "sessionPnl=3.50" in combined_logs[-1]
 
 
 class StubHedger:

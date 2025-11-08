@@ -89,8 +89,10 @@ python lighter_simple_market_maker.py --lighter-ticker ETH-PERP --binance-symbol
 - 每隔 `--metrics-interval` 秒（默认 30 秒）打印一行 Lighter 账户快照，包含：
    - 当前合约净持仓、仓位价值；
    - 未实现/已实现盈亏、可用余额；
-      - 24 小时成交量（`dailyVol`）及本次进程累计成交量（`sessionVol`，使用收到的成交回报实时累加报价 * 成交价得出）。
+   - 24 小时成交量（`dailyVol`）及本次进程累计成交量（`sessionVol`，使用收到的成交回报实时累加报价 * 成交价得出）。
+   - 以成交序列计算的会话盈亏：`sessionReal`（已实现）、`sessionUnreal`（按最新中价对未平仓头寸估算）、`sessionPnl`（两者之和）。
 - 若配置了 Binance 对冲密钥，会额外输出对应合约在 Binance USDT 永续上的持仓、名义价值、未实现盈亏、钱包余额与可用余额，方便与 Lighter 侧对照。
+- 在启用对冲时，日志末尾还会跟上一行 `Combined` 汇总，直接把 Lighter 与 Binance 两侧的会话已实现/未实现盈亏合并，便于快速观察全局净盈亏。该行的 `sessionPnl` 即真实的跨市场净结果。
 - 监控日志会写入 `logs/` 目录，同时可选输出到控制台（默认开启，可用 `--no-console-log` 禁用）。
 
 ### 异常与限速处理
