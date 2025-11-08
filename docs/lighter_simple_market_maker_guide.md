@@ -74,6 +74,7 @@ python lighter_simple_market_maker.py --lighter-ticker ETH-PERP --binance-symbol
 | `--loop-sleep` | 主循环间隔（秒） |
 | `--order-refresh-ticks` | 价格偏离多少个 tick 时撤单重挂 |
 | `--config-path` | 热更新 JSON 文件路径或 URL |
+| `--metrics-interval` | 监控日志输出的间隔（秒），默认 30 秒 |
 | `--no-console-log` | 关闭控制台日志输出 |
 
 ## 工作流程概览
@@ -82,6 +83,15 @@ python lighter_simple_market_maker.py --lighter-ticker ETH-PERP --binance-symbol
 2. **报价维护**：读取最优买卖价，生成目标报价，仅保留每个方向一笔订单。
 3. **库存控制**：仓位逼近限制时停挂对应方向；
 4. **阈值对冲**：净仓位绝对值超过阈值时调用 Binance 市价单对冲，并记录日志。
+
+## 监控输出
+
+- 每隔 `--metrics-interval` 秒（默认 30 秒）打印一行 Lighter 账户快照，包含：
+   - 当前合约净持仓、仓位价值；
+   - 未实现/已实现盈亏、可用余额；
+   - 24 小时成交量（`dailyVol`）及本次进程累计成交量（`sessionVol`，基于 Lighter 返回的 `total_volume` 计算）。
+- 若配置了 Binance 对冲密钥，会额外输出对应合约在 Binance USDT 永续上的持仓、名义价值、未实现盈亏、钱包余额与可用余额，方便与 Lighter 侧对照。
+- 监控日志会写入 `logs/` 目录，同时可选输出到控制台（默认开启，可用 `--no-console-log` 禁用）。
 
 ## 快速验证
 

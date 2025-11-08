@@ -62,6 +62,7 @@ class SimpleMakerSettings:
     loop_sleep_seconds: float = 3.0
     order_refresh_ticks: int = 2
     log_to_console: bool = True
+    metrics_interval_seconds: float = 30.0
 
     def effective_inventory_limit(self) -> Decimal:
         return self.inventory_limit if self.inventory_limit is not None else self.hedge_threshold
@@ -143,6 +144,42 @@ class BinanceHedger:
                 raise RuntimeError(f"Binance order failed: {response.status} {data}")
             return data
 
+    @staticmethod
+    def _to_decimal(value: Any) -> Decimal:
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return Decimal("0")
+
+    async def get_account_metrics(self) -> Dict[str, Decimal]:
+        """Return wallet balances, position size and PnL for the configured symbol."""
+        timestamp = int(time.time() * 1000)
+        params: Dict[str, Any] = {
+            "timestamp": timestamp,
+            "recvWindow": 5000,
+        }
+        params["signature"] = self._sign(params)
+        headers = {"X-MBX-APIKEY": self.api_key}
+
+        async with self.session.get(f"{self.BASE_URL}/fapi/v2/account", params=params, headers=headers) as response:
+            data = await response.json()
+            if response.status >= 400:
+                raise RuntimeError(f"Binance account metrics failed: {response.status} {data}")
+
+        positions = data.get("positions", []) if isinstance(data, dict) else []
+        target_position = next((pos for pos in positions if pos.get("symbol") == self.symbol), {})
+
+        metrics: Dict[str, Decimal] = {
+            "wallet_balance": self._to_decimal(data.get("totalWalletBalance")),
+            "available_balance": self._to_decimal(data.get("availableBalance", data.get("maxWithdrawAmount"))),
+            "unrealized_pnl": self._to_decimal(data.get("totalUnrealizedProfit")),
+            "position_size": self._to_decimal(target_position.get("positionAmt")),
+            "position_notional": self._to_decimal(target_position.get("notional")),
+            "position_unrealized_pnl": self._to_decimal(target_position.get("unrealizedProfit")),
+        }
+
+        return metrics
+
 
 class SimpleMarketMaker:
     """Run a lightweight maker loop on Lighter with threshold hedging on Binance."""
@@ -157,6 +194,8 @@ class SimpleMarketMaker:
         self._lighter_config: Optional[TradingConfig] = None
         self._tracked_orders: Dict[str, ActiveOrder] = {}
         self._last_hot_update: Dict[str, Any] = {}
+        self._last_metrics_time: float = 0.0
+        self._baseline_trade_volume: Optional[Decimal] = None
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -260,7 +299,25 @@ class SimpleMarketMaker:
         spread_scale = self._resolve_spread_scale(hot_update)
         targets = compute_target_prices(mid_price, spread_scale, self._lighter_config.tick_size)
 
-        net_position = await self._lighter_client.get_account_positions()
+        try:
+            lighter_metrics = await self._lighter_client.get_account_metrics()
+        except Exception as exc:
+            self.logger.log(f"Failed to fetch Lighter account metrics: {exc}", "ERROR")
+            lighter_metrics = {
+                "position_size": await self._lighter_client.get_account_positions(),
+                "available_balance": Decimal("0"),
+                "collateral": Decimal("0"),
+                "total_asset_value": Decimal("0"),
+                "daily_volume": Decimal("0"),
+                "weekly_volume": Decimal("0"),
+                "monthly_volume": Decimal("0"),
+                "total_volume": Decimal("0"),
+                "position_value": Decimal("0"),
+                "unrealized_pnl": Decimal("0"),
+                "realized_pnl": Decimal("0"),
+            }
+
+        net_position = lighter_metrics.get("position_size", Decimal("0"))
         inventory_cap = self.settings.effective_inventory_limit()
 
         bid_enabled = should_enable_side(net_position, inventory_cap, "buy")
@@ -280,6 +337,8 @@ class SimpleMarketMaker:
                 )
             except Exception as exc:
                 self.logger.log(f"Binance hedge failed: {exc}", "ERROR")
+
+        await self._maybe_report_metrics(lighter_metrics)
 
     async def _sync_side(self, side: str, target_price: Decimal, enabled: bool) -> None:
         assert self._lighter_client is not None
@@ -371,6 +430,67 @@ class SimpleMarketMaker:
         return spread
 
     @staticmethod
+    def _format_decimal(value: Decimal, precision: int = 4) -> str:
+        try:
+            if precision <= 0:
+                quant = Decimal("1")
+            else:
+                quant = Decimal("1") / (Decimal("10") ** precision)
+            return f"{value.quantize(quant, rounding=ROUND_HALF_UP):f}"
+        except Exception:
+            return format(value, "f")
+
+    async def _maybe_report_metrics(self, lighter_metrics: Dict[str, Decimal]) -> None:
+        now = time.time()
+        if now - self._last_metrics_time < self.settings.metrics_interval_seconds:
+            return
+
+        self._last_metrics_time = now
+
+        total_volume = lighter_metrics.get("total_volume", Decimal("0"))
+        if self._baseline_trade_volume is None or total_volume < self._baseline_trade_volume:
+            self._baseline_trade_volume = total_volume
+
+        baseline = self._baseline_trade_volume or Decimal("0")
+        session_volume = total_volume - baseline
+        if session_volume < 0:
+            session_volume = Decimal("0")
+
+        lighter_message = (
+            "Lighter | pos={pos} | posVal={pos_val} | uPnL={u_pnl} | rPnL={r_pnl} | bal={bal} | "
+            "dailyVol={daily} | sessionVol={session}"
+        ).format(
+            pos=self._format_decimal(lighter_metrics.get("position_size", Decimal("0")), 6),
+            pos_val=self._format_decimal(lighter_metrics.get("position_value", Decimal("0")), 2),
+            u_pnl=self._format_decimal(lighter_metrics.get("unrealized_pnl", Decimal("0")), 2),
+            r_pnl=self._format_decimal(lighter_metrics.get("realized_pnl", Decimal("0")), 2),
+            bal=self._format_decimal(lighter_metrics.get("available_balance", Decimal("0")), 2),
+            daily=self._format_decimal(lighter_metrics.get("daily_volume", Decimal("0")), 6),
+            session=self._format_decimal(session_volume, 6),
+        )
+        self.logger.log(lighter_message, "INFO")
+
+        if self._hedger is None:
+            return
+
+        try:
+            binance_metrics = await self._hedger.get_account_metrics()
+        except Exception as exc:
+            self.logger.log(f"Failed to fetch Binance metrics: {exc}", "ERROR")
+            return
+
+        binance_message = (
+            "Binance | pos={pos} | notional={notional} | uPnL={u_pnl} | wallet={wallet} | avail={avail}"
+        ).format(
+            pos=self._format_decimal(binance_metrics.get("position_size", Decimal("0")), 6),
+            notional=self._format_decimal(binance_metrics.get("position_notional", Decimal("0")), 2),
+            u_pnl=self._format_decimal(binance_metrics.get("position_unrealized_pnl", Decimal("0")), 2),
+            wallet=self._format_decimal(binance_metrics.get("wallet_balance", Decimal("0")), 2),
+            avail=self._format_decimal(binance_metrics.get("available_balance", Decimal("0")), 2),
+        )
+        self.logger.log(binance_message, "INFO")
+
+    @staticmethod
     def _require_env(name: str) -> str:
         value = os.getenv(name)
         if not value:
@@ -390,6 +510,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
     parser.add_argument("--config-path", default="configs/hot_update.json", help="Hot update JSON file or URL")
     parser.add_argument("--loop-sleep", default=3.0, type=float, help="Seconds between main loop iterations")
     parser.add_argument("--order-refresh-ticks", default=2, type=int, help="Price difference in ticks before replacing orders")
+    parser.add_argument("--metrics-interval", default=30.0, type=float, help="Seconds between account metrics logs")
     parser.add_argument("--no-console-log", action="store_true", help="Disable console logging output")
 
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -405,6 +526,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         loop_sleep_seconds=args.loop_sleep,
         order_refresh_ticks=max(1, args.order_refresh_ticks),
         log_to_console=not args.no_console_log,
+        metrics_interval_seconds=max(5.0, args.metrics_interval),
     )
 
 
@@ -435,13 +557,25 @@ async def _async_main(settings: SimpleMakerSettings) -> None:
                 await task
 
         shutdown_reason = "Maker loop completed"
-        if stop_task in done:
+        run_error: Optional[BaseException] = None
+        if run_task in done:
+            try:
+                await run_task
+            except Exception as exc:  # noqa: BLE001
+                run_error = exc
+                shutdown_reason = f"Maker loop crashed: {exc}"
+        if stop_task in done and run_task not in done:
             shutdown_reason = "Shutdown requested via signal"
 
         maker.logger.log(f"{shutdown_reason}; stopping maker", "WARNING")
         await maker.stop()
 
+        if run_error is not None:
+            _LOGGER.exception("Maker loop terminated due to error", exc_info=run_error)
+            raise run_error
         for task in done:
+            if task is run_task:
+                continue
             with contextlib.suppress(Exception):
                 await task
 

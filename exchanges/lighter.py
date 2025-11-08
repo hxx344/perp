@@ -7,7 +7,7 @@ import asyncio
 import time
 import logging
 from decimal import Decimal, InvalidOperation
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Iterable
 
 from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
 from helpers.logger import TradingLogger
@@ -100,12 +100,52 @@ class LighterClient(BaseExchangeClient):
         parsed = self._parse_decimal(value)
         return parsed if parsed is not None else Decimal("0")
 
-    def _first_available_decimal(self, payload: Dict[str, Any], keys: List[str]) -> Optional[Decimal]:
+    def _first_available_decimal(self, payload: Dict[str, Any], keys: Iterable[str]) -> Optional[Decimal]:
         for key in keys:
             if key in payload:
                 parsed = self._parse_decimal(payload.get(key))
                 if parsed is not None:
                     return parsed
+        return None
+
+    @staticmethod
+    def _possible_keys(base_key: str) -> List[str]:
+        variants = {base_key, base_key.lower(), base_key.upper(), base_key.replace("_", "")}
+        if "_" in base_key:
+            parts = base_key.split("_")
+            camel = parts[0] + "".join(part.capitalize() for part in parts[1:])
+            pascal = "".join(part.capitalize() for part in parts)
+            variants.update({camel, pascal})
+        return list(variants)
+
+    def _extract_mapping_value(self, payload: Any, key: str) -> Any:
+        if payload is None:
+            return None
+        if isinstance(payload, dict):
+            for candidate in self._possible_keys(key):
+                if candidate in payload and payload[candidate] is not None:
+                    return payload[candidate]
+            return None
+        if hasattr(payload, key):
+            value = getattr(payload, key)
+            if value is not None:
+                return value
+        camel_key = "".join(part.capitalize() for part in key.split("_"))
+        if camel_key and hasattr(payload, camel_key):
+            value = getattr(payload, camel_key)
+            if value is not None:
+                return value
+        if hasattr(payload, "to_dict"):
+            try:
+                as_dict = payload.to_dict()
+            except Exception:
+                as_dict = None
+            if isinstance(as_dict, dict):
+                return self._extract_mapping_value(as_dict, key)
+        if hasattr(payload, "additional_properties"):
+            extra = getattr(payload, "additional_properties", None)
+            if isinstance(extra, dict):
+                return self._extract_mapping_value(extra, key)
         return None
 
     def _resolve_order_price(self, order_data: Dict[str, Any], filled_size: Decimal) -> Decimal:
@@ -621,7 +661,35 @@ class LighterClient(BaseExchangeClient):
     async def _fetch_positions_with_retry(self) -> List[Any]:
         """Get positions using official SDK."""
         account = await self._fetch_account_with_retry()
-        return account.positions
+        return getattr(account, "positions", [])
+
+    def _signed_position_quantity(self, position: Any) -> Decimal:
+        raw_quantity = self._decimal_or_zero(self._extract_mapping_value(position, "position"))
+        sign_value = self._extract_mapping_value(position, "sign")
+        sign_multiplier: Optional[int] = None
+
+        if sign_value is not None:
+            try:
+                sign_multiplier = int(sign_value)
+            except (TypeError, ValueError):
+                sign_multiplier = None
+
+        if sign_multiplier is None:
+            side_value = self._extract_mapping_value(position, "side")
+            if isinstance(side_value, str):
+                side_normalized = side_value.strip().lower()
+                if side_normalized in {"sell", "short", "ask"}:
+                    sign_multiplier = -1
+                elif side_normalized in {"buy", "long", "bid"}:
+                    sign_multiplier = 1
+
+        if sign_multiplier is None:
+            sign_multiplier = 1 if raw_quantity >= 0 else -1
+
+        if sign_multiplier == 0:
+            return Decimal("0")
+
+        return raw_quantity if sign_multiplier > 0 else -raw_quantity
 
     async def get_account_positions(self) -> Decimal:
         """Get account positions using official SDK."""
@@ -633,35 +701,7 @@ class LighterClient(BaseExchangeClient):
             market_identifier = getattr(position, "market_id", None)
             if market_identifier != self.config.contract_id:
                 continue
-
-            raw_quantity = self._decimal_or_zero(getattr(position, "position", None))
-
-            sign_value = getattr(position, "sign", None)
-            sign_multiplier: Optional[int] = None
-
-            if sign_value is not None:
-                try:
-                    sign_multiplier = int(sign_value)
-                except (TypeError, ValueError):
-                    sign_multiplier = None
-
-            if sign_multiplier is None:
-                side_value = getattr(position, "side", None)
-                if isinstance(side_value, str):
-                    side_normalized = side_value.strip().lower()
-                    if side_normalized in {"sell", "short", "ask"}:
-                        sign_multiplier = -1
-                    elif side_normalized in {"buy", "long", "bid"}:
-                        sign_multiplier = 1
-
-            if sign_multiplier is None:
-                sign_multiplier = 1 if raw_quantity >= 0 else -1
-
-            if sign_multiplier == 0:
-                return Decimal(0)
-
-            signed_quantity = raw_quantity if sign_multiplier > 0 else -raw_quantity
-            return signed_quantity
+            return self._signed_position_quantity(position)
 
         return Decimal(0)
 
@@ -677,6 +717,51 @@ class LighterClient(BaseExchangeClient):
             balance_value = account_dict.get("available_balance") or account_dict.get("availableBalance")
 
         return self._decimal_or_zero(balance_value)
+
+    async def get_account_metrics(self) -> Dict[str, Decimal]:
+        """Aggregate key metrics for the configured market and account."""
+        account = await self._fetch_account_with_retry()
+
+        metrics: Dict[str, Decimal] = {
+            "available_balance": self._decimal_or_zero(self._extract_mapping_value(account, "available_balance")),
+            "collateral": self._decimal_or_zero(self._extract_mapping_value(account, "collateral")),
+            "total_asset_value": self._decimal_or_zero(self._extract_mapping_value(account, "total_asset_value")),
+            "daily_volume": Decimal("0"),
+            "weekly_volume": Decimal("0"),
+            "monthly_volume": Decimal("0"),
+            "total_volume": Decimal("0"),
+            "position_size": Decimal("0"),
+            "position_value": Decimal("0"),
+            "unrealized_pnl": Decimal("0"),
+            "realized_pnl": Decimal("0"),
+        }
+
+        trade_stats = self._extract_mapping_value(account, "trade_stats")
+        for key in ("daily_volume", "weekly_volume", "monthly_volume", "total_volume"):
+            value = self._extract_mapping_value(trade_stats, key)
+            if value is not None:
+                metrics[key] = self._decimal_or_zero(value)
+
+        target_position = None
+        contract_identifier = getattr(self.config, "contract_id", None)
+        ticker_symbol = getattr(self.config, "ticker", None)
+        for position in getattr(account, "positions", []) or []:
+            symbol = self._extract_mapping_value(position, "symbol")
+            market_identifier = self._extract_mapping_value(position, "market_id")
+            if contract_identifier is not None and market_identifier == contract_identifier:
+                target_position = position
+                break
+            if ticker_symbol and symbol == ticker_symbol:
+                target_position = position
+                break
+
+        if target_position is not None:
+            metrics["position_size"] = self._signed_position_quantity(target_position)
+            metrics["position_value"] = self._decimal_or_zero(self._extract_mapping_value(target_position, "position_value"))
+            metrics["unrealized_pnl"] = self._decimal_or_zero(self._extract_mapping_value(target_position, "unrealized_pnl"))
+            metrics["realized_pnl"] = self._decimal_or_zero(self._extract_mapping_value(target_position, "realized_pnl"))
+
+        return metrics
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID for a ticker."""
