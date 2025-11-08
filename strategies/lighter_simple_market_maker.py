@@ -18,7 +18,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, cast
@@ -119,6 +119,8 @@ class BinanceHedger:
         self.api_secret = api_secret.encode()
         self.symbol = symbol.upper()
         self.session = session
+        self._quantity_step: Optional[Decimal] = None
+        self._min_quantity: Optional[Decimal] = None
 
     def _sign(self, params: Dict[str, Any]) -> str:
         query = urlencode(params, doseq=True)
@@ -126,12 +128,17 @@ class BinanceHedger:
         return signature
 
     async def place_market_order(self, side: str, quantity: Decimal) -> Dict[str, Any]:
+        normalized_qty = await self.prepare_market_quantity(quantity)
+        if normalized_qty <= 0:
+            raise ValueError(
+                f"Binance order quantity below minimum lot size after normalization: requested={quantity}"
+            )
         timestamp = int(time.time() * 1000)
         params = {
             "symbol": self.symbol,
             "side": side.upper(),
             "type": "MARKET",
-            "quantity": format(quantity, "f"),
+            "quantity": format(normalized_qty, "f"),
             "timestamp": timestamp,
             "recvWindow": 5000,
         }
@@ -179,6 +186,74 @@ class BinanceHedger:
         }
 
         return metrics
+
+    async def _ensure_symbol_filters(self) -> None:
+        if self._quantity_step is not None and self._min_quantity is not None:
+            return
+
+        params = {"symbol": self.symbol}
+        async with self.session.get(f"{self.BASE_URL}/fapi/v1/exchangeInfo", params=params) as response:
+            data = await response.json()
+            if response.status >= 400:
+                raise RuntimeError(
+                    f"Failed to load Binance symbol metadata: {response.status} {data}"
+                )
+
+        symbol_info: Optional[Dict[str, Any]] = None
+        if isinstance(data, dict):
+            symbols = data.get("symbols") or []
+            for entry in symbols:
+                if isinstance(entry, dict) and entry.get("symbol") == self.symbol:
+                    symbol_info = entry
+                    break
+
+        if not symbol_info:
+            raise RuntimeError(f"Symbol metadata for '{self.symbol}' not found in Binance exchangeInfo response")
+
+        filters = symbol_info.get("filters") or []
+        lot_filter = next(
+            (f for f in filters if isinstance(f, dict) and f.get("filterType") == "MARKET_LOT_SIZE"),
+            None,
+        )
+        if lot_filter is None:
+            lot_filter = next(
+                (f for f in filters if isinstance(f, dict) and f.get("filterType") == "LOT_SIZE"),
+                None,
+            )
+
+        if isinstance(lot_filter, dict):
+            step = self._to_decimal(lot_filter.get("stepSize"))
+            min_qty = self._to_decimal(lot_filter.get("minQty"))
+            if step > 0:
+                self._quantity_step = step
+            if min_qty > 0:
+                self._min_quantity = min_qty
+
+    @staticmethod
+    def _round_down_to_step(value: Decimal, step: Decimal) -> Decimal:
+        if step <= 0:
+            return value
+        quotient = (value / step).to_integral_value(rounding=ROUND_DOWN)
+        rounded = (quotient * step).quantize(step, rounding=ROUND_DOWN)
+        return rounded
+
+    async def prepare_market_quantity(self, quantity: Decimal) -> Decimal:
+        if quantity <= 0:
+            return Decimal("0")
+
+        await self._ensure_symbol_filters()
+
+        normalized = quantity
+        if self._quantity_step is not None:
+            normalized = self._round_down_to_step(quantity, self._quantity_step)
+
+        if self._min_quantity is not None and normalized < self._min_quantity:
+            return Decimal("0")
+
+        return normalized
+
+    def lot_size_constraints(self) -> Dict[str, Optional[Decimal]]:
+        return {"step_size": self._quantity_step, "min_quantity": self._min_quantity}
 
 
 class SimpleMarketMaker:
@@ -426,6 +501,32 @@ class SimpleMarketMaker:
             return
 
         hedge_side = "SELL" if combined_position > 0 else "BUY"
+        raw_hedge_qty = hedge_qty
+        try:
+            hedge_qty = await self._hedger.prepare_market_quantity(hedge_qty)
+        except Exception as exc:
+            self.logger.log(f"Failed to normalize Binance hedge quantity: {exc}", "ERROR")
+            return
+
+        if hedge_qty <= 0:
+            constraints = self._hedger.lot_size_constraints()
+            step_size = constraints.get("step_size") if isinstance(constraints, dict) else None
+            min_qty = constraints.get("min_quantity") if isinstance(constraints, dict) else None
+            step_str = self._format_decimal(step_size, 6) if isinstance(step_size, Decimal) else "n/a"
+            min_qty_str = self._format_decimal(min_qty, 6) if isinstance(min_qty, Decimal) else "n/a"
+            self.logger.log(
+                (
+                    "Skipped Binance hedge: rawQty={raw} normalized below minimum lot "
+                    "(step={step}, minQty={min_qty})"
+                ).format(
+                    raw=self._format_decimal(raw_hedge_qty, 6),
+                    step=step_str,
+                    min_qty=min_qty_str,
+                ),
+                "INFO",
+            )
+            return
+
         try:
             order_response = await self._hedger.place_market_order(hedge_side, hedge_qty)
             executed_qty = self._to_decimal(
@@ -442,11 +543,12 @@ class SimpleMarketMaker:
 
             self.logger.log(
                 (
-                    "Executed Binance hedge: side={side}, qty={qty} (lighter_pos={lighter}, binance_pos={binance}, "
+                    "Executed Binance hedge: side={side}, qty={qty} (raw={raw}, lighter_pos={lighter}, binance_pos={binance}, "
                     "combined={combined})"
                 ).format(
                     side=hedge_side,
                     qty=self._format_decimal(executed_qty, 6),
+                    raw=self._format_decimal(raw_hedge_qty, 6),
                     lighter=self._format_decimal(net_position, 6),
                     binance=self._format_decimal(self._binance_position_estimate, 6),
                     combined=self._format_decimal(combined_position, 6),

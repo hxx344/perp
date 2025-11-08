@@ -1,7 +1,7 @@
 import asyncio
 import aiohttp
 import time
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from types import SimpleNamespace
 from typing import cast
 
@@ -275,12 +275,27 @@ def test_maybe_report_metrics_combines_binance_pnl(tmp_path):
 
 
 class StubHedger:
-    def __init__(self) -> None:
+    def __init__(self, step: Decimal = Decimal("0.001"), min_qty: Decimal = Decimal("0.001")) -> None:
         self.position = Decimal("0")
         self.orders = []
+        self.step = step
+        self.min_qty = min_qty
+
+    async def prepare_market_quantity(self, quantity: Decimal) -> Decimal:
+        if quantity <= 0:
+            return Decimal("0")
+        if self.step <= 0:
+            return quantity
+        scaled = (quantity / self.step).to_integral_value(rounding=ROUND_DOWN)
+        normalized = (scaled * self.step).quantize(self.step, rounding=ROUND_DOWN)
+        if normalized < self.min_qty:
+            return Decimal("0")
+        return normalized
 
     async def place_market_order(self, side: str, quantity: Decimal) -> dict:
-        qty = Decimal(str(quantity))
+        qty = await self.prepare_market_quantity(quantity)
+        if qty <= 0:
+            raise ValueError("quantity below minimum lot size")
         if side.upper() == "BUY":
             self.position += qty
         else:
@@ -290,6 +305,9 @@ class StubHedger:
 
     async def get_account_metrics(self) -> dict:
         return {"position_size": self.position}
+
+    def lot_size_constraints(self) -> dict:
+        return {"step_size": self.step, "min_quantity": self.min_qty}
 
 
 def test_maybe_execute_hedge_respects_existing_binance_position():
@@ -320,6 +338,28 @@ def test_maybe_execute_hedge_respects_existing_binance_position():
 
     asyncio.run(maker._maybe_execute_hedge(Decimal("0")))
     assert stub_hedger.orders == [("SELL", Decimal("0.012"))]
+    assert maker._binance_position_estimate == Decimal("0")
+
+
+def test_maybe_execute_hedge_skips_when_quantity_below_lot_size():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("0.01"),
+        hedge_buffer=Decimal("0"),
+        config_path="configs/hot_update.json",
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker.logger = cast(TradingLogger, SimpleNamespace(log=lambda *args, **kwargs: None))
+    maker._hedger = StubHedger(step=Decimal("0.001"), min_qty=Decimal("0.02"))  # type: ignore[assignment]
+    maker._binance_position_estimate = Decimal("0")
+
+    asyncio.run(maker._maybe_execute_hedge(Decimal("0.015")))
+    stub_hedger = cast(StubHedger, maker._hedger)
+    assert stub_hedger.orders == []
     assert maker._binance_position_estimate == Decimal("0")
 
 

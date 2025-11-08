@@ -82,7 +82,7 @@ python lighter_simple_market_maker.py --lighter-ticker ETH-PERP --binance-symbol
 1. **热更新加载**：失败时沿用上一份成功配置；`cycle_enabled=false` 时撤单并休眠。
 2. **报价维护**：读取最优买卖价，生成目标报价，仅保留每个方向一笔订单。
 3. **库存控制**：仓位逼近限制时停挂对应方向；
-4. **阈值对冲**：净仓位绝对值超过阈值时调用 Binance 市价单对冲，并结合 Binance 当前仓位计算所需对冲量，避免重复或过量对冲；所有成交都会在日志中记录。
+4. **阈值对冲**：净仓位绝对值超过阈值时调用 Binance 市价单对冲，并结合 Binance 当前仓位计算所需对冲量，避免重复或过量对冲；系统会自动将数量向下对齐到 Binance 的合约步长，并检查最小下单量，杜绝 “precision over maximum defined” 这类精度报错；所有成交都会在日志中记录。
 
 ## 监控输出
 
