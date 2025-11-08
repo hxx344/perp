@@ -286,6 +286,7 @@ class SimpleMarketMaker:
         self._state_refresh_interval = max(1.0, min(float(self.settings.metrics_interval_seconds), 5.0))
         self._latest_metrics: Dict[str, Decimal] = {}
         self._latest_net_position: Decimal = Decimal("0")
+        self._latest_net_position_time: float = 0.0
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -524,29 +525,26 @@ class SimpleMarketMaker:
             return
 
         contract_id = self._lighter_config.contract_id
-        bbo_task = asyncio.create_task(self._lighter_client.fetch_bbo_prices(contract_id))
-        position_task = asyncio.create_task(self._lighter_client.get_account_positions())
-
-        try:
-            best_bid, best_ask = await bbo_task
-        except Exception:
-            position_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await position_task
-            raise
+        best_bid, best_ask = await self._lighter_client.fetch_bbo_prices(contract_id)
 
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
             self.logger.log("Invalid Lighter depth snapshot; skipping iteration", "WARNING")
-            position_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await position_task
             return
 
-        try:
-            net_position = await position_task
-        except Exception as exc:
-            self.logger.log(f"Failed to fetch Lighter account position: {exc}", "ERROR")
-            net_position = Decimal("0")
+        net_position = self._latest_net_position
+        now = time.time()
+        should_refresh_position = (now - self._latest_net_position_time) > (self._state_refresh_interval * 2.0)
+
+        if should_refresh_position:
+            try:
+                net_position = await self._lighter_client.get_account_positions()
+                self._latest_net_position = net_position
+                self._latest_net_position_time = time.time()
+            except Exception as exc:
+                self.logger.log(f"Failed to refresh Lighter account position: {exc}", "ERROR")
+                # Fall back to the last known value; if none, default to zero.
+                if net_position is None:
+                    net_position = Decimal("0")
 
         self._latest_net_position = net_position
 
@@ -712,6 +710,7 @@ class SimpleMarketMaker:
 
         self._latest_metrics = metrics
         self._latest_net_position = metrics.get("position_size", self._latest_net_position)
+        self._latest_net_position_time = time.time()
         if force:
             self._last_metrics_time = 0.0
 
