@@ -18,7 +18,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
+from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, cast
@@ -288,6 +288,10 @@ class SimpleMarketMaker:
         self._latest_net_position: Decimal = Decimal("0")
         self._latest_net_position_time: float = 0.0
         self._state_update_lock = asyncio.Lock()
+        self._binance_session_realized_pnl: Decimal = Decimal("0")
+        self._binance_inventory_base: Decimal = Decimal("0")
+        self._binance_avg_entry_price: Decimal = Decimal("0")
+        self._binance_last_mark_price: Decimal = Decimal("0")
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -349,6 +353,18 @@ class SimpleMarketMaker:
         trading_config.tick_size = tick_size
         await self._configure_lighter_leverage()
         await self._lighter_client.wait_for_market_data(timeout=10)
+
+        # Reset session aggregates for a fresh run
+        self._lighter_inventory_base = Decimal("0")
+        self._lighter_avg_entry_price = Decimal("0")
+        self._lighter_session_realized_pnl = Decimal("0")
+        self._lighter_session_volume_quote = Decimal("0")
+        self._lighter_session_volume_base = Decimal("0")
+        self._lighter_order_fills.clear()
+        self._binance_session_realized_pnl = Decimal("0")
+        self._binance_inventory_base = Decimal("0")
+        self._binance_avg_entry_price = Decimal("0")
+        self._binance_last_mark_price = Decimal("0")
 
         self._running = True
         await self._shutdown_state_task()
@@ -652,7 +668,15 @@ class SimpleMarketMaker:
                 executed_qty = hedge_qty
 
             signed_qty = executed_qty if hedge_side == "BUY" else -executed_qty
+            fill_price = self._resolve_binance_fill_price(
+                order_response,
+                executed_qty,
+                self._lighter_last_mark_price,
+            )
             self._binance_position_estimate += signed_qty
+            if fill_price > 0:
+                self._binance_last_mark_price = fill_price
+            self._apply_binance_fill_to_session_pnl(signed_qty, fill_price)
 
             self.logger.log(
                 (
@@ -794,47 +818,118 @@ class SimpleMarketMaker:
         except Exception:
             return Decimal("0")
 
-    def _apply_fill_to_session_pnl(self, signed_quantity: Decimal, price: Decimal) -> None:
+    @staticmethod
+    def _update_session_position(
+        current_pos: Decimal,
+        avg_price: Decimal,
+        session_realized: Decimal,
+        signed_quantity: Decimal,
+        price: Decimal,
+    ) -> tuple[Decimal, Decimal, Decimal]:
         if signed_quantity == 0 or price <= 0:
-            return
+            return current_pos, avg_price, session_realized
 
-        current_pos = self._lighter_inventory_base
-        avg_price = self._lighter_avg_entry_price
-        qty = signed_quantity
-
-        if current_pos == 0 or current_pos * qty > 0:
-            new_pos = current_pos + qty
+        if current_pos == 0 or current_pos * signed_quantity > 0:
+            new_pos = current_pos + signed_quantity
             if new_pos == 0:
-                self._lighter_avg_entry_price = Decimal("0")
-            elif current_pos == 0:
-                self._lighter_avg_entry_price = price
+                return Decimal("0"), Decimal("0"), session_realized
+
+            if current_pos == 0:
+                new_avg = price
             else:
-                total_cost = (avg_price * current_pos) + (price * qty)
-                if new_pos != 0:
-                    self._lighter_avg_entry_price = total_cost / new_pos
-                else:
-                    self._lighter_avg_entry_price = Decimal("0")
-            self._lighter_inventory_base = new_pos
-            return
+                total_cost = (avg_price * current_pos) + (price * signed_quantity)
+                new_avg = total_cost / new_pos if new_pos != 0 else Decimal("0")
+            return new_pos, new_avg, session_realized
 
-        closing_qty = min(abs(qty), abs(current_pos))
+        closing_qty = min(abs(signed_quantity), abs(current_pos))
         if current_pos > 0:
-            realized = (price - avg_price) * closing_qty
+            realized_delta = (price - avg_price) * closing_qty
         else:
-            realized = (avg_price - price) * closing_qty
-        self._lighter_session_realized_pnl += realized
+            realized_delta = (avg_price - price) * closing_qty
+        session_realized += realized_delta
 
-        new_pos = current_pos + qty
-        self._lighter_inventory_base = new_pos
-
+        new_pos = current_pos + signed_quantity
         if new_pos == 0:
-            self._lighter_avg_entry_price = Decimal("0")
+            new_avg = Decimal("0")
         elif new_pos * current_pos > 0:
-            # Position reduced but not flipped; cost basis unchanged.
-            pass
+            new_avg = avg_price
         else:
-            # Position flipped; remaining exposure enters at current fill price.
-            self._lighter_avg_entry_price = price
+            new_avg = price
+
+        return new_pos, new_avg, session_realized
+
+    def _apply_fill_to_session_pnl(self, signed_quantity: Decimal, price: Decimal) -> None:
+        new_pos, new_avg, new_realized = self._update_session_position(
+            self._lighter_inventory_base,
+            self._lighter_avg_entry_price,
+            self._lighter_session_realized_pnl,
+            signed_quantity,
+            price,
+        )
+        self._lighter_inventory_base = new_pos
+        self._lighter_avg_entry_price = new_avg
+        self._lighter_session_realized_pnl = new_realized
+
+    def _apply_binance_fill_to_session_pnl(self, signed_quantity: Decimal, price: Decimal) -> None:
+        new_pos, new_avg, new_realized = self._update_session_position(
+            self._binance_inventory_base,
+            self._binance_avg_entry_price,
+            self._binance_session_realized_pnl,
+            signed_quantity,
+            price,
+        )
+        self._binance_inventory_base = new_pos
+        self._binance_avg_entry_price = new_avg
+        self._binance_session_realized_pnl = new_realized
+
+    @staticmethod
+    def _compute_unrealized_pnl(position: Decimal, avg_price: Decimal, mark_price: Decimal) -> Decimal:
+        if position == 0 or avg_price <= 0 or mark_price <= 0:
+            return Decimal("0")
+        return (mark_price - avg_price) * position
+
+    def _resolve_binance_fill_price(
+        self,
+        order_response: Dict[str, Any],
+        executed_qty: Decimal,
+        fallback_price: Decimal,
+    ) -> Decimal:
+        if executed_qty > 0:
+            cumulative_quote = order_response.get("cumQuote") or order_response.get("cummulativeQuoteQty")
+            quote_value = self._to_decimal(cumulative_quote)
+            if quote_value > 0:
+                try:
+                    price = quote_value / executed_qty
+                    if price > 0:
+                        return price
+                except (InvalidOperation, ZeroDivisionError):
+                    pass
+
+        for key in (
+            "avgPrice",
+            "avg_price",
+            "price",
+            "stopPrice",
+            "activatePrice",
+            "executedPrice",
+        ):
+            price = self._to_decimal(order_response.get(key))
+            if price > 0:
+                return price
+
+        fills = order_response.get("fills")
+        if isinstance(fills, list):
+            for fill in fills:
+                if isinstance(fill, dict):
+                    price = self._to_decimal(fill.get("price"))
+                    if price > 0:
+                        return price
+
+        if fallback_price > 0:
+            return fallback_price
+        if self._lighter_last_mark_price > 0:
+            return self._lighter_last_mark_price
+        return Decimal("0")
 
     def _handle_lighter_order_update(self, update: Dict[str, Any]) -> None:
         if self._lighter_config is None:
@@ -895,89 +990,54 @@ class SimpleMarketMaker:
 
         self._last_metrics_time = now
 
-        session_volume = self._lighter_session_volume_quote
-        session_realized = self._lighter_session_realized_pnl
-        session_unrealized = Decimal("0")
-        if (
-            self._lighter_inventory_base != 0
-            and self._lighter_last_mark_price > 0
-            and self._lighter_avg_entry_price > 0
-        ):
-            session_unrealized = (
-                (self._lighter_last_mark_price - self._lighter_avg_entry_price)
-                * self._lighter_inventory_base
-            )
-        session_total = session_realized + session_unrealized
+        if self._hedger is not None:
+            try:
+                binance_metrics = await self._hedger.get_account_metrics()
+            except Exception as exc:
+                self.logger.log(f"Failed to fetch Binance metrics: {exc}", "ERROR")
+            else:
+                self._binance_position_estimate = binance_metrics.get("position_size", self._binance_position_estimate)
+                wallet_balance = binance_metrics.get("wallet_balance", Decimal("0"))
+                if self._binance_initial_wallet_balance is None:
+                    self._binance_initial_wallet_balance = wallet_balance
 
-        lighter_message = (
-            "Lighter | pos={pos} | posVal={pos_val} | uPnL={u_pnl} | rPnL={r_pnl} | bal={bal} | "
-            "dailyVol={daily} | sessionVol={session_vol} | sessionReal={session_real} | "
-            "sessionUnreal={session_unreal} | sessionPnl={session_total}"
+                position_notional = binance_metrics.get("position_notional", Decimal("0"))
+                position_size = binance_metrics.get("position_size", Decimal("0"))
+                if position_size != 0 and position_notional != 0:
+                    try:
+                        derived_mark = abs(position_notional) / abs(position_size)
+                        if derived_mark > 0:
+                            self._binance_last_mark_price = derived_mark
+                    except (InvalidOperation, ZeroDivisionError):
+                        pass
+
+        lighter_unrealized = self._compute_unrealized_pnl(
+            self._lighter_inventory_base,
+            self._lighter_avg_entry_price,
+            self._lighter_last_mark_price,
+        )
+        lighter_total = self._lighter_session_realized_pnl + lighter_unrealized
+
+        binance_mark_price = self._binance_last_mark_price
+        if binance_mark_price <= 0:
+            binance_mark_price = self._lighter_last_mark_price
+        binance_unrealized = self._compute_unrealized_pnl(
+            self._binance_inventory_base,
+            self._binance_avg_entry_price,
+            binance_mark_price,
+        )
+        binance_total = self._binance_session_realized_pnl + binance_unrealized
+
+        combined_total = lighter_total + binance_total
+
+        summary_message = (
+            "PnL Summary | Lighter={lighter} | Binance={binance} | Combined={combined}"
         ).format(
-            pos=self._format_decimal(lighter_metrics.get("position_size", Decimal("0")), 6),
-            pos_val=self._format_decimal(lighter_metrics.get("position_value", Decimal("0")), 2),
-            u_pnl=self._format_decimal(lighter_metrics.get("unrealized_pnl", Decimal("0")), 2),
-            r_pnl=self._format_decimal(lighter_metrics.get("realized_pnl", Decimal("0")), 2),
-            bal=self._format_decimal(lighter_metrics.get("available_balance", Decimal("0")), 2),
-            daily=self._format_decimal(lighter_metrics.get("daily_volume", Decimal("0")), 6),
-            session_vol=self._format_decimal(session_volume, 6),
-            session_real=self._format_decimal(session_realized, 2),
-            session_unreal=self._format_decimal(session_unrealized, 2),
-            session_total=self._format_decimal(session_total, 2),
+            lighter=self._format_decimal(lighter_total, 2),
+            binance=self._format_decimal(binance_total, 2),
+            combined=self._format_decimal(combined_total, 2),
         )
-        self.logger.log(lighter_message, "INFO")
-
-        if self._hedger is None:
-            return
-
-        try:
-            binance_metrics = await self._hedger.get_account_metrics()
-        except Exception as exc:
-            self.logger.log(f"Failed to fetch Binance metrics: {exc}", "ERROR")
-            return
-
-        self._binance_position_estimate = binance_metrics.get("position_size", Decimal("0"))
-        wallet_balance = binance_metrics.get("wallet_balance", Decimal("0"))
-        if self._binance_initial_wallet_balance is None:
-            self._binance_initial_wallet_balance = wallet_balance
-
-        initial_wallet = (
-            self._binance_initial_wallet_balance
-            if self._binance_initial_wallet_balance is not None
-            else Decimal("0")
-        )
-        binance_unrealized = binance_metrics.get("position_unrealized_pnl", Decimal("0"))
-        if "position_unrealized_pnl" not in binance_metrics:
-            binance_unrealized = binance_metrics.get("unrealized_pnl", Decimal("0"))
-        binance_realized = wallet_balance - initial_wallet
-        binance_session_total = binance_realized + binance_unrealized
-
-        combined_real = session_realized + binance_realized
-        combined_unreal = session_unrealized + binance_unrealized
-        combined_total = session_total + binance_session_total
-
-        binance_message = (
-            "Binance | pos={pos} | notional={notional} | uPnL={u_pnl} | wallet={wallet} | avail={avail} | sessionReal={session_real} | sessionUnreal={session_unreal} | sessionPnl={session_total}"
-        ).format(
-            pos=self._format_decimal(binance_metrics.get("position_size", Decimal("0")), 6),
-            notional=self._format_decimal(binance_metrics.get("position_notional", Decimal("0")), 2),
-            u_pnl=self._format_decimal(binance_unrealized, 2),
-            wallet=self._format_decimal(binance_metrics.get("wallet_balance", Decimal("0")), 2),
-            avail=self._format_decimal(binance_metrics.get("available_balance", Decimal("0")), 2),
-            session_real=self._format_decimal(binance_realized, 2),
-            session_unreal=self._format_decimal(binance_unrealized, 2),
-            session_total=self._format_decimal(binance_session_total, 2),
-        )
-        self.logger.log(binance_message, "INFO")
-
-        combined_message = (
-            "Combined | sessionReal={session_real} | sessionUnreal={session_unreal} | sessionPnl={session_total}"
-        ).format(
-            session_real=self._format_decimal(combined_real, 2),
-            session_unreal=self._format_decimal(combined_unreal, 2),
-            session_total=self._format_decimal(combined_total, 2),
-        )
-        self.logger.log(combined_message, "INFO")
+        self.logger.log(summary_message, "INFO")
 
     @staticmethod
     def _require_env(name: str) -> str:

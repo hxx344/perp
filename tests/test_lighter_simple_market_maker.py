@@ -121,9 +121,11 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     maker._lighter_last_mark_price = Decimal("100")
     asyncio.run(maker._maybe_report_metrics(base_metrics))
     assert logs, "Expected monitoring log output"
-    assert "sessionVol=0.000000" in logs[0][1]
-    assert "sessionReal=0.00" in logs[0][1]
-    assert "sessionPnl=0.00" in logs[0][1]
+    summary = logs[0][1]
+    assert summary.startswith("PnL Summary"), summary
+    assert "Lighter=0.00" in summary
+    assert "Binance=0.00" in summary
+    assert "Combined=0.00" in summary
 
     maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
     logs.clear()
@@ -152,9 +154,11 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     base_metrics["position_value"] = Decimal("5")
     asyncio.run(maker._maybe_report_metrics(base_metrics))
     assert logs
-    assert "sessionVol=5.000000" in logs[0][1]
-    assert "sessionReal=0.00" in logs[0][1]
-    assert "sessionUnreal=0.00" in logs[0][1]
+    summary = logs[0][1]
+    assert summary.startswith("PnL Summary"), summary
+    assert "Lighter=0.00" in summary
+    assert "Binance=0.00" in summary
+    assert "Combined=0.00" in summary
 
     maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
     logs.clear()
@@ -173,9 +177,11 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     base_metrics["position_value"] = Decimal("0")
     asyncio.run(maker._maybe_report_metrics(base_metrics))
     assert logs
-    assert "sessionReal=0.05" in logs[0][1]
-    assert "sessionUnreal=0.00" in logs[0][1]
-    assert "sessionPnl=0.05" in logs[0][1]
+    summary = logs[0][1]
+    assert summary.startswith("PnL Summary"), summary
+    assert "Lighter=0.05" in summary
+    assert "Binance=0.00" in summary
+    assert "Combined=0.05" in summary
 
 
 def test_apply_fill_to_session_pnl_tracks_realized_and_inventory(tmp_path):
@@ -246,13 +252,16 @@ def test_maybe_report_metrics_combines_binance_pnl(tmp_path):
     maker._lighter_inventory_base = Decimal("0")
     maker._lighter_last_mark_price = Decimal("0")
     maker._lighter_avg_entry_price = Decimal("0")
+    maker._binance_session_realized_pnl = Decimal("2")
+    maker._binance_inventory_base = Decimal("0.1")
+    maker._binance_avg_entry_price = Decimal("100")
 
     hedger_metrics = {
         "wallet_balance": Decimal("102"),
         "available_balance": Decimal("80"),
         "position_unrealized_pnl": Decimal("0.5"),
-        "position_size": Decimal("0"),
-        "position_notional": Decimal("0"),
+        "position_size": Decimal("0.1"),
+        "position_notional": Decimal("10.5"),
     }
 
     class HedgerStub:
@@ -274,11 +283,12 @@ def test_maybe_report_metrics_combines_binance_pnl(tmp_path):
     }
 
     asyncio.run(maker._maybe_report_metrics(base_metrics))
-    combined_logs = [msg for _lvl, msg in logs if msg.startswith("Combined")]
-    assert combined_logs, "Expected combined metrics log entry"
-    assert "sessionReal=3.00" in combined_logs[-1]
-    assert "sessionUnreal=0.50" in combined_logs[-1]
-    assert "sessionPnl=3.50" in combined_logs[-1]
+    summaries = [msg for _lvl, msg in logs if msg.startswith("PnL Summary")]
+    assert summaries, "Expected PnL summary log entry"
+    summary = summaries[-1]
+    assert "Lighter=1.00" in summary
+    assert "Binance=2.50" in summary
+    assert "Combined=3.50" in summary
 
 
 class StubHedger:
