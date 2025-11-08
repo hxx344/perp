@@ -137,3 +137,52 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     asyncio.run(maker._maybe_report_metrics(base_metrics))
     assert logs
     assert "sessionVol=5.000000" in logs[0][1]
+
+
+class StubHedger:
+    def __init__(self) -> None:
+        self.position = Decimal("0")
+        self.orders = []
+
+    async def place_market_order(self, side: str, quantity: Decimal) -> dict:
+        qty = Decimal(str(quantity))
+        if side.upper() == "BUY":
+            self.position += qty
+        else:
+            self.position -= qty
+        self.orders.append((side.upper(), qty))
+        return {"executedQty": str(qty)}
+
+    async def get_account_metrics(self) -> dict:
+        return {"position_size": self.position}
+
+
+def test_maybe_execute_hedge_respects_existing_binance_position():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("0.01"),
+        hedge_buffer=Decimal("0"),
+        config_path="configs/hot_update.json",
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker.logger = cast(TradingLogger, SimpleNamespace(log=lambda *args, **kwargs: None))
+    maker._hedger = StubHedger()  # type: ignore[assignment]
+    maker._binance_position_estimate = Decimal("0")
+
+    asyncio.run(maker._maybe_execute_hedge(Decimal("-0.012")))
+    assert maker._binance_position_estimate == Decimal("0.012")
+
+    stub_hedger = cast(StubHedger, maker._hedger)
+    assert stub_hedger.orders == [("BUY", Decimal("0.012"))]
+    stub_hedger.orders.clear()
+
+    asyncio.run(maker._maybe_execute_hedge(Decimal("-0.012")))
+    assert stub_hedger.orders == []
+
+    asyncio.run(maker._maybe_execute_hedge(Decimal("0")))
+    assert stub_hedger.orders == [("SELL", Decimal("0.012"))]
+    assert maker._binance_position_estimate == Decimal("0")

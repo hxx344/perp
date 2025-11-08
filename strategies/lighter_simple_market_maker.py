@@ -198,6 +198,7 @@ class SimpleMarketMaker:
         self._lighter_order_fills: Dict[str, Decimal] = {}
         self._lighter_session_volume_quote: Decimal = Decimal("0")
         self._lighter_session_volume_base: Decimal = Decimal("0")
+        self._binance_position_estimate: Decimal = Decimal("0")
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -217,6 +218,13 @@ class SimpleMarketMaker:
         api_key = self._require_env("BINANCE_API_KEY")
         api_secret = self._require_env("BINANCE_API_SECRET")
         self._hedger = BinanceHedger(api_key, api_secret, self.settings.binance_symbol, self._session)
+
+        try:
+            hedger_snapshot = await self._hedger.get_account_metrics()
+            self._binance_position_estimate = hedger_snapshot.get("position_size", Decimal("0"))
+        except Exception as exc:  # pragma: no cover - network dependent
+            self.logger.log(f"Failed to seed Binance position estimate: {exc}", "WARNING")
+            self._binance_position_estimate = Decimal("0")
 
         trading_config = TradingConfig(
             ticker=self.settings.lighter_ticker,
@@ -329,17 +337,7 @@ class SimpleMarketMaker:
         await self._sync_side("buy", targets["buy"], bid_enabled)
         await self._sync_side("sell", targets["sell"], ask_enabled)
 
-        hedge_qty = required_hedge_quantity(net_position, self.settings.hedge_threshold, self.settings.hedge_buffer)
-        if hedge_qty > 0 and self._hedger is not None:
-            hedge_side = "SELL" if net_position > 0 else "BUY"
-            try:
-                await self._hedger.place_market_order(hedge_side, hedge_qty)
-                self.logger.log(
-                    f"Executed Binance hedge: side={hedge_side}, qty={hedge_qty} (net_position={net_position})",
-                    "INFO",
-                )
-            except Exception as exc:
-                self.logger.log(f"Binance hedge failed: {exc}", "ERROR")
+        await self._maybe_execute_hedge(net_position)
 
         await self._maybe_report_metrics(lighter_metrics)
 
@@ -391,6 +389,50 @@ class SimpleMarketMaker:
                 self._tracked_orders[side] = ActiveOrder(order_id=order.order_id, price=order.price, side=side)
                 self.logger.log(f"Placed {side} order {order.order_id} @ {order.price}", "INFO")
                 break
+
+    async def _maybe_execute_hedge(self, net_position: Decimal) -> None:
+        if self._hedger is None:
+            return
+
+        combined_position = net_position + self._binance_position_estimate
+        hedge_qty = required_hedge_quantity(
+            combined_position,
+            self.settings.hedge_threshold,
+            self.settings.hedge_buffer,
+        )
+        if hedge_qty <= 0:
+            return
+
+        hedge_side = "SELL" if combined_position > 0 else "BUY"
+        try:
+            order_response = await self._hedger.place_market_order(hedge_side, hedge_qty)
+            executed_qty = self._to_decimal(
+                order_response.get("executedQty")
+                or order_response.get("cumQty")
+                or order_response.get("origQty")
+                or hedge_qty
+            )
+            if executed_qty <= 0:
+                executed_qty = hedge_qty
+
+            signed_qty = executed_qty if hedge_side == "BUY" else -executed_qty
+            self._binance_position_estimate += signed_qty
+
+            self.logger.log(
+                (
+                    "Executed Binance hedge: side={side}, qty={qty} (lighter_pos={lighter}, binance_pos={binance}, "
+                    "combined={combined})"
+                ).format(
+                    side=hedge_side,
+                    qty=self._format_decimal(executed_qty, 6),
+                    lighter=self._format_decimal(net_position, 6),
+                    binance=self._format_decimal(self._binance_position_estimate, 6),
+                    combined=self._format_decimal(combined_position, 6),
+                ),
+                "INFO",
+            )
+        except Exception as exc:
+            self.logger.log(f"Binance hedge failed: {exc}", "ERROR")
 
     async def _cancel_all_orders(self) -> None:
         assert self._lighter_client is not None
@@ -522,6 +564,8 @@ class SimpleMarketMaker:
         except Exception as exc:
             self.logger.log(f"Failed to fetch Binance metrics: {exc}", "ERROR")
             return
+
+        self._binance_position_estimate = binance_metrics.get("position_size", Decimal("0"))
 
         binance_message = (
             "Binance | pos={pos} | notional={notional} | uPnL={u_pnl} | wallet={wallet} | avail={avail}"
