@@ -3,9 +3,10 @@ import aiohttp
 import time
 from decimal import Decimal, ROUND_DOWN
 from types import SimpleNamespace
-from typing import cast
+from typing import Dict, cast
 
 from helpers.logger import TradingLogger
+from exchanges.lighter import LighterClient
 from trading_bot import TradingConfig
 from strategies.lighter_simple_market_maker import (
     SimpleMarketMaker,
@@ -36,6 +37,12 @@ def test_required_hedge_quantity_respects_buffer():
     assert required_hedge_quantity(Decimal("4"), threshold, buffer) == Decimal("0")
     assert required_hedge_quantity(Decimal("6"), threshold, buffer) == Decimal("5")
     assert required_hedge_quantity(Decimal("-8"), threshold, buffer) == Decimal("7")
+
+
+def test_fraction_to_leverage_conversion():
+    assert LighterClient._fraction_to_leverage(200) == 50
+    assert LighterClient._fraction_to_leverage(625) == 16
+    assert LighterClient._fraction_to_leverage(None) is None
 
 
 def test_resolve_spread_scale_uses_depth_multiplier(tmp_path):
@@ -361,6 +368,69 @@ def test_maybe_execute_hedge_skips_when_quantity_below_lot_size():
     stub_hedger = cast(StubHedger, maker._hedger)
     assert stub_hedger.orders == []
     assert maker._binance_position_estimate == Decimal("0")
+
+
+def test_configure_lighter_leverage_targets_max(tmp_path):
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("10"),
+        config_path=str(tmp_path / "hot_update.json"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+
+    captured: Dict[str, int] = {}
+
+    async def record(leverage: int) -> None:
+        captured["value"] = leverage
+
+    maker._ensure_lighter_leverage = record  # type: ignore[assignment]
+    maker._lighter_client = SimpleNamespace(get_leverage_limits=lambda: {"max": 30, "default": 20})  # type: ignore[assignment]
+
+    logs = []
+    maker.logger = cast(
+        TradingLogger,
+        SimpleNamespace(log=lambda message, level="INFO": logs.append((level, message))),
+    )
+
+    asyncio.run(maker._configure_lighter_leverage())
+    assert captured.get("value") == 30
+    assert any("Targeting Lighter max leverage 30x" in msg for _level, msg in logs)
+
+
+def test_configure_lighter_leverage_handles_missing_limit(tmp_path):
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("10"),
+        config_path=str(tmp_path / "hot_update.json"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+
+    maker._lighter_client = SimpleNamespace(get_leverage_limits=lambda: {"default": 10})  # type: ignore[assignment]
+
+    called = {}
+
+    async def record(leverage: int) -> None:
+        called["value"] = leverage
+
+    maker._ensure_lighter_leverage = record  # type: ignore[assignment]
+
+    logs = []
+    maker.logger = cast(
+        TradingLogger,
+        SimpleNamespace(log=lambda message, level="INFO": logs.append((level, message))),
+    )
+
+    asyncio.run(maker._configure_lighter_leverage())
+    assert "value" not in called
+    assert any("Unable to determine Lighter max leverage" in msg for _level, msg in logs)
 
 
 class StubRateLimitError(Exception):

@@ -341,6 +341,7 @@ class SimpleMarketMaker:
         contract_id, tick_size = await self._lighter_client.get_contract_attributes()
         trading_config.contract_id = contract_id
         trading_config.tick_size = tick_size
+        await self._configure_lighter_leverage()
         await self._lighter_client.wait_for_market_data(timeout=10)
 
         self.logger.log(
@@ -349,6 +350,107 @@ class SimpleMarketMaker:
             "INFO",
         )
         self._running = True
+
+    async def _configure_lighter_leverage(self) -> None:
+        if self._lighter_client is None:
+            return
+
+        leverage_limits: Dict[str, Optional[int]] = {}
+        limits_getter = getattr(self._lighter_client, "get_leverage_limits", None)
+        if callable(limits_getter):
+            try:
+                leverage_limits = cast(Dict[str, Optional[int]], limits_getter())
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self.logger.log(f"Failed to load Lighter leverage limits: {exc}", "WARNING")
+                return
+        else:  # pragma: no cover - unexpected SDK change
+            self.logger.log(
+                "Current Lighter client does not expose leverage metadata; skipping auto configuration",
+                "WARNING",
+            )
+            return
+
+        max_leverage = leverage_limits.get("max")
+        default_leverage = leverage_limits.get("default")
+        if max_leverage in (None, 0):
+            self.logger.log(
+                "Unable to determine Lighter max leverage from market metadata; set leverage manually if needed",
+                "WARNING",
+            )
+            return
+
+        try:
+            target_leverage = int(max_leverage)
+        except (TypeError, ValueError):
+            self.logger.log(f"Invalid Lighter leverage limit received: {max_leverage}", "WARNING")
+            return
+
+        if target_leverage <= 0:
+            self.logger.log(f"Ignoring non-positive Lighter leverage limit: {target_leverage}", "WARNING")
+            return
+
+        default_display = str(default_leverage) if default_leverage is not None else "unknown"
+        self.logger.log(
+            f"Targeting Lighter max leverage {target_leverage}x (default {default_display}x)",
+            "INFO",
+        )
+
+        await self._ensure_lighter_leverage(target_leverage)
+
+    async def _ensure_lighter_leverage(self, leverage: int) -> None:
+        if leverage <= 0:
+            return
+        if self._lighter_client is None or self._lighter_config is None:
+            self.logger.log("Cannot update Lighter leverage: client not initialized", "WARNING")
+            return
+
+        signer_client = getattr(self._lighter_client, "lighter_client", None)
+        if signer_client is None:
+            self.logger.log("Cannot update Lighter leverage: signer client unavailable", "WARNING")
+            return
+
+        contract_id = getattr(self._lighter_config, "contract_id", None)
+        if contract_id is None:
+            self.logger.log("Cannot update Lighter leverage: contract id not resolved", "ERROR")
+            return
+        try:
+            market_index = int(contract_id)
+        except (TypeError, ValueError):
+            self.logger.log(f"Cannot update Lighter leverage: invalid contract id '{contract_id}'", "ERROR")
+            return
+
+        margin_mode = getattr(signer_client, "CROSS_MARGIN_MODE", None)
+        if margin_mode is None:
+            self.logger.log("Cannot update Lighter leverage: margin mode unavailable", "WARNING")
+            return
+
+        try:
+            tx_info, _, err = await signer_client.update_leverage(
+                market_index,
+                margin_mode,
+                int(leverage),
+            )
+        except Exception as exc:  # pragma: no cover - network/SDK failures
+            self.logger.log(f"Failed to update Lighter leverage to {leverage}x: {exc}", "ERROR")
+            return
+
+        if err is not None:
+            message = str(err)
+            lowered = message.lower()
+            if "same" in lowered or "already" in lowered:
+                self.logger.log(
+                    f"Lighter leverage already set to {leverage}x; no change required",
+                    "INFO",
+                )
+                return
+
+            self.logger.log(f"Failed to update Lighter leverage to {leverage}x: {message}", "ERROR")
+            return
+
+        self.logger.log(
+            f"Lighter leverage updated to {leverage}x (tx={tx_info})",
+            "INFO",
+        )
 
     async def stop(self) -> None:
         if not self._running:

@@ -67,6 +67,11 @@ class LighterClient(BaseExchangeClient):
         self.orders_cache = {}
         self.current_order_client_id = None
         self.current_order = None
+        self.market_detail = None
+        self.default_initial_margin_fraction: Optional[int] = None
+        self.min_initial_margin_fraction: Optional[int] = None
+        self.default_leverage: Optional[int] = None
+        self.max_leverage: Optional[int] = None
 
     def prune_caches(self, *, max_orders: int = 1000) -> None:
         """Bound in-memory caches to avoid unbounded growth.
@@ -84,6 +89,33 @@ class LighterClient(BaseExchangeClient):
                     cache.pop(k, None)
         except Exception:
             pass
+
+    @staticmethod
+    def _fraction_to_leverage(fraction: Any) -> Optional[int]:
+        try:
+            fraction_int = int(fraction)
+        except (TypeError, ValueError):
+            return None
+
+        if fraction_int <= 0:
+            return None
+
+        try:
+            leverage = int(Decimal("10000") / Decimal(fraction_int))
+        except (InvalidOperation, ValueError):
+            return None
+
+        return leverage if leverage > 0 else 1
+
+    def get_leverage_limits(self) -> Dict[str, Optional[int]]:
+        """Return default and maximum leverage derived from market risk parameters."""
+
+        return {
+            "default": self.default_leverage,
+            "max": self.max_leverage,
+            "default_initial_margin_fraction": self.default_initial_margin_fraction,
+            "min_initial_margin_fraction": self.min_initial_margin_fraction,
+        }
 
     @staticmethod
     def _parse_decimal(value: Any) -> Optional[Decimal]:
@@ -806,6 +838,10 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("Failed to get markets")
 
         market_summary = await order_api.order_book_details(market_id=market_info.market_id)
+        if not market_summary.order_book_details:
+            self.logger.log("Failed to load detailed market info", "ERROR")
+            raise ValueError("Failed to load market details")
+
         order_book_details = market_summary.order_book_details[0]
         # Set contract_id to market name (Lighter uses market IDs as identifiers)
         self.config.contract_id = market_info.market_id
@@ -817,6 +853,20 @@ class LighterClient(BaseExchangeClient):
         except Exception:
             self.logger.log("Failed to get tick size", "ERROR")
             raise ValueError("Failed to get tick size")
+
+        self.market_detail = order_book_details
+        self.default_initial_margin_fraction = getattr(order_book_details, "default_initial_margin_fraction", None)
+        self.min_initial_margin_fraction = getattr(order_book_details, "min_initial_margin_fraction", None)
+        self.default_leverage = self._fraction_to_leverage(self.default_initial_margin_fraction)
+        self.max_leverage = self._fraction_to_leverage(self.min_initial_margin_fraction)
+
+        if self.default_leverage or self.max_leverage:
+            default_display = str(self.default_leverage) if self.default_leverage is not None else "?"
+            max_display = str(self.max_leverage) if self.max_leverage is not None else "?"
+            self.logger.log(
+                f"Market leverage limits -> default={default_display}x, max={max_display}x",
+                "INFO",
+            )
 
         await self._ensure_websocket_manager()
 
