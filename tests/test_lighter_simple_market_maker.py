@@ -121,8 +121,10 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     maker._lighter_last_mark_price = Decimal("100")
     asyncio.run(maker._maybe_report_metrics(base_metrics))
     assert logs, "Expected monitoring log output"
-    summary = logs[0][1]
-    assert summary.startswith("PnL Summary"), summary
+    assert any(msg.startswith("Positions") for _lvl, msg in logs)
+    summary_logs = [msg for _lvl, msg in logs if msg.startswith("PnL Summary")]
+    assert summary_logs, "Expected PnL summary log entry"
+    summary = summary_logs[-1]
     assert "Lighter=0.00" in summary
     assert "Binance=0.00" in summary
     assert "Combined=0.00" in summary
@@ -154,8 +156,9 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     base_metrics["position_value"] = Decimal("5")
     asyncio.run(maker._maybe_report_metrics(base_metrics))
     assert logs
-    summary = logs[0][1]
-    assert summary.startswith("PnL Summary"), summary
+    summary_logs = [msg for _lvl, msg in logs if msg.startswith("PnL Summary")]
+    assert summary_logs, "Expected PnL summary log entry"
+    summary = summary_logs[-1]
     assert "Lighter=0.00" in summary
     assert "Binance=0.00" in summary
     assert "Combined=0.00" in summary
@@ -177,8 +180,9 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     base_metrics["position_value"] = Decimal("0")
     asyncio.run(maker._maybe_report_metrics(base_metrics))
     assert logs
-    summary = logs[0][1]
-    assert summary.startswith("PnL Summary"), summary
+    summary_logs = [msg for _lvl, msg in logs if msg.startswith("PnL Summary")]
+    assert summary_logs, "Expected PnL summary log entry"
+    summary = summary_logs[-1]
     assert "Lighter=0.05" in summary
     assert "Binance=0.00" in summary
     assert "Combined=0.05" in summary
@@ -262,6 +266,7 @@ def test_maybe_report_metrics_combines_binance_pnl(tmp_path):
         "position_unrealized_pnl": Decimal("0.5"),
         "position_size": Decimal("0.1"),
         "position_notional": Decimal("10.5"),
+        "position_entry_price": Decimal("100"),
     }
 
     class HedgerStub:

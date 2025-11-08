@@ -183,6 +183,7 @@ class BinanceHedger:
             "position_size": self._to_decimal(target_position.get("positionAmt")),
             "position_notional": self._to_decimal(target_position.get("notional")),
             "position_unrealized_pnl": self._to_decimal(target_position.get("unrealizedProfit")),
+            "position_entry_price": self._to_decimal(target_position.get("entryPrice")),
         }
 
         return metrics
@@ -312,9 +313,32 @@ class SimpleMarketMaker:
         api_secret = self._require_env("BINANCE_API_SECRET")
         self._hedger = BinanceHedger(api_key, api_secret, self.settings.binance_symbol, self._session)
 
+        initial_binance_position = Decimal("0")
+        initial_binance_avg_price = Decimal("0")
+        initial_binance_mark = Decimal("0")
         try:
             hedger_snapshot = await self._hedger.get_account_metrics()
-            self._binance_position_estimate = hedger_snapshot.get("position_size", Decimal("0"))
+            position_size = hedger_snapshot.get("position_size", Decimal("0"))
+            position_notional = hedger_snapshot.get("position_notional", Decimal("0"))
+            position_entry_price = hedger_snapshot.get("position_entry_price", Decimal("0"))
+            position_unrealized = hedger_snapshot.get("position_unrealized_pnl", Decimal("0"))
+            self._binance_position_estimate = position_size
+            initial_binance_position = position_size
+            if position_size != 0 and position_notional != 0:
+                try:
+                    initial_binance_avg_price = abs(position_notional) / abs(position_size)
+                    initial_binance_mark = initial_binance_avg_price
+                except (InvalidOperation, ZeroDivisionError):
+                    initial_binance_avg_price = Decimal("0")
+                    initial_binance_mark = Decimal("0")
+            if position_size != 0 and position_entry_price > 0:
+                initial_binance_avg_price = position_entry_price
+                try:
+                    mark_candidate = position_entry_price + (position_unrealized / position_size)
+                    if mark_candidate > 0:
+                        initial_binance_mark = mark_candidate
+                except (InvalidOperation, ZeroDivisionError):
+                    pass
             wallet_balance = hedger_snapshot.get("wallet_balance")
             if wallet_balance is not None:
                 self._binance_initial_wallet_balance = wallet_balance
@@ -362,9 +386,9 @@ class SimpleMarketMaker:
         self._lighter_session_volume_base = Decimal("0")
         self._lighter_order_fills.clear()
         self._binance_session_realized_pnl = Decimal("0")
-        self._binance_inventory_base = Decimal("0")
-        self._binance_avg_entry_price = Decimal("0")
-        self._binance_last_mark_price = Decimal("0")
+        self._binance_inventory_base = initial_binance_position
+        self._binance_avg_entry_price = initial_binance_avg_price
+        self._binance_last_mark_price = initial_binance_mark
 
         self._running = True
         await self._shutdown_state_task()
@@ -1003,13 +1027,33 @@ class SimpleMarketMaker:
 
                 position_notional = binance_metrics.get("position_notional", Decimal("0"))
                 position_size = binance_metrics.get("position_size", Decimal("0"))
-                if position_size != 0 and position_notional != 0:
+                position_entry_price = binance_metrics.get("position_entry_price", Decimal("0"))
+                position_unrealized = binance_metrics.get("position_unrealized_pnl", Decimal("0"))
+                self._binance_inventory_base = position_size
+                if position_size == 0:
+                    self._binance_avg_entry_price = Decimal("0")
+                elif position_entry_price > 0:
+                    self._binance_avg_entry_price = position_entry_price
+                elif position_notional != 0:
                     try:
-                        derived_mark = abs(position_notional) / abs(position_size)
-                        if derived_mark > 0:
-                            self._binance_last_mark_price = derived_mark
+                        self._binance_avg_entry_price = abs(position_notional) / abs(position_size)
                     except (InvalidOperation, ZeroDivisionError):
                         pass
+
+                if position_size != 0:
+                    mark_candidate: Optional[Decimal] = None
+                    if position_entry_price > 0:
+                        try:
+                            mark_candidate = position_entry_price + (position_unrealized / position_size)
+                        except (InvalidOperation, ZeroDivisionError):
+                            mark_candidate = None
+                    if (mark_candidate is None or mark_candidate <= 0) and position_notional != 0:
+                        try:
+                            mark_candidate = abs(position_notional) / abs(position_size)
+                        except (InvalidOperation, ZeroDivisionError):
+                            mark_candidate = None
+                    if mark_candidate is not None and mark_candidate > 0:
+                        self._binance_last_mark_price = mark_candidate
 
         lighter_unrealized = self._compute_unrealized_pnl(
             self._lighter_inventory_base,
@@ -1029,6 +1073,18 @@ class SimpleMarketMaker:
         binance_total = self._binance_session_realized_pnl + binance_unrealized
 
         combined_total = lighter_total + binance_total
+
+        self.logger.log(
+            (
+                "Positions | Lighter={lighter_pos} @ {lighter_avg} | Binance={binance_pos} @ {binance_avg}"
+            ).format(
+                lighter_pos=self._format_decimal(self._lighter_inventory_base, 6),
+                lighter_avg=self._format_decimal(self._lighter_avg_entry_price, 4),
+                binance_pos=self._format_decimal(self._binance_inventory_base, 6),
+                binance_avg=self._format_decimal(self._binance_avg_entry_price, 4),
+            ),
+            "INFO",
+        )
 
         summary_message = (
             "PnL Summary | Lighter={lighter} | Binance={binance} | Combined={combined}"
