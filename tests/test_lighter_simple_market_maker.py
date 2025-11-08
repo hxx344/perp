@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import cast
 
 from helpers.logger import TradingLogger
+from trading_bot import TradingConfig
 from strategies.lighter_simple_market_maker import (
     SimpleMarketMaker,
     SimpleMakerSettings,
@@ -74,6 +75,21 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     )
     maker = SimpleMarketMaker(settings)
     maker._hedger = None  # skip Binance metrics
+    maker._lighter_config = TradingConfig(
+        ticker="TEST",
+        contract_id="MARKET",
+        quantity=Decimal("1"),
+        take_profit=Decimal("0"),
+        tick_size=Decimal("0.01"),
+        direction="buy",
+        max_orders=1,
+        wait_time=1,
+        exchange="lighter",
+        grid_step=Decimal("0"),
+        stop_price=Decimal("0"),
+        pause_price=Decimal("0"),
+        boost_mode=False,
+    )
 
     logs = []
     maker.logger = cast(
@@ -84,7 +100,6 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
 
     base_metrics = {
-        "total_volume": Decimal("12"),
         "position_size": Decimal("1"),
         "position_value": Decimal("100"),
         "unrealized_pnl": Decimal("2"),
@@ -101,7 +116,24 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
 
     maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
     logs.clear()
-    base_metrics["total_volume"] = Decimal("17")
+    maker._handle_lighter_order_update(
+        {
+            "contract_id": "MARKET",
+            "order_id": "1",
+            "status": "PARTIALLY_FILLED",
+            "filled_size": "0.02",
+            "price": "100",
+        }
+    )
+    maker._handle_lighter_order_update(
+        {
+            "contract_id": "MARKET",
+            "order_id": "1",
+            "status": "FILLED",
+            "filled_size": "0.05",
+            "price": "100",
+        }
+    )
     asyncio.run(maker._maybe_report_metrics(base_metrics))
     assert logs
     assert "sessionVol=5.000000" in logs[0][1]

@@ -195,7 +195,9 @@ class SimpleMarketMaker:
         self._tracked_orders: Dict[str, ActiveOrder] = {}
         self._last_hot_update: Dict[str, Any] = {}
         self._last_metrics_time: float = 0.0
-        self._baseline_trade_volume: Optional[Decimal] = None
+        self._lighter_order_fills: Dict[str, Decimal] = {}
+        self._lighter_session_volume_quote: Decimal = Decimal("0")
+        self._lighter_session_volume_base: Decimal = Decimal("0")
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -238,6 +240,7 @@ class SimpleMarketMaker:
             LighterClient,
             ExchangeFactory.create_exchange("lighter", trading_config),  # type: ignore[arg-type]
         )
+        lighter_client.setup_order_update_handler(self._handle_lighter_order_update)
         self._lighter_client = lighter_client
         await self._lighter_client.connect()
         contract_id, tick_size = await self._lighter_client.get_contract_attributes()
@@ -440,6 +443,54 @@ class SimpleMarketMaker:
         except Exception:
             return format(value, "f")
 
+    @staticmethod
+    def _to_decimal(value: Any) -> Decimal:
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return Decimal("0")
+
+    def _handle_lighter_order_update(self, update: Dict[str, Any]) -> None:
+        if self._lighter_config is None:
+            return
+
+        try:
+            contract_id = str(getattr(self._lighter_config, "contract_id", "") or "")
+            update_contract_id = str(update.get("contract_id") or update.get("market_index") or "")
+            if contract_id and update_contract_id and update_contract_id != contract_id:
+                return
+
+            status = str(update.get("status", "")).upper()
+            if status not in {"FILLED", "CANCELED", "PARTIALLY_FILLED"}:
+                return
+
+            order_id = str(update.get("order_id") or "")
+            if not order_id:
+                return
+
+            filled_total = abs(self._to_decimal(update.get("filled_size")))
+            previous_filled = self._lighter_order_fills.get(order_id, Decimal("0"))
+            delta_filled = filled_total - previous_filled
+            if delta_filled <= 0:
+                if status in {"FILLED", "CANCELED"}:
+                    self._lighter_order_fills.pop(order_id, None)
+                return
+
+            self._lighter_order_fills[order_id] = filled_total
+
+            price = self._to_decimal(update.get("price"))
+            base_delta = abs(delta_filled)
+            quote_delta = base_delta * price if price > 0 else Decimal("0")
+
+            self._lighter_session_volume_base += base_delta
+            if quote_delta > 0:
+                self._lighter_session_volume_quote += quote_delta
+
+            if status in {"FILLED", "CANCELED"}:
+                self._lighter_order_fills.pop(order_id, None)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.log(f"Failed to process Lighter order update: {exc}", "ERROR")
+
     async def _maybe_report_metrics(self, lighter_metrics: Dict[str, Decimal]) -> None:
         now = time.time()
         if now - self._last_metrics_time < self.settings.metrics_interval_seconds:
@@ -447,14 +498,7 @@ class SimpleMarketMaker:
 
         self._last_metrics_time = now
 
-        total_volume = lighter_metrics.get("total_volume", Decimal("0"))
-        if self._baseline_trade_volume is None or total_volume < self._baseline_trade_volume:
-            self._baseline_trade_volume = total_volume
-
-        baseline = self._baseline_trade_volume or Decimal("0")
-        session_volume = total_volume - baseline
-        if session_volume < 0:
-            session_volume = Decimal("0")
+        session_volume = self._lighter_session_volume_quote
 
         lighter_message = (
             "Lighter | pos={pos} | posVal={pos_val} | uPnL={u_pnl} | rPnL={r_pnl} | bal={bal} | "

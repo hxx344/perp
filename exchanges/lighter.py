@@ -364,6 +364,26 @@ class LighterClient(BaseExchangeClient):
                 self.logger.log(f"[{order_type}] [{order_id}] {status} "
                                 f"{filled_size} @ {price}", "INFO")
 
+            if self._order_update_handler is not None:
+                update_payload = {
+                    "contract_id": getattr(self.config, "contract_id", None),
+                    "ticker": getattr(self.config, "ticker", None),
+                    "order_id": str(order_id),
+                    "status": status,
+                    "side": side,
+                    "order_type": order_type,
+                    "price": str(price),
+                    "size": str(size),
+                    "filled_size": str(filled_size),
+                    "remaining_size": str(remaining_size),
+                    "timestamp": str(time.time()),
+                    "client_order_index": str(order_data.get('client_order_index')),
+                }
+                try:
+                    self._order_update_handler(update_payload)
+                except Exception as exc:  # pragma: no cover - logging safeguard
+                    self.logger.log(f"Error invoking external order handler: {exc}", "ERROR")
+
             if order_data['client_order_index'] == self.current_order_client_id or order_type == 'OPEN':
                 current_order = OrderInfo(
                     order_id=order_id,
