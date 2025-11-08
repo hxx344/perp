@@ -54,6 +54,12 @@ cd D:\project8\perp-dex-tools
     --hedge-buffer 1
 ```
 
+> **提示**：脚本会自动把仓库根目录加入 `PYTHONPATH`。如果你已经进入 `strategies/` 目录，也可以直接执行：
+
+```bash
+python lighter_simple_market_maker.py --lighter-ticker ETH-PERP --binance-symbol ETHUSDT --order-quantity 0.5 --spread-bps 12 --hedge-threshold 5 --hedge-buffer 1
+```
+
 ### 常用参数
 
 | 参数 | 说明 |

@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import signal
+import sys
 import time
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
@@ -25,6 +26,10 @@ from urllib.parse import urlencode
 
 import aiohttp
 import dotenv
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
 from exchanges import ExchangeFactory
 from exchanges.lighter import LighterClient
