@@ -282,6 +282,10 @@ class SimpleMarketMaker:
         self._lighter_avg_entry_price: Decimal = Decimal("0")
         self._lighter_session_realized_pnl: Decimal = Decimal("0")
         self._lighter_last_mark_price: Decimal = Decimal("0")
+        self._state_task: Optional[asyncio.Task] = None
+        self._state_refresh_interval = max(1.0, min(float(self.settings.metrics_interval_seconds), 5.0))
+        self._latest_metrics: Dict[str, Decimal] = {}
+        self._latest_net_position: Decimal = Decimal("0")
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -344,12 +348,16 @@ class SimpleMarketMaker:
         await self._configure_lighter_leverage()
         await self._lighter_client.wait_for_market_data(timeout=10)
 
+        self._running = True
+        await self._shutdown_state_task()
+        await self._update_state_once(force=True)
+        self._state_task = asyncio.create_task(self._state_maintainer())
+
         self.logger.log(
             f"Initialized simple market maker: contract={contract_id}, tick_size={tick_size}, "
             f"order_qty={self.settings.order_quantity}",
             "INFO",
         )
-        self._running = True
 
     async def _configure_lighter_leverage(self) -> None:
         if self._lighter_client is None:
@@ -452,11 +460,25 @@ class SimpleMarketMaker:
             "INFO",
         )
 
+    async def _shutdown_state_task(self) -> None:
+        if self._state_task is None:
+            return
+
+        task = self._state_task
+        self._state_task = None
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
     async def stop(self) -> None:
         if not self._running:
+            await self._shutdown_state_task()
             if self._session and not self._session.closed:
                 await self._session.close()
             return
+
+        self._running = False
+        await self._shutdown_state_task()
 
         try:
             if self._lighter_client is not None:
@@ -464,7 +486,6 @@ class SimpleMarketMaker:
         finally:
             if self._session and not self._session.closed:
                 await self._session.close()
-            self._running = False
 
     async def run(self) -> None:
         if not self._running:
@@ -489,6 +510,9 @@ class SimpleMarketMaker:
             await self.stop()
 
     async def _iteration(self) -> None:
+        await self._refresh_quotes()
+
+    async def _refresh_quotes(self) -> None:
         assert self._lighter_client is not None
         assert self._lighter_config is not None
 
@@ -499,37 +523,39 @@ class SimpleMarketMaker:
             await self._cancel_all_orders()
             return
 
-        best_bid, best_ask = await self._lighter_client.fetch_bbo_prices(self._lighter_config.contract_id)
+        contract_id = self._lighter_config.contract_id
+        bbo_task = asyncio.create_task(self._lighter_client.fetch_bbo_prices(contract_id))
+        position_task = asyncio.create_task(self._lighter_client.get_account_positions())
+
+        try:
+            best_bid, best_ask = await bbo_task
+        except Exception:
+            position_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await position_task
+            raise
+
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
             self.logger.log("Invalid Lighter depth snapshot; skipping iteration", "WARNING")
+            position_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await position_task
             return
+
+        try:
+            net_position = await position_task
+        except Exception as exc:
+            self.logger.log(f"Failed to fetch Lighter account position: {exc}", "ERROR")
+            net_position = Decimal("0")
+
+        self._latest_net_position = net_position
 
         mid_price = (best_bid + best_ask) / 2
         self._lighter_last_mark_price = mid_price
         spread_scale = self._resolve_spread_scale(hot_update)
         targets = compute_target_prices(mid_price, spread_scale, self._lighter_config.tick_size)
 
-        try:
-            lighter_metrics = await self._lighter_client.get_account_metrics()
-        except Exception as exc:
-            self.logger.log(f"Failed to fetch Lighter account metrics: {exc}", "ERROR")
-            lighter_metrics = {
-                "position_size": await self._lighter_client.get_account_positions(),
-                "available_balance": Decimal("0"),
-                "collateral": Decimal("0"),
-                "total_asset_value": Decimal("0"),
-                "daily_volume": Decimal("0"),
-                "weekly_volume": Decimal("0"),
-                "monthly_volume": Decimal("0"),
-                "total_volume": Decimal("0"),
-                "position_value": Decimal("0"),
-                "unrealized_pnl": Decimal("0"),
-                "realized_pnl": Decimal("0"),
-            }
-
-        net_position = lighter_metrics.get("position_size", Decimal("0"))
         inventory_cap = self.settings.effective_inventory_limit()
-
         bid_enabled = should_enable_side(net_position, inventory_cap, "buy")
         ask_enabled = should_enable_side(net_position, inventory_cap, "sell")
 
@@ -537,8 +563,6 @@ class SimpleMarketMaker:
         await self._sync_side("sell", targets["sell"], ask_enabled)
 
         await self._maybe_execute_hedge(net_position)
-
-        await self._maybe_report_metrics(lighter_metrics)
 
     async def _sync_side(self, side: str, target_price: Decimal, enabled: bool) -> None:
         assert self._lighter_client is not None
@@ -579,15 +603,13 @@ class SimpleMarketMaker:
         if not order_result.success:
             self.logger.log(f"Failed to place {side} order: {order_result.error_message}", "ERROR")
             return
-
-        # Refresh active orders so we can store actual order index
-        await asyncio.sleep(0.2)
-        active_orders = await self._lighter_client.get_active_orders(self._lighter_config.contract_id)
-        for order in active_orders:
-            if order.side == side and abs(order.price - target_price) <= self._lighter_config.tick_size:
-                self._tracked_orders[side] = ActiveOrder(order_id=order.order_id, price=order.price, side=side)
-                self.logger.log(f"Placed {side} order {order.order_id} @ {order.price}", "INFO")
-                break
+        price_display = self._format_decimal(target_price, 6)
+        self.logger.log(
+            (
+                "Submitted {side} order request client_id={client_id} @ {price}"
+            ).format(side=side, client_id=order_result.order_id, price=price_display),
+            "INFO",
+        )
 
     async def _maybe_execute_hedge(self, net_position: Decimal) -> None:
         if self._hedger is None:
@@ -659,6 +681,55 @@ class SimpleMarketMaker:
             )
         except Exception as exc:
             self.logger.log(f"Binance hedge failed: {exc}", "ERROR")
+
+    async def _update_state_once(self, force: bool = False) -> None:
+        if self._lighter_client is None:
+            return
+
+        metrics: Dict[str, Decimal]
+        try:
+            metrics = await self._lighter_client.get_account_metrics()
+        except Exception as exc:
+            self.logger.log(f"Failed to fetch Lighter account metrics: {exc}", "ERROR")
+            try:
+                position_size = await self._lighter_client.get_account_positions()
+            except Exception as pos_exc:
+                self.logger.log(f"Failed to fetch Lighter account position fallback: {pos_exc}", "ERROR")
+                position_size = Decimal("0")
+            metrics = {
+                "position_size": position_size,
+                "available_balance": Decimal("0"),
+                "collateral": Decimal("0"),
+                "total_asset_value": Decimal("0"),
+                "daily_volume": Decimal("0"),
+                "weekly_volume": Decimal("0"),
+                "monthly_volume": Decimal("0"),
+                "total_volume": Decimal("0"),
+                "position_value": Decimal("0"),
+                "unrealized_pnl": Decimal("0"),
+                "realized_pnl": Decimal("0"),
+            }
+
+        self._latest_metrics = metrics
+        self._latest_net_position = metrics.get("position_size", self._latest_net_position)
+        if force:
+            self._last_metrics_time = 0.0
+
+        await self._maybe_report_metrics(metrics, force=force)
+
+    async def _state_maintainer(self) -> None:
+        while self._running:
+            try:
+                await self._update_state_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.logger.log(f"Background state update failed: {exc}", "ERROR")
+
+            if not self._running:
+                break
+
+            await asyncio.sleep(self._state_refresh_interval)
 
     async def _cancel_all_orders(self) -> None:
         assert self._lighter_client is not None
@@ -812,9 +883,9 @@ class SimpleMarketMaker:
         except Exception as exc:  # pragma: no cover - defensive logging
             self.logger.log(f"Failed to process Lighter order update: {exc}", "ERROR")
 
-    async def _maybe_report_metrics(self, lighter_metrics: Dict[str, Decimal]) -> None:
+    async def _maybe_report_metrics(self, lighter_metrics: Dict[str, Decimal], *, force: bool = False) -> None:
         now = time.time()
-        if now - self._last_metrics_time < self.settings.metrics_interval_seconds:
+        if not force and now - self._last_metrics_time < self.settings.metrics_interval_seconds:
             return
 
         self._last_metrics_time = now
