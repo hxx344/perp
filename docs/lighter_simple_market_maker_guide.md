@@ -54,6 +54,8 @@ cd D:\project8\perp-dex-tools
     --hedge-buffer 1
 ```
 
+如需在不同账户或环境之间切换，只需追加 `--env-file path\to\custom.env`，脚本会优先从指定文件加载密钥信息；当未提供该参数时，会回落到项目根目录下的默认 `.env`。
+
 > **提示**：脚本会自动把仓库根目录加入 `PYTHONPATH`。如果你已经进入 `strategies/` 目录，也可以直接执行：
 
 ```bash
@@ -74,6 +76,7 @@ python lighter_simple_market_maker.py --lighter-ticker ETH-PERP --binance-symbol
 | `--loop-sleep` | 主循环间隔（秒） |
 | `--order-refresh-ticks` | 价格偏离多少个 tick 时撤单重挂 |
 | `--config-path` | 热更新 JSON 文件路径或 URL |
+| `--env-file` | 指定要加载的 `.env` 文件路径，默认读取项目根目录下的 `.env` |
 | `--metrics-interval` | 监控日志输出的间隔（秒），默认 30 秒 |
 | `--no-console-log` | 关闭控制台日志输出 |
 

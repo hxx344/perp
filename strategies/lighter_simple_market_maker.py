@@ -59,6 +59,7 @@ class SimpleMakerSettings:
     hedge_buffer: Decimal = Decimal("0")
     inventory_limit: Optional[Decimal] = None
     config_path: str = "configs/hot_update.json"
+    env_file: Optional[str] = None
     loop_sleep_seconds: float = 3.0
     order_refresh_ticks: int = 2
     log_to_console: bool = True
@@ -307,7 +308,19 @@ class SimpleMarketMaker:
         if self._running:
             return
 
-        dotenv.load_dotenv()
+        env_path = self.settings.env_file
+        if env_path:
+            loaded = dotenv.load_dotenv(env_path)
+            if loaded:
+                self.logger.log(f"Loaded environment variables from '{env_path}'", "INFO")
+            else:
+                self.logger.log(
+                    f"Env file '{env_path}' not found or empty; using existing process environment",
+                    "WARNING",
+                )
+        else:
+            dotenv.load_dotenv()
+
         timeout = aiohttp.ClientTimeout(total=15)
         self._session = aiohttp.ClientSession(timeout=timeout)
 
@@ -1199,6 +1212,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
     parser.add_argument("--hedge-buffer", default="0", type=_decimal, help="Buffer deducted from hedge quantity")
     parser.add_argument("--inventory-limit", default=None, type=_decimal, help="Inventory cap for pausing one side of quotes")
     parser.add_argument("--config-path", default="configs/hot_update.json", help="Hot update JSON file or URL")
+    parser.add_argument("--env-file", default=None, help="Optional path to a .env file to load before starting")
     parser.add_argument("--loop-sleep", default=3.0, type=float, help="Seconds between main loop iterations")
     parser.add_argument("--order-refresh-ticks", default=2, type=int, help="Price difference in ticks before replacing orders")
     parser.add_argument("--metrics-interval", default=30.0, type=float, help="Seconds between account metrics logs")
@@ -1214,6 +1228,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         hedge_buffer=args.hedge_buffer,
         inventory_limit=args.inventory_limit,
         config_path=args.config_path,
+        env_file=args.env_file,
         loop_sleep_seconds=args.loop_sleep,
         order_refresh_ticks=max(1, args.order_refresh_ticks),
         log_to_console=not args.no_console_log,
