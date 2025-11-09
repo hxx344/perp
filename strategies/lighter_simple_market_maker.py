@@ -293,6 +293,8 @@ class SimpleMarketMaker:
         self._binance_inventory_base: Decimal = Decimal("0")
         self._binance_avg_entry_price: Decimal = Decimal("0")
         self._binance_last_mark_price: Decimal = Decimal("0")
+        self._binance_session_volume_quote: Decimal = Decimal("0")
+        self._binance_session_volume_base: Decimal = Decimal("0")
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -389,6 +391,8 @@ class SimpleMarketMaker:
         self._binance_inventory_base = initial_binance_position
         self._binance_avg_entry_price = initial_binance_avg_price
         self._binance_last_mark_price = initial_binance_mark
+        self._binance_session_volume_quote = Decimal("0")
+        self._binance_session_volume_base = Decimal("0")
 
         self._running = True
         await self._shutdown_state_task()
@@ -701,6 +705,11 @@ class SimpleMarketMaker:
             if fill_price > 0:
                 self._binance_last_mark_price = fill_price
             self._apply_binance_fill_to_session_pnl(signed_qty, fill_price)
+
+            abs_qty = abs(executed_qty)
+            self._binance_session_volume_base += abs_qty
+            if fill_price > 0:
+                self._binance_session_volume_quote += abs_qty * fill_price
 
             self.logger.log(
                 (
@@ -1110,6 +1119,16 @@ class SimpleMarketMaker:
             combined=self._format_decimal(combined_total, 2),
         )
         self.logger.log(summary_message, "INFO")
+
+        combined_volume_quote = self._lighter_session_volume_quote + self._binance_session_volume_quote
+        volume_message = (
+            "Volume Summary | Lighter={lighter} | Binance={binance} | Combined={combined}"
+        ).format(
+            lighter=self._format_decimal(self._lighter_session_volume_quote, 2),
+            binance=self._format_decimal(self._binance_session_volume_quote, 2),
+            combined=self._format_decimal(combined_volume_quote, 2),
+        )
+        self.logger.log(volume_message, "INFO")
 
     @staticmethod
     def _require_env(name: str) -> str:

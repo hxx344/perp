@@ -128,6 +128,12 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     assert "Lighter=0.00" in summary
     assert "Binance=0.00" in summary
     assert "Combined=0.00" in summary
+    volume_logs = [msg for _lvl, msg in logs if msg.startswith("Volume Summary")]
+    assert volume_logs, "Expected volume summary log entry"
+    volume = volume_logs[-1]
+    assert "Lighter=0.00" in volume
+    assert "Binance=0.00" in volume
+    assert "Combined=0.00" in volume
 
     maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
     logs.clear()
@@ -162,6 +168,12 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     assert "Lighter=0.00" in summary
     assert "Binance=0.00" in summary
     assert "Combined=0.00" in summary
+    volume_logs = [msg for _lvl, msg in logs if msg.startswith("Volume Summary")]
+    assert volume_logs
+    volume = volume_logs[-1]
+    assert "Lighter=5.00" in volume
+    assert "Binance=0.00" in volume
+    assert "Combined=5.00" in volume
 
     maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
     logs.clear()
@@ -186,6 +198,12 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     assert "Lighter=0.05" in summary
     assert "Binance=0.00" in summary
     assert "Combined=0.05" in summary
+    volume_logs = [msg for _lvl, msg in logs if msg.startswith("Volume Summary")]
+    assert volume_logs
+    volume = volume_logs[-1]
+    assert "Lighter=10.05" in volume
+    assert "Binance=0.00" in volume
+    assert "Combined=10.05" in volume
 
 
 def test_apply_fill_to_session_pnl_tracks_realized_and_inventory(tmp_path):
@@ -259,6 +277,8 @@ def test_maybe_report_metrics_combines_binance_pnl(tmp_path):
     maker._binance_session_realized_pnl = Decimal("2")
     maker._binance_inventory_base = Decimal("0.1")
     maker._binance_avg_entry_price = Decimal("100")
+    maker._lighter_session_volume_quote = Decimal("5")
+    maker._binance_session_volume_quote = Decimal("8")
 
     hedger_metrics = {
         "wallet_balance": Decimal("102"),
@@ -294,6 +314,12 @@ def test_maybe_report_metrics_combines_binance_pnl(tmp_path):
     assert "Lighter=1.00" in summary
     assert "Binance=2.50" in summary
     assert "Combined=3.50" in summary
+    volume_logs = [msg for _lvl, msg in logs if msg.startswith("Volume Summary")]
+    assert volume_logs, "Expected volume summary log entry"
+    volume = volume_logs[-1]
+    assert "Lighter=5.00" in volume
+    assert "Binance=8.00" in volume
+    assert "Combined=13.00" in volume
 
 
 class StubHedger:
