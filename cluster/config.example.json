@@ -1,0 +1,15 @@
+{
+  "global_exposure_limit": "1200",
+  "global_resume_ratio": 0.65,
+  "cycle_inventory_cap": "800",
+  "cooldown_seconds": 120,
+  "initial_primary_direction": "long",
+  "primary_quantity_range": {
+    "minimum": "50",
+    "maximum": "120"
+  },
+  "hedge_quantity_range": {
+    "minimum": "40",
+    "maximum": "100"
+  }
+}

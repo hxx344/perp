@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import signal
 import sys
 import time
@@ -64,6 +65,9 @@ class SimpleMakerSettings:
     order_refresh_ticks: int = 2
     log_to_console: bool = True
     metrics_interval_seconds: float = 30.0
+    allowed_sides: Optional[Iterable[str]] = None
+    order_quantity_min: Optional[Decimal] = None
+    order_quantity_max: Optional[Decimal] = None
 
     def effective_inventory_limit(self) -> Decimal:
         return self.inventory_limit if self.inventory_limit is not None else self.hedge_threshold
@@ -296,6 +300,12 @@ class SimpleMarketMaker:
         self._binance_last_mark_price: Decimal = Decimal("0")
         self._binance_session_volume_quote: Decimal = Decimal("0")
         self._binance_session_volume_base: Decimal = Decimal("0")
+        self._allowed_sides = self._normalize_allowed_sides(settings.allowed_sides)
+        self._external_pause = False
+        self._pause_enforced = False
+        self._rng = random.Random()
+        self._quantity_step = self._derive_quantity_step(settings.order_quantity)
+        self._dynamic_quantity_range = self._initialize_quantity_range(settings)
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -582,6 +592,16 @@ class SimpleMarketMaker:
             await self._cancel_all_orders()
             return
 
+        if self._external_pause:
+            if not self._pause_enforced:
+                self.logger.log("External pause active; cancelling outstanding orders", "WARNING")
+                await self._cancel_all_orders()
+                self._pause_enforced = True
+            return
+
+        if self._pause_enforced:
+            self._pause_enforced = False
+
         contract_id = self._lighter_config.contract_id
         best_bid, best_ask = await self._lighter_client.fetch_bbo_prices(contract_id)
 
@@ -618,6 +638,20 @@ class SimpleMarketMaker:
         relevant_orders = [order for order in active_orders if order.side == side]
         replace_threshold = self._lighter_config.tick_size * Decimal(self.settings.order_refresh_ticks)
 
+        if side not in self._allowed_sides:
+            for order in relevant_orders:
+                try:
+                    await self._lighter_client.cancel_order(order.order_id)
+                    self.logger.log(
+                        f"Cancelled {side} order {order.order_id} due to side whitelist",
+                        "INFO",
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    self.logger.log(f"Failed to cancel order {order.order_id}: {exc}", "ERROR")
+            if side in self._tracked_orders:
+                del self._tracked_orders[side]
+            return
+
         kept: Iterable[ActiveOrder] = ()
         for idx, order in enumerate(relevant_orders):
             price_diff = abs(order.price - target_price)
@@ -640,9 +674,10 @@ class SimpleMarketMaker:
         if kept:
             return
 
+        order_quantity = self._resolve_order_quantity()
         order_result = await self._lighter_client.place_limit_order(
             self._lighter_config.contract_id,
-            self.settings.order_quantity,
+            order_quantity,
             target_price,
             side,
         )
@@ -650,10 +685,11 @@ class SimpleMarketMaker:
             self.logger.log(f"Failed to place {side} order: {order_result.error_message}", "ERROR")
             return
         price_display = self._format_decimal(target_price, 6)
+        qty_display = self._format_decimal(order_quantity, 6)
         self.logger.log(
             (
-                "Submitted {side} order request client_id={client_id} @ {price}"
-            ).format(side=side, client_id=order_result.order_id, price=price_display),
+                "Submitted {side} order request client_id={client_id} qty={qty} @ {price}"
+            ).format(side=side, client_id=order_result.order_id, price=price_display, qty=qty_display),
             "INFO",
         )
 
@@ -1201,6 +1237,102 @@ class SimpleMarketMaker:
         message = str(exc)
         return "Too Many Requests" in message or "HTTP 429" in message
 
+    # ------------------------------------------------------------------
+    # External control helpers for cluster/agent integrations
+
+    @staticmethod
+    def _normalize_allowed_sides(sides: Optional[Iterable[str]]) -> set[str]:
+        valid = {"buy", "sell"}
+        if not sides:
+            return set(valid)
+        normalized = {str(side).lower() for side in sides if str(side).lower() in valid}
+        return normalized or set(valid)
+
+    @staticmethod
+    def _derive_quantity_step(quantity: Decimal) -> Decimal:
+        exponent = quantity.as_tuple().exponent
+        exponent_int = int(exponent)
+        if exponent_int >= 0:
+            return Decimal("1")
+        scale = Decimal("10") ** (-exponent_int)
+        return Decimal("1") / scale
+
+    def _initialize_quantity_range(self, settings: SimpleMakerSettings) -> Optional[tuple[Decimal, Decimal]]:
+        min_qty = settings.order_quantity_min
+        max_qty = settings.order_quantity_max
+        if min_qty is None or max_qty is None:
+            return None
+        minimum = max(Decimal("0"), min_qty)
+        maximum = max(Decimal("0"), max_qty)
+        if maximum <= 0:
+            return None
+        if maximum < minimum:
+            minimum, maximum = maximum, minimum
+        return (minimum, maximum)
+
+    def set_allowed_sides(self, sides: Iterable[str]) -> None:
+        self._allowed_sides = self._normalize_allowed_sides(sides)
+
+    def set_quantity_range(self, minimum: Optional[Decimal], maximum: Optional[Decimal]) -> None:
+        if minimum is None or maximum is None:
+            self._dynamic_quantity_range = None
+            return
+        minimum = max(Decimal("0"), minimum)
+        maximum = max(Decimal("0"), maximum)
+        if maximum < minimum:
+            minimum, maximum = maximum, minimum
+        self._dynamic_quantity_range = (minimum, maximum)
+
+    def set_random_seed(self, seed: Optional[int]) -> None:
+        if seed is None:
+            self._rng.seed()
+        else:
+            self._rng.seed(seed)
+
+    def pause_trading(self) -> None:
+        self._external_pause = True
+
+    def resume_trading(self) -> None:
+        self._external_pause = False
+        self._pause_enforced = False
+
+    def is_paused(self) -> bool:
+        return self._external_pause
+
+    def export_position_snapshot(self) -> Dict[str, str]:
+        lighter_position = self._format_decimal(self._lighter_inventory_base, 6)
+        binance_position = self._format_decimal(self._binance_position_estimate, 6)
+        net_position = self._format_decimal(self._latest_net_position, 6)
+        return {
+            "lighter_position": lighter_position,
+            "binance_position": binance_position,
+            "net_position": net_position,
+        }
+
+    def current_net_position(self) -> Decimal:
+        return self._latest_net_position
+
+    def _resolve_order_quantity(self) -> Decimal:
+        if self._dynamic_quantity_range is None:
+            return self.settings.order_quantity
+
+        lower, upper = self._dynamic_quantity_range
+        if upper <= lower:
+            return lower
+
+        span = upper - lower
+        sample_fraction = Decimal(str(self._rng.random()))
+        quantity = lower + (span * sample_fraction)
+
+        if self._quantity_step > 0:
+            steps = (quantity / self._quantity_step).to_integral_value(rounding=ROUND_DOWN)
+            quantity = steps * self._quantity_step
+
+        if quantity <= 0:
+            quantity = lower
+
+        return quantity
+
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
     parser = argparse.ArgumentParser(description="Run a minimal Lighter market maker with Binance hedging")
@@ -1217,6 +1349,25 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
     parser.add_argument("--order-refresh-ticks", default=2, type=int, help="Price difference in ticks before replacing orders")
     parser.add_argument("--metrics-interval", default=30.0, type=float, help="Seconds between account metrics logs")
     parser.add_argument("--no-console-log", action="store_true", help="Disable console logging output")
+    parser.add_argument(
+        "--allowed-side",
+        action="append",
+        choices=["buy", "sell"],
+        dest="allowed_sides",
+        help="Restrict quoting to the specified side(s); repeat the flag to allow multiple sides",
+    )
+    parser.add_argument(
+        "--order-quantity-min",
+        default=None,
+        type=_decimal,
+        help="Optional minimum order quantity when sampling random size",
+    )
+    parser.add_argument(
+        "--order-quantity-max",
+        default=None,
+        type=_decimal,
+        help="Optional maximum order quantity when sampling random size",
+    )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
     return SimpleMakerSettings(
@@ -1233,6 +1384,9 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         order_refresh_ticks=max(1, args.order_refresh_ticks),
         log_to_console=not args.no_console_log,
         metrics_interval_seconds=max(5.0, args.metrics_interval),
+        allowed_sides=frozenset(args.allowed_sides) if args.allowed_sides else None,
+        order_quantity_min=args.order_quantity_min,
+        order_quantity_max=args.order_quantity_max,
     )
 
 
