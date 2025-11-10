@@ -3040,6 +3040,33 @@ class HedgingCycleExecutor:
             return
 
         if not self.lighter_config.contract_id:
+            fallback_client_config = getattr(self.lighter_client, "config", None)
+            if fallback_client_config is not None and getattr(fallback_client_config, "contract_id", None):
+                self.lighter_config.contract_id = fallback_client_config.contract_id
+            if self.lighter_config.tick_size <= 0 and fallback_client_config is not None:
+                tick_candidate = getattr(fallback_client_config, "tick_size", None)
+                if isinstance(tick_candidate, Decimal) and tick_candidate > 0:
+                    self.lighter_config.tick_size = tick_candidate
+
+        if not self.lighter_config.contract_id:
+            try:
+                contract_id, tick_size = await self.lighter_client.get_contract_attributes()
+            except Exception as exc:
+                self.logger.log(
+                    f"Unable to recover Lighter contract metadata before emergency flatten: {exc}",
+                    "ERROR",
+                )
+                return
+
+            self.lighter_config.contract_id = contract_id
+            if isinstance(tick_size, Decimal) and tick_size > 0:
+                self.lighter_config.tick_size = tick_size
+
+            if fallback_client_config is not None:
+                fallback_client_config.contract_id = self.lighter_config.contract_id
+                fallback_client_config.tick_size = self.lighter_config.tick_size
+
+        if not self.lighter_config.contract_id:
             self.logger.log("Lighter contract ID missing; cannot place emergency order", "ERROR")
             return
 
