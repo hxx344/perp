@@ -893,7 +893,11 @@ class SimpleMarketMaker:
                 return data
         except Exception as exc:
             self.logger.log(f"Failed to load hot update config '{source}': {exc}", "ERROR")
-        return self._last_hot_update or {"cycle_enabled": True}
+        if not isinstance(self._last_hot_update, dict):
+            self._last_hot_update = {}
+        if not self._last_hot_update:
+            self._last_hot_update = {"cycle_enabled": True}
+        return dict(self._last_hot_update)
 
     def _resolve_spread_scale(self, hot_update: Dict[str, Any]) -> Decimal:
         depth_level = hot_update.get("aster_maker_depth_level")

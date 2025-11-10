@@ -36,9 +36,10 @@ class LighterCustomWebSocketManager:
 
         # WebSocket URL
         self.ws_url = "wss://mainnet.zklighter.elliot.ai/stream"
-        self.market_index = config.contract_id
-        self.account_index = config.account_index
-        self.lighter_client = config.lighter_client
+        market_index = getattr(config, "market_index", None)
+        self.market_index = market_index if market_index is not None else getattr(config, "contract_id", None)
+        self.account_index = getattr(config, "account_index", None)
+        self.lighter_client = getattr(config, "lighter_client", None)
 
     def set_logger(self, logger):
         """Set the logger instance."""
