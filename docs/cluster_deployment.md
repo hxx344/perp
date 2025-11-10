@@ -153,7 +153,10 @@ python cluster/agent_runner.py \
    - `PAUSE`：立即暂停挂单，等待下一步动作。
 4. 每次上报仓位时由协调器计算全局风险，必要时进入冷却或翻面。
 
-> **hedge_only 模式**：当全局净仓位达到 `global_exposure_limit` 时，协调器只会向主节点下发 `PAUSE`，对冲节点仍保持 `RUN` 状态继续对冲，直到净仓位回落到 `global_exposure_limit × global_resume_ratio` 以下，主节点才会收到恢复指令。
+> **hedge_only 模式**：当全局净仓位达到 `global_exposure_limit` 时，协调器会选择**只保留能够削减当前净仓位的角色**继续运行。举例：
+> - 集群整体偏多（净仓位为正）时，只让负责做空的一侧继续 `RUN`，另一侧全部 `PAUSE`。
+> - 集群整体偏空（净仓位为负）时，会反过来暂停对冲节点，让主节点继续做多把净敞口拉回中性。
+> 当净仓位回落到 `global_exposure_limit × global_resume_ratio` 以下时，两侧都会收到恢复指令重新进入 `running`。
 
 ---
 

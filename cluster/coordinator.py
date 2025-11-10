@@ -145,6 +145,7 @@ class ClusterState:
         self.phase: Literal["initial", "running", "hedge_only", "cooldown"] = "initial"
         self.cooldown_ends_at: Optional[float] = None
         self._last_global_reason: Optional[str] = None
+        self._hedge_only_active_role: Optional[AgentRole] = None
 
     # ------------------------------------------------------------------
     # Registration & basic inspection
@@ -255,16 +256,25 @@ class ClusterState:
             )
             LOGGER.warning(reason)
             self.phase = "hedge_only"
-            self._last_global_reason = reason
-            self._enforce_hedge_only(reason=reason)
+            self._enforce_hedge_only(net_exposure=net_exposure, reason=reason)
             return
 
         if self.phase == "hedge_only":
-            if abs_net <= self.config.resume_threshold():
+            resume_threshold = self.config.resume_threshold()
+            if abs_net <= resume_threshold:
                 LOGGER.info("Exposure %s within resume threshold; resuming primary quoting", abs_net)
                 self.phase = "running"
                 self._last_global_reason = None
+                self._hedge_only_active_role = None
                 self._broadcast_run(reason="resume")
+            else:
+                desired_role = self._role_to_reduce_net_exposure(net_exposure)
+                if self._hedge_only_active_role != desired_role:
+                    switch_reason = (
+                        f"net exposure {net_exposure} now requires {desired_role} agents to run"
+                    )
+                    LOGGER.info(switch_reason)
+                    self._enforce_hedge_only(net_exposure=net_exposure, reason=switch_reason)
             return
 
         # Running phase: check cycle inventory cap
@@ -278,6 +288,7 @@ class ClusterState:
                 self.phase = "cooldown"
                 self.cooldown_ends_at = now + self.config.cooldown_seconds
                 self._last_global_reason = reason
+                self._hedge_only_active_role = None
                 self._broadcast_pause(reason=reason)
 
     def _broadcast_run(self, *, reason: Optional[str]) -> None:
@@ -299,14 +310,22 @@ class ClusterState:
         for agent in self.agents.values():
             agent.queue_command(AgentCommand(action="PAUSE", reason=reason))
 
-    def _enforce_hedge_only(self, *, reason: str) -> None:
+    def _enforce_hedge_only(self, *, net_exposure: Decimal, reason: str) -> None:
+        active_role = self._role_to_reduce_net_exposure(net_exposure)
+        self._hedge_only_active_role = active_role
+        self._last_global_reason = reason
+
         for agent in self.agents.values():
-            if agent.role == "primary":
+            if agent.role != active_role:
                 agent.queue_command(AgentCommand(action="PAUSE", reason=reason))
                 continue
 
             side = self._side_for_agent(agent.role)
-            quantity_range = self.config.hedge_quantity_range
+            quantity_range = (
+                self.config.primary_quantity_range
+                if agent.role == "primary"
+                else self.config.hedge_quantity_range
+            )
             agent.queue_command(
                 AgentCommand(
                     action="RUN",
@@ -335,6 +354,11 @@ class ClusterState:
             (agent.last_position for agent in self.agents.values() if agent.role == "primary"),
             Decimal("0"),
         )
+
+    def _role_to_reduce_net_exposure(self, net_exposure: Decimal) -> AgentRole:
+        if net_exposure >= 0:
+            return "hedge" if self.primary_direction == "long" else "primary"
+        return "primary" if self.primary_direction == "long" else "hedge"
 
 
 # ----------------------------------------------------------------------
