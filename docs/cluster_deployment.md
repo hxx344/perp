@@ -69,29 +69,44 @@ curl http://COORDINATOR_HOST:8080/status
 
 ### 3.1 启动命令说明
 
-`cluster/agent_runner.py` 是策略包装器，启动时需传入 **协调器信息 + 策略参数**。
+`cluster/agent_runner.py` 是策略包装器，启动时需传入 **协调器信息（Agent 参数）+ 策略参数**。所有命令行选项如下。
 
-常用选项：
+#### Agent 参数
 
 | 参数 | 说明 |
 | --- | --- |
-| `--coordinator-url` | 协调器地址，例如 `http://10.0.0.5:8080` |
-| `--vps-id` | 当前 VPS 的唯一 ID（如 `vps-primary-1`） |
-| `--role` | 可选，`primary` 或 `hedge`；留空时由协调器分配 |
-| `--command-poll-interval` | 轮询协调器指令的频率（秒） |
-| `--metrics-interval` | 上报净持仓的频率（秒） |
-| `--random-seed` | 可选；设定后随机下单区间可复现 |
-| `--disable-binance-hedge` | 关闭 Binance 对冲逻辑，仅依赖集群内节点对冲 |
+| `--coordinator-url` | **必填**。协调器地址，例如 `http://10.0.0.5:8080` |
+| `--vps-id` | **必填**。当前 VPS 的唯一 ID（如 `vps-primary-1`） |
+| `--role` | 可选。`primary` / `hedge`，留空时由协调器自动分配 |
+| `--command-poll-interval` | 默认 `1.0` 秒。轮询协调器指令的频率 |
+| `--metrics-interval` | 默认 `2.0` 秒。上报净持仓的频率 |
+| `--random-seed` | 可选。设定后可复现实例中的随机下单区间 |
 
-后续所有未识别参数都会传给 `strategies/lighter_simple_market_maker.py`。常见参数：
+#### 策略参数（透传）
 
-> **提示**：集群模式通常只依赖主/对冲节点互相抵消仓位，可配合 `--disable-binance-hedge` 一并省略 Binance API 凭证。`--binance-symbol` 仍需提供（用于兼容旧版本配置），推荐填写与合约匹配的标的即可。
+所有未被 Agent 解释的参数会传给 `strategies/lighter_simple_market_maker.py`。该脚本支持以下选项：
 
-- `--lighter-ticker ETH-PERP`
-- `--binance-symbol ETHUSDT`
-- `--order-quantity 80`（初始默认值，实际会被协调器覆盖随机区间）
-- `--spread-bps 6`
-- `--hedge-threshold 400`
+| 参数 | 说明 |
+| --- | --- |
+| `--lighter-ticker` | **必填**。Lighter 合约代码，如 `ETH-PERP` |
+| `--binance-symbol` | **必填**（建议用于兼容）。Binance 对应标的，如 `ETHUSDT` |
+| `--order-quantity` | 初始下单数量（协调器随机区间的兜底值） |
+| `--spread-bps` | 半边价差（bps），例如 `6` 表示 0.06% |
+| `--hedge-threshold` | 单节点持仓阈值；若未指定 `--inventory-limit` 会作为兜底限制 |
+| `--hedge-buffer` | 对冲时的缓冲数量，默认为 `0` |
+| `--inventory-limit` | 覆盖默认库存上限；为空时回退到 `--hedge-threshold` |
+| `--config-path` | 热更新 JSON 路径，默认 `configs/hot_update.json` |
+| `--env-file` | 自定义 `.env` 路径 |
+| `--loop-sleep` | 主循环休眠秒数，默认 `3.0` |
+| `--order-refresh-ticks` | 价格偏离多少 tick 时替换订单，默认 `2` |
+| `--metrics-interval` | 账户指标打印间隔（秒），默认 `30`，最低 `5` |
+| `--no-console-log` | 关闭控制台日志输出 |
+| `--allowed-side` | 可多次指定限制仅报买/卖方向 |
+| `--order-quantity-min` | 随机下单区间下限 |
+| `--order-quantity-max` | 随机下单区间上限 |
+| `--disable-binance-hedge` | 关闭 Binance 对冲，完全依赖 VPS 间库存抵消 |
+
+> **提示**：集群模式通常只依赖主/对冲节点互相抵消仓位，可配合 `--disable-binance-hedge` 省略 Binance API 凭证。`--binance-symbol` 仍建议填写与合约匹配的标的，以兼容旧配置或备用切换。
 
 ### 3.2 启动示例（主节点）
 

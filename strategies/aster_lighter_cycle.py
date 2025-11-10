@@ -2004,6 +2004,14 @@ class HedgingCycleExecutor:
 
         lighter_contract_id, lighter_tick = await self.lighter_client.get_contract_attributes()
 
+        # Persist Lighter contract metadata for later emergency handling and price formatting
+        self.lighter_config.contract_id = lighter_contract_id
+        self.lighter_config.tick_size = lighter_tick
+        lighter_client_config = getattr(self.lighter_client, "config", None)
+        if lighter_client_config is not None:
+            lighter_client_config.contract_id = lighter_contract_id
+            lighter_client_config.tick_size = lighter_tick
+
         lighter_step = Decimal("0.001")
         base_amount_multiplier = getattr(self.lighter_client, "base_amount_multiplier", None)
         try:
