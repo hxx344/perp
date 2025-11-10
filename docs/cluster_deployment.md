@@ -1,6 +1,6 @@
 # 多 VPS 单边做市集群部署指南
 
-本文档说明如何在四台 VPS 上部署 Lighter 做市策略与 Binance 对冲的集群方案。方案包含一个 **协调器 (Coordinator)** 服务与四个 **代理 (Agent)** 节点：
+本文档说明如何在四台 VPS 上部署 Lighter 做市策略的集群方案，通过多节点协同完成对冲与风险控制。方案包含一个 **协调器 (Coordinator)** 服务与四个 **代理 (Agent)** 节点：
 
 - 1 台主做市 (Primary) VPS：负责在 Lighter 上做多或做空单边挂单。
 - 3 台对冲 (Hedge) VPS：负责相反方向的挂单以分散风险。
@@ -14,7 +14,7 @@
 | --- | --- |
 | 操作系统 | 任意支持 Python ≥3.10 的 Linux/Windows VPS |
 | 依赖安装 | `pip install -r requirements.txt` (工作目录 `perp-dex-tools`)
-| 环境变量 | Lighter API 凭证 (`API_KEY_PRIVATE_KEY`, `LIGHTER_ACCOUNT_INDEX`, `LIGHTER_API_KEY_INDEX`)，Binance Futures API (`BINANCE_API_KEY`, `BINANCE_API_SECRET`)，可放入 `.env`
+| 环境变量 | Lighter API 凭证 (`API_KEY_PRIVATE_KEY`, `LIGHTER_ACCOUNT_INDEX`, `LIGHTER_API_KEY_INDEX`)；若需启用外部 Binance 对冲，可额外设置 `BINANCE_API_KEY`, `BINANCE_API_SECRET`
 | 端口开放 | 协调器默认监听 `8080`，需要对四台 Agent 可达（建议仅内网或通过防火墙白名单） |
 | 时间同步 | 所有 VPS 需保留 NTP 自动对时，避免请求签名因时间漂移失败 |
 
@@ -28,8 +28,8 @@
 
 在协调器 VPS 上进入仓库目录，复制示例配置：
 
-```powershell
-Copy-Item .\cluster\config.example.json .\cluster\config.prod.json
+```bash
+cp cluster/config.example.json cluster/config.prod.json
 ```
 
 按实际风险偏好调整以下字段：
@@ -45,20 +45,14 @@ Copy-Item .\cluster\config.example.json .\cluster\config.prod.json
 
 激活虚拟环境后运行：
 
-```powershell
-python -m cluster.coordinator --config cluster\config.prod.json --host 0.0.0.0 --port 8080
+```bash
+python -m cluster.coordinator --config cluster/config.prod.json --host 0.0.0.0 --port 8080
 ```
-
-> **Linux 示例**：
->
-> ```bash
-> python -m cluster.coordinator --config cluster/config.prod.json --host 0.0.0.0 --port 8080
-> ```
 
 服务启动后可通过 `GET /status` 检查当前状态：
 
-```powershell
-Invoke-RestMethod -Uri "http://COORDINATOR_HOST:8080/status"
+```bash
+curl http://COORDINATOR_HOST:8080/status
 ```
 
 推荐使用 `tmux`、`screen` 或 `systemd` 等方式将服务常驻运行。
@@ -87,8 +81,11 @@ Invoke-RestMethod -Uri "http://COORDINATOR_HOST:8080/status"
 | `--command-poll-interval` | 轮询协调器指令的频率（秒） |
 | `--metrics-interval` | 上报净持仓的频率（秒） |
 | `--random-seed` | 可选；设定后随机下单区间可复现 |
+| `--disable-binance-hedge` | 关闭 Binance 对冲逻辑，仅依赖集群内节点对冲 |
 
 后续所有未识别参数都会传给 `strategies/lighter_simple_market_maker.py`。常见参数：
+
+> **提示**：集群模式通常只依赖主/对冲节点互相抵消仓位，可配合 `--disable-binance-hedge` 一并省略 Binance API 凭证。`--binance-symbol` 仍需提供（用于兼容旧版本配置），推荐填写与合约匹配的标的即可。
 
 - `--lighter-ticker ETH-PERP`
 - `--binance-symbol ETHUSDT`
@@ -98,8 +95,8 @@ Invoke-RestMethod -Uri "http://COORDINATOR_HOST:8080/status"
 
 ### 3.2 启动示例（主节点）
 
-```powershell
-python cluster\agent_runner.py \
+```bash
+python cluster/agent_runner.py \
   --coordinator-url http://10.0.0.5:8080 \
   --vps-id vps-primary-1 \
   --role primary \
@@ -109,13 +106,14 @@ python cluster\agent_runner.py \
   --binance-symbol ETHUSDT \
   --order-quantity 80 \
   --spread-bps 6 \
-  --hedge-threshold 400
+  --hedge-threshold 400 \
+  --disable-binance-hedge
 ```
 
 ### 3.3 启动示例（对冲节点）
 
-```powershell
-python cluster\agent_runner.py \
+```bash
+python cluster/agent_runner.py \
   --coordinator-url http://10.0.0.5:8080 \
   --vps-id vps-hedge-1 \
   --role hedge \
@@ -125,7 +123,8 @@ python cluster\agent_runner.py \
   --binance-symbol ETHUSDT \
   --order-quantity 60 \
   --spread-bps 6 \
-  --hedge-threshold 400
+  --hedge-threshold 400 \
+  --disable-binance-hedge
 ```
 
 > 对冲节点可复制此命令，修改 `--vps-id` 即可，例如 `vps-hedge-2`、`vps-hedge-3`。
@@ -186,28 +185,14 @@ WantedBy=multi-user.target
 
 Agent 节点可类似定义 `perp-agent@.service`，通过 `ExecStart` 将 `--vps-id` 设为 `%i`。
 
-### 6.2 Windows Task Scheduler
-
-1. 创建基本任务，触发条件选择“登录时/启动时”。
-2. 操作选择“启动程序”，指向 `powershell.exe`。
-3. 在“添加参数”里填写：
-
-```powershell
--NoProfile -ExecutionPolicy Bypass -File "C:\perp\start_agent.ps1"
-```
-
-4. 在 `start_agent.ps1` 中调用上述启动命令并确保虚拟环境已激活。
-
----
-
 ## 7. 常见问题
 
 | 问题 | 排查建议 |
 | --- | --- |
 | Agent 一直等待 `WAIT` | 检查协调器日志是否进入 `global_paused`，或 Agent 是否正确注册角色 |
-| 协调器无法访问 | 确认端口开放、防火墙白名单；使用 `curl`/`Invoke-RestMethod` 检查 |
+| 协调器无法访问 | 确认端口开放、防火墙白名单；使用 `curl` 检查 |
 | 下单数量未随机 | 确认协调器配置的区间，或 Agent 是否收到 `RUN` 命令；查看 Agent 日志中的数量区间 |
-| Binance 下单失败 | 检查 API 权限（需要 Futures 签名）、时间同步与最小手数 |
+| Binance 下单失败（如已启用） | 检查 API 权限（需要 Futures 签名）、时间同步与最小手数 |
 
 ---
 

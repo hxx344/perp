@@ -58,6 +58,7 @@ class SimpleMakerSettings:
     base_spread_bps: Decimal
     hedge_threshold: Decimal
     hedge_buffer: Decimal = Decimal("0")
+    enable_binance_hedge: bool = True
     inventory_limit: Optional[Decimal] = None
     config_path: str = "configs/hot_update.json"
     env_file: Optional[str] = None
@@ -334,43 +335,50 @@ class SimpleMarketMaker:
         timeout = aiohttp.ClientTimeout(total=15)
         self._session = aiohttp.ClientSession(timeout=timeout)
 
-        api_key = self._require_env("BINANCE_API_KEY")
-        api_secret = self._require_env("BINANCE_API_SECRET")
-        self._hedger = BinanceHedger(api_key, api_secret, self.settings.binance_symbol, self._session)
-
         initial_binance_position = Decimal("0")
         initial_binance_avg_price = Decimal("0")
         initial_binance_mark = Decimal("0")
-        try:
-            hedger_snapshot = await self._hedger.get_account_metrics()
-            position_size = hedger_snapshot.get("position_size", Decimal("0"))
-            position_notional = hedger_snapshot.get("position_notional", Decimal("0"))
-            position_entry_price = hedger_snapshot.get("position_entry_price", Decimal("0"))
-            position_unrealized = hedger_snapshot.get("position_unrealized_pnl", Decimal("0"))
-            self._binance_position_estimate = position_size
-            initial_binance_position = position_size
-            if position_size != 0 and position_notional != 0:
-                try:
-                    initial_binance_avg_price = abs(position_notional) / abs(position_size)
-                    initial_binance_mark = initial_binance_avg_price
-                except (InvalidOperation, ZeroDivisionError):
-                    initial_binance_avg_price = Decimal("0")
-                    initial_binance_mark = Decimal("0")
-            if position_size != 0 and position_entry_price > 0:
-                initial_binance_avg_price = position_entry_price
-                try:
-                    mark_candidate = position_entry_price + (position_unrealized / position_size)
-                    if mark_candidate > 0:
-                        initial_binance_mark = mark_candidate
-                except (InvalidOperation, ZeroDivisionError):
-                    pass
-            wallet_balance = hedger_snapshot.get("wallet_balance")
-            if wallet_balance is not None:
-                self._binance_initial_wallet_balance = wallet_balance
-        except Exception as exc:  # pragma: no cover - network dependent
-            self.logger.log(f"Failed to seed Binance position estimate: {exc}", "WARNING")
+
+        if self.settings.enable_binance_hedge:
+            api_key = self._require_env("BINANCE_API_KEY")
+            api_secret = self._require_env("BINANCE_API_SECRET")
+            self._hedger = BinanceHedger(api_key, api_secret, self.settings.binance_symbol, self._session)
+
+            try:
+                hedger_snapshot = await self._hedger.get_account_metrics()
+                position_size = hedger_snapshot.get("position_size", Decimal("0"))
+                position_notional = hedger_snapshot.get("position_notional", Decimal("0"))
+                position_entry_price = hedger_snapshot.get("position_entry_price", Decimal("0"))
+                position_unrealized = hedger_snapshot.get("position_unrealized_pnl", Decimal("0"))
+                self._binance_position_estimate = position_size
+                initial_binance_position = position_size
+                if position_size != 0 and position_notional != 0:
+                    try:
+                        initial_binance_avg_price = abs(position_notional) / abs(position_size)
+                        initial_binance_mark = initial_binance_avg_price
+                    except (InvalidOperation, ZeroDivisionError):
+                        initial_binance_avg_price = Decimal("0")
+                        initial_binance_mark = Decimal("0")
+                if position_size != 0 and position_entry_price > 0:
+                    initial_binance_avg_price = position_entry_price
+                    try:
+                        mark_candidate = position_entry_price + (position_unrealized / position_size)
+                        if mark_candidate > 0:
+                            initial_binance_mark = mark_candidate
+                    except (InvalidOperation, ZeroDivisionError):
+                        pass
+                wallet_balance = hedger_snapshot.get("wallet_balance")
+                if wallet_balance is not None:
+                    self._binance_initial_wallet_balance = wallet_balance
+            except Exception as exc:  # pragma: no cover - network dependent
+                self.logger.log(f"Failed to seed Binance position estimate: {exc}", "WARNING")
+                self._binance_position_estimate = Decimal("0")
+                self._binance_initial_wallet_balance = None
+        else:
+            self._hedger = None
             self._binance_position_estimate = Decimal("0")
             self._binance_initial_wallet_balance = None
+            self.logger.log("Binance hedging disabled; skipping external hedge initialization", "INFO")
 
         trading_config = TradingConfig(
             ticker=self.settings.lighter_ticker,
@@ -1368,6 +1376,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         type=_decimal,
         help="Optional maximum order quantity when sampling random size",
     )
+    parser.add_argument(
+        "--disable-binance-hedge",
+        action="store_true",
+        help="Disable Binance hedging; rely on directional VPS exposure balancing",
+    )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
     return SimpleMakerSettings(
@@ -1377,6 +1390,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         base_spread_bps=args.spread_bps,
         hedge_threshold=args.hedge_threshold,
         hedge_buffer=args.hedge_buffer,
+        enable_binance_hedge=not args.disable_binance_hedge,
         inventory_limit=args.inventory_limit,
         config_path=args.config_path,
         env_file=args.env_file,
