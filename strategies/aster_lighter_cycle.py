@@ -2002,15 +2002,16 @@ class HedgingCycleExecutor:
             await self.aster_client.connect()
             aster_contract_id, aster_tick = await self.aster_client.get_contract_attributes()
 
-        lighter_contract_id, lighter_tick = await self.lighter_client.get_contract_attributes()
+        lighter_contract_id_raw, lighter_tick = await self.lighter_client.get_contract_attributes()
+        lighter_contract_id = str(lighter_contract_id_raw)
 
         # Persist Lighter contract metadata for later emergency handling and price formatting
         self.lighter_config.contract_id = lighter_contract_id
         self.lighter_config.tick_size = lighter_tick
         lighter_client_config = getattr(self.lighter_client, "config", None)
         if lighter_client_config is not None:
-            lighter_client_config.contract_id = lighter_contract_id
-            lighter_client_config.tick_size = lighter_tick
+            setattr(lighter_client_config, "contract_id", lighter_contract_id)
+            setattr(lighter_client_config, "tick_size", lighter_tick)
 
         lighter_step = Decimal("0.001")
         base_amount_multiplier = getattr(self.lighter_client, "base_amount_multiplier", None)
@@ -3039,18 +3040,32 @@ class HedgingCycleExecutor:
             )
             return
 
-        if not self.lighter_config.contract_id:
-            fallback_client_config = getattr(self.lighter_client, "config", None)
-            if fallback_client_config is not None and getattr(fallback_client_config, "contract_id", None):
-                self.lighter_config.contract_id = fallback_client_config.contract_id
-            if self.lighter_config.tick_size <= 0 and fallback_client_config is not None:
+        contract_id_value = self.lighter_config.contract_id
+        if isinstance(contract_id_value, (int, Decimal)):
+            contract_id_value = str(contract_id_value)
+            self.lighter_config.contract_id = contract_id_value
+        elif contract_id_value is not None:
+            normalized_contract = str(contract_id_value).strip()
+            if normalized_contract:
+                self.lighter_config.contract_id = normalized_contract
+                contract_id_value = normalized_contract
+            else:
+                contract_id_value = None
+
+        fallback_client_config = getattr(self.lighter_client, "config", None)
+        if contract_id_value in (None, "") and fallback_client_config is not None:
+            fallback_contract = getattr(fallback_client_config, "contract_id", None)
+            if fallback_contract not in (None, ""):
+                self.lighter_config.contract_id = str(fallback_contract)
+                contract_id_value = self.lighter_config.contract_id
+            if self.lighter_config.tick_size <= 0:
                 tick_candidate = getattr(fallback_client_config, "tick_size", None)
                 if isinstance(tick_candidate, Decimal) and tick_candidate > 0:
                     self.lighter_config.tick_size = tick_candidate
 
-        if not self.lighter_config.contract_id:
+        if contract_id_value in (None, ""):
             try:
-                contract_id, tick_size = await self.lighter_client.get_contract_attributes()
+                contract_id_raw, tick_size = await self.lighter_client.get_contract_attributes()
             except Exception as exc:
                 self.logger.log(
                     f"Unable to recover Lighter contract metadata before emergency flatten: {exc}",
@@ -3058,15 +3073,16 @@ class HedgingCycleExecutor:
                 )
                 return
 
-            self.lighter_config.contract_id = contract_id
+            contract_id_value = str(contract_id_raw)
+            self.lighter_config.contract_id = contract_id_value
             if isinstance(tick_size, Decimal) and tick_size > 0:
                 self.lighter_config.tick_size = tick_size
 
             if fallback_client_config is not None:
-                fallback_client_config.contract_id = self.lighter_config.contract_id
-                fallback_client_config.tick_size = self.lighter_config.tick_size
+                setattr(fallback_client_config, "contract_id", self.lighter_config.contract_id)
+                setattr(fallback_client_config, "tick_size", self.lighter_config.tick_size)
 
-        if not self.lighter_config.contract_id:
+        if contract_id_value in (None, ""):
             self.logger.log("Lighter contract ID missing; cannot place emergency order", "ERROR")
             return
 

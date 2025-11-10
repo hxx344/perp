@@ -844,15 +844,18 @@ class LighterClient(BaseExchangeClient):
 
         order_book_details = market_summary.order_book_details[0]
         # Set contract_id to market name (Lighter uses market IDs as identifiers)
-        self.config.contract_id = market_info.market_id
+        contract_identifier = str(market_info.market_id)
+        setattr(self.config, "contract_id", contract_identifier)
         self.base_amount_multiplier = pow(10, market_info.supported_size_decimals)
         self.price_multiplier = pow(10, market_info.supported_price_decimals)
 
         try:
-            self.config.tick_size = Decimal("1") / (Decimal("10") ** order_book_details.price_decimals)
+            tick_size_value = Decimal("1") / (Decimal("10") ** order_book_details.price_decimals)
         except Exception:
             self.logger.log("Failed to get tick size", "ERROR")
             raise ValueError("Failed to get tick size")
+
+        setattr(self.config, "tick_size", tick_size_value)
 
         self.market_detail = order_book_details
         self.default_initial_margin_fraction = getattr(order_book_details, "default_initial_margin_fraction", None)
@@ -870,4 +873,4 @@ class LighterClient(BaseExchangeClient):
 
         await self._ensure_websocket_manager()
 
-        return self.config.contract_id, self.config.tick_size
+        return contract_identifier, tick_size_value
