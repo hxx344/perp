@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+  <meta charset="UTF-8" />
+  <title>Perp Cluster Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      color-scheme: dark light;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #141414;
+      color: #f0f0f0;
+    }
+    body {
+      margin: 0;
+      padding: 2rem;
+      background: linear-gradient(135deg, #141414 0%, #1f2933 100%);
+    }
+    h1 {
+      margin-bottom: 1rem;
+      font-size: 1.8rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1rem;
+    }
+    .card {
+      background: rgba(20, 20, 20, 0.75);
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.25);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      backdrop-filter: blur(6px);
+    }
+    .card h2 {
+      font-size: 1rem;
+      margin-top: 0;
+      margin-bottom: 0.5rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #8ab4ff;
+    }
+    .value {
+      font-size: 1.4rem;
+      font-weight: 600;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 1.5rem;
+      background: rgba(15, 23, 42, 0.6);
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    th, td {
+      padding: 0.75rem 0.9rem;
+      text-align: left;
+    }
+    th {
+      font-size: 0.85rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #9aa5b1;
+      background: rgba(15, 23, 42, 0.9);
+    }
+    tr:nth-child(even) {
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .badge-primary {
+      background: rgba(129, 140, 248, 0.18);
+      color: #a5b4fc;
+    }
+    .badge-hedge {
+      background: rgba(45, 212, 191, 0.18);
+      color: #5eead4;
+    }
+    .mode-run {
+      color: #34d399;
+      font-weight: 600;
+    }
+    .mode-pause {
+      color: #f87171;
+      font-weight: 600;
+    }
+    .phase-indicator {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .dot {
+      width: 0.6rem;
+      height: 0.6rem;
+      border-radius: 50%;
+    }
+    .dot-running { background: #34d399; }
+    .dot-initial { background: #a3a3a3; }
+    .dot-hedge_only { background: #f97316; }
+    .dot-cooldown { background: #60a5fa; }
+    footer {
+      margin-top: 2rem;
+      font-size: 0.8rem;
+      color: rgba(255, 255, 255, 0.55);
+      text-align: center;
+    }
+    a {
+      color: #8ab4ff;
+    }
+  </style>
+</head>
+<body>
+  <h1>Perp Cluster 实时面板</h1>
+  <div class="grid">
+    <div class="card">
+      <h2>阶段</h2>
+      <div class="phase-indicator">
+        <span id="phase-dot" class="dot dot-initial"></span>
+        <span id="phase">-</span>
+      </div>
+      <div id="phase-reason" style="margin-top:0.5rem;color:#fbbf24;font-size:0.85rem;"></div>
+    </div>
+    <div class="card">
+      <h2>净敞口</h2>
+      <div class="value" id="net-exposure">-</div>
+      <div style="font-size:0.85rem;color:#94a3b8;">
+        上限 <span id="limit">-</span> | 恢复阈值 <span id="resume">-</span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>主节点持仓</h2>
+      <div class="value" id="primary-exposure">-</div>
+      <div style="font-size:0.85rem;color:#94a3b8;">
+        周期上限 <span id="cycle-cap">-</span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>下次翻面</h2>
+      <div class="value" id="cooldown">-</div>
+    </div>
+  </div>
+
+  <table id="agents">
+    <thead>
+      <tr>
+        <th>VPS ID</th>
+        <th>角色</th>
+        <th>当前状态</th>
+        <th>簿记持仓</th>
+        <th>最近上报</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <footer>
+    自动刷新中，每 2 秒更新一次。若要调整阈值或模式，请编辑 coordinator 配置。
+  </footer>
+
+  <script>
+    const phaseDot = document.getElementById('phase-dot');
+    const phaseLabel = document.getElementById('phase');
+    const phaseReason = document.getElementById('phase-reason');
+    const netExposure = document.getElementById('net-exposure');
+    const primaryExposure = document.getElementById('primary-exposure');
+    const limitEl = document.getElementById('limit');
+    const resumeEl = document.getElementById('resume');
+    const cycleCapEl = document.getElementById('cycle-cap');
+    const cooldownEl = document.getElementById('cooldown');
+    const agentsBody = document.querySelector('#agents tbody');
+
+    function formatNumber(value) {
+      if (value === null || value === undefined) return '-';
+      const num = Number(value);
+      if (Number.isNaN(num)) return value;
+      return num.toLocaleString(undefined, { maximumFractionDigits: 4 });
+    }
+
+    function fmtTimestamp(ts) {
+      if (!ts) return '-';
+      const date = new Date(ts * 1000);
+      if (Number.isNaN(date.getTime())) return '-';
+      return date.toLocaleTimeString();
+    }
+
+    function updatePhaseDot(phase) {
+      phaseDot.className = 'dot';
+      phaseDot.classList.add(`dot-${phase}`);
+    }
+
+    function updateAgents(agents) {
+      agentsBody.innerHTML = '';
+      agents.forEach(agent => {
+        const row = document.createElement('tr');
+        const roleBadge = document.createElement('span');
+        roleBadge.classList.add('badge');
+        if (agent.role === 'primary') {
+          roleBadge.classList.add('badge-primary');
+        } else {
+          roleBadge.classList.add('badge-hedge');
+        }
+        roleBadge.textContent = agent.role;
+
+        const modeSpan = document.createElement('span');
+        modeSpan.textContent = agent.current_mode;
+        if (agent.current_mode === 'RUN') {
+          modeSpan.classList.add('mode-run');
+        } else if (agent.current_mode === 'PAUSE') {
+          modeSpan.classList.add('mode-pause');
+        }
+
+        row.innerHTML = `
+          <td>${agent.vps_id}</td>
+          <td></td>
+          <td></td>
+          <td>${formatNumber(agent.last_position)}</td>
+          <td>${fmtTimestamp(agent.last_report_ts)}</td>
+        `;
+        row.children[1].appendChild(roleBadge);
+        row.children[2].appendChild(modeSpan);
+        agentsBody.appendChild(row);
+      });
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch('/status', { cache: 'no-store' });
+        if (!response.ok) throw new Error('Status request failed');
+        const data = await response.json();
+
+        phaseLabel.textContent = data.phase;
+        updatePhaseDot(data.phase);
+        phaseReason.textContent = data.last_pause_reason || '';
+        netExposure.textContent = formatNumber(data.net_exposure);
+        primaryExposure.textContent = formatNumber(data.primary_exposure);
+        limitEl.textContent = formatNumber(data.global_limit);
+        resumeEl.textContent = formatNumber(data.resume_threshold);
+        cycleCapEl.textContent = formatNumber(data.cycle_inventory_cap);
+
+        if (data.cooldown_ends_at) {
+          const next = new Date(data.cooldown_ends_at * 1000);
+          cooldownEl.textContent = next.toLocaleTimeString();
+        } else {
+          cooldownEl.textContent = '-';
+        }
+
+        updateAgents(data.agents || []);
+      } catch (error) {
+        phaseReason.textContent = '无法获取状态：' + error.message;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>

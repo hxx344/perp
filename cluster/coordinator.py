@@ -27,13 +27,19 @@ import logging
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
 from aiohttp import web
+
+BASE_DIR = Path(__file__).resolve().parent
+DASHBOARD_PATH = BASE_DIR / "dashboard.html"
 from pydantic import BaseModel, Field, validator
 
 
 LOGGER = logging.getLogger("cluster.coordinator")
+
+
 
 
 Direction = Literal["long", "short"]
@@ -171,6 +177,7 @@ class ClusterState:
             "primary_direction": self.primary_direction,
             "phase": self.phase,
             "last_position": str(agent.last_position),
+            "last_report_ts": agent.last_report_ts,
         }
 
     async def get_cluster_status(self) -> Dict[str, Any]:
@@ -344,6 +351,7 @@ class CoordinatorApp:
                 web.post("/metrics", self.handle_metrics),
                 web.get("/command", self.handle_command),
                 web.get("/status", self.handle_status),
+                web.get("/dashboard", self.handle_dashboard),
             ]
         )
 
@@ -383,6 +391,13 @@ class CoordinatorApp:
     async def handle_status(self, request: web.Request) -> web.Response:
         status = await self.state.get_cluster_status()
         return web.json_response(status)
+
+    async def handle_dashboard(self, request: web.Request) -> web.Response:
+        try:
+            html = DASHBOARD_PATH.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise web.HTTPNotFound(text="dashboard asset missing; ensure cluster/dashboard.html exists")
+        return web.Response(text=html, content_type="text/html")
 
 
 def load_config(path: str) -> ClusterConfig:

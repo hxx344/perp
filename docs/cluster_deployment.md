@@ -160,6 +160,9 @@ python cluster/agent_runner.py \
 ## 4. 运维建议
 
 - **监控**：使用 `/status` 查看集群阶段 (`initial/running/hedge_only/cooldown`) 与各 Agent 持仓。
+- **监控**：
+  - `http://COORDINATOR_HOST:8080/dashboard` 提供开箱即用的网页面板，可在 Windows 浏览器中实时查看阶段、净敞口、各 VPS 状态等信息（每 2 秒自动刷新）。
+  - `GET /status` 仍可用于程序化监控，返回相同的 JSON 结构。
 - **日志**：
   - 协调器输出使用 `cluster.coordinator` logger。
   - Agent 日志通过 `cluster.agent` 与 `lighter-simple` tag 打印，建议收集到集中日志平台。
