@@ -34,8 +34,8 @@ cp cluster/config.example.json cluster/config.prod.json
 
 按实际风险偏好调整以下字段：
 
-- `global_exposure_limit`：全局净持仓绝对值阈值 (e.g. `1200` 表示 1200 合约)。
-- `global_resume_ratio`：恢复阈值占比，`0.65` 表示跌回 65% 时恢复交易。
+- `global_exposure_limit`：全局净持仓绝对值阈值 (e.g. `1200` 表示 1200 合约)。达到该阈值时协调器会进入 **hedge_only** 模式：暂停所有主节点的下单指令，仅保留对冲节点继续工作以把净仓位压回安全区。
+- `global_resume_ratio`：恢复阈值占比，`0.65` 表示净仓位回落到上限的 65% 时会自动让主节点恢复报单。
 - `cycle_inventory_cap`：主节点单周期最大持仓，达到后会进入冷却并准备翻面。
 - `cooldown_seconds`：翻面前的冷却期。
 - `initial_primary_direction`：`"long"` 或 `"short"`，指定主节点首个方向。
@@ -153,11 +153,13 @@ python cluster/agent_runner.py \
    - `PAUSE`：立即暂停挂单，等待下一步动作。
 4. 每次上报仓位时由协调器计算全局风险，必要时进入冷却或翻面。
 
+> **hedge_only 模式**：当全局净仓位达到 `global_exposure_limit` 时，协调器只会向主节点下发 `PAUSE`，对冲节点仍保持 `RUN` 状态继续对冲，直到净仓位回落到 `global_exposure_limit × global_resume_ratio` 以下，主节点才会收到恢复指令。
+
 ---
 
 ## 4. 运维建议
 
-- **监控**：使用 `/status` 查看集群阶段 (`initial/running/global_paused/cooldown`) 与各 Agent 持仓。
+- **监控**：使用 `/status` 查看集群阶段 (`initial/running/hedge_only/cooldown`) 与各 Agent 持仓。
 - **日志**：
   - 协调器输出使用 `cluster.coordinator` logger。
   - Agent 日志通过 `cluster.agent` 与 `lighter-simple` tag 打印，建议收集到集中日志平台。
@@ -204,7 +206,7 @@ Agent 节点可类似定义 `perp-agent@.service`，通过 `ExecStart` 将 `--vp
 
 | 问题 | 排查建议 |
 | --- | --- |
-| Agent 一直等待 `WAIT` | 检查协调器日志是否进入 `global_paused`，或 Agent 是否正确注册角色 |
+| Agent 一直等待 `WAIT` | 检查协调器日志是否进入 `hedge_only` 或主节点是否被暂停，以及 Agent 是否正确注册角色 |
 | 协调器无法访问 | 确认端口开放、防火墙白名单；使用 `curl` 检查 |
 | 下单数量未随机 | 确认协调器配置的区间，或 Agent 是否收到 `RUN` 命令；查看 Agent 日志中的数量区间 |
 | Binance 下单失败（如已启用） | 检查 API 权限（需要 Futures 签名）、时间同步与最小手数 |

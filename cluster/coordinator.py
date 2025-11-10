@@ -136,7 +136,7 @@ class ClusterState:
         self._lock = asyncio.Lock()
         self.agents: Dict[str, AgentStatus] = {}
         self.primary_direction: Direction = config.initial_primary_direction
-        self.phase: Literal["initial", "running", "global_paused", "cooldown"] = "initial"
+        self.phase: Literal["initial", "running", "hedge_only", "cooldown"] = "initial"
         self.cooldown_ends_at: Optional[float] = None
         self._last_global_reason: Optional[str] = None
 
@@ -242,19 +242,19 @@ class ClusterState:
         net_exposure = self._net_exposure()
         abs_net = abs(net_exposure)
 
-        if self.phase != "global_paused" and abs_net >= self.config.global_exposure_limit:
+        if self.phase != "hedge_only" and abs_net >= self.config.global_exposure_limit:
             reason = (
                 f"global exposure {abs_net} exceeds limit {self.config.global_exposure_limit}"
             )
             LOGGER.warning(reason)
-            self.phase = "global_paused"
+            self.phase = "hedge_only"
             self._last_global_reason = reason
-            self._broadcast_pause(reason=reason)
+            self._enforce_hedge_only(reason=reason)
             return
 
-        if self.phase == "global_paused":
+        if self.phase == "hedge_only":
             if abs_net <= self.config.resume_threshold():
-                LOGGER.info("Exposure %s within resume threshold; resuming", abs_net)
+                LOGGER.info("Exposure %s within resume threshold; resuming primary quoting", abs_net)
                 self.phase = "running"
                 self._last_global_reason = None
                 self._broadcast_run(reason="resume")
@@ -292,6 +292,23 @@ class ClusterState:
         for agent in self.agents.values():
             agent.queue_command(AgentCommand(action="PAUSE", reason=reason))
 
+    def _enforce_hedge_only(self, *, reason: str) -> None:
+        for agent in self.agents.values():
+            if agent.role == "primary":
+                agent.queue_command(AgentCommand(action="PAUSE", reason=reason))
+                continue
+
+            side = self._side_for_agent(agent.role)
+            quantity_range = self.config.hedge_quantity_range
+            agent.queue_command(
+                AgentCommand(
+                    action="RUN",
+                    side=side,
+                    quantity=quantity_range.as_payload(),
+                    reason=reason,
+                )
+            )
+
     def _reverse_primary_direction(self) -> None:
         self.primary_direction = "short" if self.primary_direction == "long" else "long"
         LOGGER.info("New primary direction: %s", self.primary_direction)
@@ -304,11 +321,12 @@ class ClusterState:
         return "buy" if desired == "long" else "sell"
 
     def _net_exposure(self) -> Decimal:
-        return sum(agent.last_position for agent in self.agents.values())
+        return sum((agent.last_position for agent in self.agents.values()), Decimal("0"))
 
     def _primary_exposure(self) -> Decimal:
         return sum(
-            agent.last_position for agent in self.agents.values() if agent.role == "primary"
+            (agent.last_position for agent in self.agents.values() if agent.role == "primary"),
+            Decimal("0"),
         )
 
 
