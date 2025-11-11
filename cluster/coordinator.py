@@ -90,6 +90,7 @@ class ClusterConfig(BaseModel):
     flatten_tolerance: Decimal = Field(default=Decimal("0.01"), ge=Decimal("0"))
     dashboard_username: Optional[str] = None
     dashboard_password: Optional[str] = None
+    agent_quantity_overrides: Dict[str, QuantityRange] = Field(default_factory=dict)
 
     def resume_threshold(self) -> Decimal:
         return self.global_exposure_limit * Decimal(str(self.global_resume_ratio))
@@ -185,6 +186,7 @@ class ClusterState:
         return "hedge" if hedges <= primaries else "primary"
 
     def _agent_snapshot(self, agent: AgentStatus) -> Dict[str, Any]:
+        quantity_range = self._quantity_range_for_agent(agent)
         return {
             "vps_id": agent.vps_id,
             "role": agent.role,
@@ -195,6 +197,8 @@ class ClusterState:
             "last_report_ts": agent.last_report_ts,
             "available_balance": str(agent.available_balance),
             "total_account_value": str(agent.total_account_value),
+            "quantity_min": str(quantity_range.minimum),
+            "quantity_max": str(quantity_range.maximum),
         }
 
     async def get_cluster_status(self) -> Dict[str, Any]:
@@ -346,9 +350,7 @@ class ClusterState:
     def _broadcast_run(self, *, reason: Optional[str]) -> None:
         for agent in self.agents.values():
             side = self._side_for_agent(agent.role)
-            quantity_range = (
-                self.config.primary_quantity_range if agent.role == "primary" else self.config.hedge_quantity_range
-            )
+            quantity_range = self._quantity_range_for_agent(agent)
             agent.queue_command(
                 AgentCommand(
                     action="RUN",
@@ -467,11 +469,7 @@ class ClusterState:
                 continue
 
             side = self._side_for_agent(agent.role)
-            quantity_range = (
-                self.config.primary_quantity_range
-                if agent.role == "primary"
-                else self.config.hedge_quantity_range
-            )
+            quantity_range = self._quantity_range_for_agent(agent)
             agent.queue_command(
                 AgentCommand(
                     action="RUN",
@@ -484,6 +482,16 @@ class ClusterState:
     def _reverse_primary_direction(self) -> None:
         self.primary_direction = "short" if self.primary_direction == "long" else "long"
         LOGGER.info("New primary direction: %s", self.primary_direction)
+
+    def _quantity_range_for_agent(self, agent: AgentStatus) -> QuantityRange:
+        override = self.config.agent_quantity_overrides.get(agent.vps_id)
+        if override is not None:
+            return override
+        return (
+            self.config.primary_quantity_range
+            if agent.role == "primary"
+            else self.config.hedge_quantity_range
+        )
 
     def _side_for_agent(self, role: AgentRole) -> Side:
         # Primary follows primary_direction, hedge is opposite.

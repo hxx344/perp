@@ -204,6 +204,7 @@
         <th>VPS ID</th>
         <th>角色</th>
         <th>当前状态</th>
+        <th>下单区间</th>
         <th>余额</th>
         <th>持仓</th>
         <th>最近上报</th>
@@ -241,6 +242,13 @@
       return num.toLocaleString(undefined, { maximumFractionDigits: 4 });
     }
 
+    function formatRange(min, max) {
+      const minText = formatNumber(min);
+      const maxText = formatNumber(max);
+      if (minText === '-' && maxText === '-') return '-';
+      return `${minText} ~ ${maxText}`;
+    }
+
     function fmtTimestamp(ts) {
       if (!ts) return '-';
       const date = new Date(ts * 1000);
@@ -274,10 +282,13 @@
           modeSpan.classList.add('mode-pause');
         }
 
+        const quantityRange = formatRange(agent.quantity_min, agent.quantity_max);
+
         row.innerHTML = `
           <td>${agent.vps_id}</td>
           <td></td>
           <td></td>
+          <td>${quantityRange}</td>
           <td>${formatNumber(agent.available_balance)}</td>
           <td>${formatNumber(agent.last_position)}</td>
           <td>${fmtTimestamp(agent.last_report_ts)}</td>

@@ -12,6 +12,16 @@
     "minimum": "40",
     "maximum": "100"
   },
+  "agent_quantity_overrides": {
+    "vps-primary-1": {
+      "minimum": "70",
+      "maximum": "110"
+    },
+    "vps-hedge-1": {
+      "minimum": "35",
+      "maximum": "75"
+    }
+  },
   "dashboard_username": "admin",
   "dashboard_password": "changeme",
   "flatten_tolerance": "0.5"

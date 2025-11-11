@@ -42,6 +42,16 @@ cp cluster/config.example.json cluster/config.prod.json
 - `cooldown_seconds`：翻面前的冷却期。
 - `initial_primary_direction`：`"long"` 或 `"short"`，指定主节点首个方向。
 - `primary_quantity_range` / `hedge_quantity_range`：协调器发给各角色的下单区间，Agent 会在区间内随机。
+- `agent_quantity_overrides`：可选的 per-VPS 配置（以 `vps_id` 为键），用于为特定机器替换默认下单区间。例如：
+
+  ```json
+  "agent_quantity_overrides": {
+    "vps-primary-1": { "minimum": "70", "maximum": "110" },
+    "vps-hedge-1": { "minimum": "35", "maximum": "75" }
+  }
+  ```
+
+  若某台 VPS 未在该映射中出现，则仍回退到角色对应的 `primary_quantity_range` 或 `hedge_quantity_range`。
 - `dashboard_username` / `dashboard_password`：可选，若设置则 `/dashboard` 页面启用 HTTP Basic 认证；留空表示无需登录。
 - `flatten_tolerance`：紧急清仓完成判定的残余仓位容忍度，默认 `0.01`。当所有 VPS 仓位绝对值低于该值时，协调器会认为清仓完成并统一下发 `PAUSE`。
 
