@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, cast
+from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, cast
 from urllib.parse import urlencode
 
 import aiohttp
@@ -407,6 +407,7 @@ class SimpleMarketMaker:
         lighter_client.setup_order_update_handler(self._handle_lighter_order_update)
         self._lighter_client = lighter_client
         await self._lighter_client.connect()
+        await self._ensure_lighter_account_tier()
         contract_id, tick_size = await self._lighter_client.get_contract_attributes()
         trading_config.contract_id = contract_id
         trading_config.tick_size = tick_size
@@ -437,6 +438,48 @@ class SimpleMarketMaker:
             f"order_qty={self.settings.order_quantity}",
             "INFO",
         )
+
+    async def _ensure_lighter_account_tier(self) -> None:
+        if self._lighter_client is None:
+            return
+
+        target_tier = os.getenv("LIGHTER_TARGET_ACCOUNT_TIER", "ADVANCED") or "ADVANCED"
+        target_tier = target_tier.strip()
+        if not target_tier:
+            self.logger.log(
+                "LIGHTER_TARGET_ACCOUNT_TIER is empty; skipping automatic tier update",
+                "INFO",
+            )
+            return
+
+        target_tier_id_env = os.getenv("LIGHTER_TARGET_ACCOUNT_TIER_ID")
+        target_tier_id: Optional[int] = None
+        if target_tier_id_env:
+            try:
+                target_tier_id = int(target_tier_id_env)
+            except ValueError:
+                self.logger.log(
+                    f"Invalid LIGHTER_TARGET_ACCOUNT_TIER_ID '{target_tier_id_env}'; ignoring value",
+                    "WARNING",
+                )
+
+        ensure_method = getattr(self._lighter_client, "ensure_account_tier", None)
+        if not callable(ensure_method):  # pragma: no cover - unexpected client regression
+            self.logger.log(
+                "Current Lighter client does not support tier management; skipping auto upgrade",
+                "WARNING",
+            )
+            return
+
+        ensure_callable = cast(Callable[..., Awaitable[bool]], ensure_method)
+
+        try:
+            await ensure_callable(target_tier=target_tier, target_tier_id=target_tier_id)
+        except Exception as exc:  # pragma: no cover - network/SDK failures
+            self.logger.log(
+                f"Failed to enforce Lighter account tier '{target_tier}': {exc}",
+                "ERROR",
+            )
 
     async def _configure_lighter_leverage(self) -> None:
         if self._lighter_client is None:

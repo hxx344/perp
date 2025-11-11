@@ -315,6 +315,119 @@ class LighterClient(BaseExchangeClient):
             self.logger.log(f"Error connecting to Lighter: {e}", "ERROR")
             raise
 
+    async def ensure_account_tier(
+        self,
+        target_tier: str = "ADVANCED",
+        *,
+        target_tier_id: Optional[int] = None,
+    ) -> bool:
+        """Ensure the configured Lighter account is upgraded to the desired tier."""
+
+        normalized_tier = (target_tier or "").strip().upper()
+        if not normalized_tier:
+            self.logger.log(
+                "Skipped Lighter tier enforcement because no target tier was provided",
+                "WARNING",
+            )
+            return False
+
+        if self.api_client is None:
+            self.logger.log(
+                "Cannot enforce Lighter account tier: API client not initialized",
+                "WARNING",
+            )
+            return False
+
+        try:
+            account_api = lighter.AccountApi(self.api_client)
+        except Exception as exc:  # pragma: no cover - SDK construction failure
+            self.logger.log(
+                f"Failed to construct Lighter AccountApi for tier enforcement: {exc}",
+                "ERROR",
+            )
+            return False
+
+        current_account_type: Optional[int] = None
+        try:
+            account_snapshot = await account_api.account(by="index", value=str(self.account_index))
+        except Exception as exc:
+            self.logger.log(
+                f"Unable to query Lighter account details before tier change: {exc}",
+                "WARNING",
+            )
+        else:
+            accounts = getattr(account_snapshot, "accounts", None)
+            if isinstance(accounts, list):
+                for entry in accounts:
+                    account_idx = getattr(entry, "account_index", getattr(entry, "index", None))
+                    if account_idx == self.account_index:
+                        current_account_type = getattr(entry, "account_type", None)
+                        break
+
+        if target_tier_id is not None and current_account_type == target_tier_id:
+            self.logger.log(
+                f"Lighter account {self.account_index} already at tier id {target_tier_id}",
+                "INFO",
+            )
+            return True
+
+        try:
+            response = await account_api.change_account_tier(self.account_index, normalized_tier)
+        except Exception as exc:
+            self.logger.log(
+                f"Failed to change Lighter account tier to {normalized_tier}: {exc}",
+                "ERROR",
+            )
+            return False
+
+        response_code = getattr(response, "code", None)
+        response_message = getattr(response, "message", "")
+        if response_code not in (None, 200):
+            self.logger.log(
+                f"Tier change request for account {self.account_index} returned code {response_code}: {response_message}",
+                "WARNING",
+            )
+        else:
+            message = f" ({response_message})" if response_message else ""
+            self.logger.log(
+                f"Requested tier '{normalized_tier}' for Lighter account {self.account_index}{message}",
+                "INFO",
+            )
+
+        if target_tier_id is None:
+            return True
+
+        try:
+            refreshed_snapshot = await account_api.account(by="index", value=str(self.account_index))
+        except Exception as exc:
+            self.logger.log(
+                f"Unable to confirm Lighter tier change after request: {exc}",
+                "WARNING",
+            )
+            return True
+
+        refreshed_accounts = getattr(refreshed_snapshot, "accounts", None)
+        new_account_type: Optional[int] = None
+        if isinstance(refreshed_accounts, list):
+            for entry in refreshed_accounts:
+                account_idx = getattr(entry, "account_index", getattr(entry, "index", None))
+                if account_idx == self.account_index:
+                    new_account_type = getattr(entry, "account_type", None)
+                    break
+
+        if new_account_type == target_tier_id:
+            self.logger.log(
+                f"Confirmed Lighter account {self.account_index} tier id {target_tier_id} after change",
+                "INFO",
+            )
+        else:
+            self.logger.log(
+                f"Unable to confirm Lighter account tier id {target_tier_id}; current value {new_account_type}",
+                "WARNING",
+            )
+
+        return True
+
     async def wait_for_market_data(self, timeout: float = 5.0) -> bool:
         """Block until the websocket provides bid/ask data or timeout."""
         if hasattr(self, 'ws_manager') and self.ws_manager:
