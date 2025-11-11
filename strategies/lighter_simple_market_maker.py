@@ -443,7 +443,7 @@ class SimpleMarketMaker:
         if self._lighter_client is None:
             return
 
-        target_tier = os.getenv("LIGHTER_TARGET_ACCOUNT_TIER", "ADVANCED") or "ADVANCED"
+        target_tier = os.getenv("LIGHTER_TARGET_ACCOUNT_TIER", "premium") or "premium"
         target_tier = target_tier.strip()
         if not target_tier:
             self.logger.log(

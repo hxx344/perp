@@ -317,7 +317,7 @@ class LighterClient(BaseExchangeClient):
 
     async def ensure_account_tier(
         self,
-        target_tier: str = "ADVANCED",
+        target_tier: str = "premium",
         *,
         target_tier_id: Optional[int] = None,
     ) -> bool:
@@ -326,7 +326,7 @@ class LighterClient(BaseExchangeClient):
         def _emit(level: str, message: str) -> None:
             self.logger.log(message, level)
 
-        normalized_tier = (target_tier or "").strip().upper()
+        normalized_tier = (target_tier or "").strip()
         if not normalized_tier:
             _emit(
                 "WARNING",
