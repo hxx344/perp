@@ -73,6 +73,7 @@ class LighterClient(BaseExchangeClient):
         self.min_initial_margin_fraction: Optional[int] = None
         self.default_leverage: Optional[int] = None
         self.max_leverage: Optional[int] = None
+        self._last_confirmed_tier_name: Optional[str] = None
 
     def prune_caches(self, *, max_orders: int = 1000) -> None:
         """Bound in-memory caches to avoid unbounded growth.
@@ -327,12 +328,21 @@ class LighterClient(BaseExchangeClient):
             self.logger.log(message, level)
 
         normalized_tier = (target_tier or "").strip()
+        canonical_target = normalized_tier.casefold()
         if not normalized_tier:
             _emit(
                 "WARNING",
                 "Skipped Lighter tier enforcement because no target tier was provided",
             )
             return False
+
+        cached_tier = getattr(self, "_last_confirmed_tier_name", None)
+        if cached_tier and cached_tier.casefold() == canonical_target:
+            _emit(
+                "INFO",
+                f"Skipping Lighter tier enforcement; cached tier '{cached_tier}' already matches target '{normalized_tier}'",
+            )
+            return True
 
         if self.api_client is None:
             _emit(
@@ -379,6 +389,7 @@ class LighterClient(BaseExchangeClient):
             return False
 
         current_account_type: Optional[int] = None
+        current_account_tier_name: Optional[str] = None
         try:
             account_snapshot = await account_api.account(by="index", value=str(self.account_index))
         except Exception as exc:
@@ -394,13 +405,32 @@ class LighterClient(BaseExchangeClient):
                     account_idx = getattr(entry, "account_index", getattr(entry, "index", None))
                     if account_idx == self.account_index:
                         current_account_type = getattr(entry, "account_type", None)
+                        extras = getattr(entry, "additional_properties", None)
+                        if isinstance(extras, dict):
+                            for key, value in extras.items():
+                                if isinstance(key, str) and "tier" in key.lower() and isinstance(value, str):
+                                    stripped = value.strip()
+                                    if stripped:
+                                        current_account_tier_name = stripped
+                                        break
+                        if current_account_tier_name:
+                            break
                         break
+
+        if current_account_tier_name and current_account_tier_name.casefold() == canonical_target:
+            self._last_confirmed_tier_name = current_account_tier_name
+            _emit(
+                "INFO",
+                f"Lighter account {self.account_index} already at tier '{current_account_tier_name}'; skipping change request",
+            )
+            return True
 
         if target_tier_id is not None and current_account_type == target_tier_id:
             _emit(
                 "INFO",
                 f"Lighter account {self.account_index} already at tier id {target_tier_id}",
             )
+            self._last_confirmed_tier_name = normalized_tier
             return True
 
         _emit(
@@ -425,14 +455,22 @@ class LighterClient(BaseExchangeClient):
 
         response_code = getattr(response, "code", None)
         response_message = getattr(response, "message", "")
-        success_codes = {0, 1, 200, None}
+        success_codes = {0, 1, 200, 62003, None}
         success = response_code in success_codes
         message_suffix = f" ({response_message})" if response_message else ""
+        if response_code == 62003:
+            _emit(
+                "INFO",
+                f"Tier change request skipped: account already in '{normalized_tier}'{message_suffix}",
+            )
+            self._last_confirmed_tier_name = normalized_tier
+            return True
         if success:
             _emit(
                 "INFO",
                 f"Tier change request for account {self.account_index} acknowledged with code {response_code}{message_suffix}",
             )
+            self._last_confirmed_tier_name = normalized_tier
         else:
             _emit(
                 "WARNING",
@@ -462,6 +500,8 @@ class LighterClient(BaseExchangeClient):
                 "INFO",
                 f"Lighter account {self.account_index} tier status: before={current_account_type} -> after={new_account_type}",
             )
+            if target_tier_id is None:
+                self._last_confirmed_tier_name = normalized_tier
 
         if target_tier_id is not None and new_account_type is not None:
             if new_account_type != target_tier_id:
@@ -478,6 +518,9 @@ class LighterClient(BaseExchangeClient):
                 "Lighter account tier unchanged after request; verify permissions or target tier",
             )
             return success
+
+        if success:
+            self._last_confirmed_tier_name = normalized_tier
 
         return success
 
