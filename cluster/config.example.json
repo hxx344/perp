@@ -11,5 +11,8 @@
   "hedge_quantity_range": {
     "minimum": "40",
     "maximum": "100"
-  }
+  },
+  "dashboard_username": "admin",
+  "dashboard_password": "changeme",
+  "flatten_tolerance": "0.5"
 }

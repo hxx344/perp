@@ -307,6 +307,8 @@ class SimpleMarketMaker:
         self._rng = random.Random()
         self._quantity_step = self._derive_quantity_step(settings.order_quantity)
         self._dynamic_quantity_range = self._initialize_quantity_range(settings)
+        self._flatten_lock = asyncio.Lock()
+        self._flatten_active = False
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -1310,6 +1312,140 @@ class SimpleMarketMaker:
 
     def is_paused(self) -> bool:
         return self._external_pause
+
+    async def emergency_flatten(
+        self,
+        *,
+        tolerance: Optional[Decimal] = None,
+        price_offset_ticks: int = 2,
+        max_iterations: int = 30,
+        sleep_interval: float = 1.5,
+    ) -> None:
+        if self._lighter_client is None or self._lighter_config is None:
+            self.logger.log("Emergency flatten skipped: Lighter client unavailable", "ERROR")
+            return
+
+        async with self._flatten_lock:
+            if self._flatten_active:
+                self.logger.log("Emergency flatten already in progress; ignoring duplicate request", "WARNING")
+                return
+            self._flatten_active = True
+
+            try:
+                tick_size = self._lighter_config.tick_size
+                tol = tolerance if tolerance is not None else Decimal("0.01")
+                if tol < 0:
+                    tol = Decimal("0")
+                if tol == 0 and tick_size > 0:
+                    tol = tick_size / Decimal("10")
+
+                self.logger.log(
+                    (
+                        "Emergency flatten initiated (tolerance={tol}, offset_ticks={offset})"
+                    ).format(
+                        tol=self._format_decimal(tol, 6),
+                        offset=price_offset_ticks,
+                    ),
+                    "WARNING",
+                )
+
+                self.pause_trading()
+                await self._cancel_all_orders()
+                await self._update_state_guarded(force=True)
+
+                for attempt in range(1, max_iterations + 1):
+                    net_position = self._lighter_inventory_base
+                    if abs(net_position) <= tol:
+                        self.logger.log(
+                            (
+                                "Emergency flatten complete after {attempt} iterations; residual={residual}"
+                            ).format(
+                                attempt=attempt - 1,
+                                residual=self._format_decimal(net_position, 6),
+                            ),
+                            "WARNING",
+                        )
+                        break
+
+                    side = "sell" if net_position > 0 else "buy"
+                    quantity = abs(net_position)
+                    if quantity <= 0:
+                        self.logger.log("Emergency flatten residual quantity zero; nothing to do", "INFO")
+                        break
+
+                    try:
+                        best_bid, best_ask = await self._lighter_client.fetch_bbo_prices(
+                            self._lighter_config.contract_id
+                        )
+                    except Exception as exc:
+                        self.logger.log(f"Failed to load order book during flatten: {exc}", "ERROR")
+                        await asyncio.sleep(sleep_interval)
+                        await self._update_state_guarded(force=True)
+                        continue
+
+                    price = best_bid if side == "sell" else best_ask
+                    if price <= 0:
+                        self.logger.log("Emergency flatten aborted: invalid best bid/ask snapshot", "ERROR")
+                        break
+
+                    offset_ticks = max(0, price_offset_ticks)
+                    offset = (Decimal(offset_ticks) * tick_size) if tick_size > 0 else Decimal("0")
+                    if side == "sell" and offset > 0:
+                        price = max(tick_size if tick_size > 0 else Decimal("0"), price - offset)
+                    elif side == "buy" and offset > 0:
+                        price = price + offset
+
+                    try:
+                        order_result = await self._lighter_client.place_limit_order(
+                            self._lighter_config.contract_id,
+                            quantity,
+                            price,
+                            side,
+                        )
+                    except Exception as exc:
+                        self.logger.log(f"Emergency flatten order exception: {exc}", "ERROR")
+                        await asyncio.sleep(sleep_interval)
+                        await self._update_state_guarded(force=True)
+                        continue
+
+                    if not order_result.success:
+                        self.logger.log(
+                            (
+                                "Emergency flatten order failed: {error}"
+                            ).format(error=order_result.error_message or "unknown error"),
+                            "ERROR",
+                        )
+                        await asyncio.sleep(sleep_interval)
+                        await self._update_state_guarded(force=True)
+                        continue
+
+                    self.logger.log(
+                        (
+                            "Emergency flatten order submitted ({side}) qty={qty} @ {price} (attempt {attempt})"
+                        ).format(
+                            side=side,
+                            qty=self._format_decimal(quantity, 6),
+                            price=self._format_decimal(price, 6),
+                            attempt=attempt,
+                        ),
+                        "WARNING",
+                    )
+
+                    await asyncio.sleep(max(sleep_interval, self.settings.loop_sleep_seconds))
+                    await self._update_state_guarded(force=True)
+                    await self._cancel_all_orders()
+                else:
+                    residual = self._format_decimal(self._lighter_inventory_base, 6)
+                    self.logger.log(
+                        (
+                            "Emergency flatten max iterations reached; residual position {residual}"
+                        ).format(residual=residual),
+                        "ERROR",
+                    )
+            finally:
+                await self._cancel_all_orders()
+                self._flatten_active = False
+                self.pause_trading()
 
     def export_position_snapshot(self) -> Dict[str, str]:
         lighter_position = self._format_decimal(self._lighter_inventory_base, 6)

@@ -40,6 +40,8 @@ cp cluster/config.example.json cluster/config.prod.json
 - `cooldown_seconds`：翻面前的冷却期。
 - `initial_primary_direction`：`"long"` 或 `"short"`，指定主节点首个方向。
 - `primary_quantity_range` / `hedge_quantity_range`：协调器发给各角色的下单区间，Agent 会在区间内随机。
+- `dashboard_username` / `dashboard_password`：可选，若设置则 `/dashboard` 页面启用 HTTP Basic 认证；留空表示无需登录。
+- `flatten_tolerance`：紧急清仓完成判定的残余仓位容忍度，默认 `0.01`。当所有 VPS 仓位绝对值低于该值时，协调器会认为清仓完成并统一下发 `PAUSE`。
 
 ### 2.2 启动服务
 
@@ -164,7 +166,7 @@ python cluster/agent_runner.py \
 
 - **监控**：使用 `/status` 查看集群阶段 (`initial/running/hedge_only/cooldown`) 与各 Agent 持仓。
 - **监控**：
-  - `http://COORDINATOR_HOST:8080/dashboard` 提供开箱即用的网页面板，可在 Windows 浏览器中实时查看阶段、净敞口、各 VPS 状态等信息（每 2 秒自动刷新）。
+  - `http://COORDINATOR_HOST:8080/dashboard` 提供开箱即用的网页面板，可在 Windows 浏览器中实时查看阶段、净敞口、各 VPS 状态等信息（每 2 秒自动刷新）。若配置了 `dashboard_username` / `dashboard_password`，浏览器会弹出登录框，输入相应账户即可访问。页面右上方新增“紧急清仓”按钮，会向协调器发出清仓指令：所有 Agent 会暂停普通循环、根据自身仓位方向挂对手价限价单直至仓位回到 `flatten_tolerance` 定义的容忍范围内。
   - `GET /status` 仍可用于程序化监控，返回相同的 JSON 结构。
 - **日志**：
   - 协调器输出使用 `cluster.coordinator` logger。

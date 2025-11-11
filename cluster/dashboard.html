@@ -20,6 +20,39 @@
       margin-bottom: 1rem;
       font-size: 1.8rem;
     }
+    .actions {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .action-btn {
+      appearance: none;
+      border: none;
+      border-radius: 999px;
+      padding: 0.55rem 1.2rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      background: linear-gradient(135deg, #f97316, #facc15);
+      color: #1f2937;
+      box-shadow: 0 8px 20px rgba(249, 115, 22, 0.35);
+      transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+    }
+    .action-btn:hover:not([disabled]) {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 24px rgba(249, 115, 22, 0.45);
+    }
+    .action-btn[disabled] {
+      cursor: not-allowed;
+      opacity: 0.6;
+      box-shadow: none;
+    }
+    .actions small {
+      color: #9ba3af;
+      font-size: 0.85rem;
+    }
     .grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -109,6 +142,7 @@
     .dot-initial { background: #a3a3a3; }
     .dot-hedge_only { background: #f97316; }
     .dot-cooldown { background: #60a5fa; }
+  .dot-flatten { background: #facc15; }
     footer {
       margin-top: 2rem;
       font-size: 0.8rem;
@@ -122,6 +156,10 @@
 </head>
 <body>
   <h1>Perp Cluster 实时面板</h1>
+  <div class="actions">
+    <button id="flattenBtn" class="action-btn">紧急清仓</button>
+    <small id="flattenStatus">立即让所有节点挂出归零方向的限价单，执行过程中会暂停普通循环。</small>
+  </div>
   <div class="grid">
     <div class="card">
       <h2>阶段</h2>
@@ -179,6 +217,8 @@
     const cycleCapEl = document.getElementById('cycle-cap');
     const cooldownEl = document.getElementById('cooldown');
     const agentsBody = document.querySelector('#agents tbody');
+  const flattenBtn = document.getElementById('flattenBtn');
+  const flattenStatus = document.getElementById('flattenStatus');
 
     function formatNumber(value) {
       if (value === null || value === undefined) return '-';
@@ -256,10 +296,45 @@
         }
 
         updateAgents(data.agents || []);
+
+        if (data.flatten_active) {
+          flattenBtn.disabled = true;
+          flattenBtn.textContent = '清仓执行中…';
+          flattenStatus.textContent = '紧急清仓指令已下发，等待所有节点仓位归零后会自动暂停。';
+        } else {
+          flattenBtn.disabled = false;
+          flattenBtn.textContent = '紧急清仓';
+          flattenStatus.textContent = '立即让所有节点挂出归零方向的限价单，执行过程中会暂停普通循环。';
+        }
       } catch (error) {
         phaseReason.textContent = '无法获取状态：' + error.message;
       }
     }
+
+    async function triggerFlatten() {
+      const confirmed = window.confirm('确定要触发紧急清仓吗？所有节点将尝试把仓位降到 0，并暂停常规交易。');
+      if (!confirmed) return;
+      try {
+        flattenBtn.disabled = true;
+        flattenBtn.textContent = '提交中…';
+        const response = await fetch('/flatten', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'Dashboard flatten request' }),
+        });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || response.statusText);
+        }
+        await refresh();
+      } catch (error) {
+        phaseReason.textContent = '清仓请求失败：' + error.message;
+      } finally {
+        setTimeout(refresh, 1000);
+      }
+    }
+
+    flattenBtn.addEventListener('click', triggerFlatten);
 
     refresh();
     setInterval(refresh, 2000);

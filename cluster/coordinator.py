@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import time
@@ -85,16 +87,20 @@ class ClusterConfig(BaseModel):
     initial_primary_direction: Direction = "long"
     primary_quantity_range: QuantityRange
     hedge_quantity_range: QuantityRange
+    flatten_tolerance: Decimal = Field(default=Decimal("0.01"), ge=Decimal("0"))
+    dashboard_username: Optional[str] = None
+    dashboard_password: Optional[str] = None
 
     def resume_threshold(self) -> Decimal:
         return self.global_exposure_limit * Decimal(str(self.global_resume_ratio))
 
 
 class AgentCommand(BaseModel):
-    action: Literal["WAIT", "RUN", "PAUSE"]
+    action: Literal["WAIT", "RUN", "PAUSE", "FLATTEN"]
     side: Optional[Side] = None
     quantity: Optional[Dict[str, str]] = None
     reason: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
     issued_at: float = Field(default_factory=time.time)
 
     def as_payload(self) -> Dict[str, Any]:
@@ -108,6 +114,8 @@ class AgentCommand(BaseModel):
             payload["quantity"] = self.quantity
         if self.reason:
             payload["reason"] = self.reason
+        if self.metadata is not None:
+            payload["metadata"] = self.metadata
         return payload
 
 
@@ -120,7 +128,7 @@ class AgentStatus:
     last_position: Decimal = Decimal("0")
     last_report_ts: float = field(default_factory=lambda: 0.0)
     pending_command: Optional[AgentCommand] = None
-    current_mode: Literal["RUN", "PAUSE", "WAIT"] = "WAIT"
+    current_mode: Literal["RUN", "PAUSE", "WAIT", "FLATTEN"] = "WAIT"
 
     def queue_command(self, command: AgentCommand) -> None:
         self.pending_command = command
@@ -142,10 +150,12 @@ class ClusterState:
         self._lock = asyncio.Lock()
         self.agents: Dict[str, AgentStatus] = {}
         self.primary_direction: Direction = config.initial_primary_direction
-        self.phase: Literal["initial", "running", "hedge_only", "cooldown"] = "initial"
+        self.phase: Literal["initial", "running", "hedge_only", "cooldown", "flatten"] = "initial"
         self.cooldown_ends_at: Optional[float] = None
         self._last_global_reason: Optional[str] = None
         self._hedge_only_active_role: Optional[AgentRole] = None
+        self._flatten_active: bool = False
+        self._flatten_started_at: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Registration & basic inspection
@@ -194,6 +204,9 @@ class ClusterState:
                 "global_limit": str(self.config.global_exposure_limit),
                 "resume_threshold": str(self.config.resume_threshold()),
                 "cycle_inventory_cap": str(self.config.cycle_inventory_cap),
+                "flatten_active": self._flatten_active,
+                "flatten_started_at": self._flatten_started_at,
+                "flatten_tolerance": str(self.config.flatten_tolerance),
                 "agents": [self._agent_snapshot(agent) for agent in self.agents.values()],
                 "last_pause_reason": self._last_global_reason,
             }
@@ -237,6 +250,12 @@ class ClusterState:
 
     def _evaluate_state(self) -> None:
         now = time.time()
+
+        if self.phase == "flatten":
+            if self._flatten_active and self._all_agents_flat():
+                LOGGER.info("Emergency flatten complete within tolerance %s", self.config.flatten_tolerance)
+                self._complete_flatten()
+            return
 
         if self.phase == "cooldown":
             if self.cooldown_ends_at is not None and now >= self.cooldown_ends_at:
@@ -317,6 +336,43 @@ class ClusterState:
         for agent in self.agents.values():
             agent.queue_command(AgentCommand(action="PAUSE", reason=reason))
 
+    def _broadcast_flatten(self, *, reason: str) -> None:
+        for agent in self.agents.values():
+            agent.queue_command(
+                AgentCommand(
+                    action="FLATTEN",
+                    reason=reason,
+                    metadata={
+                        "tolerance": str(self.config.flatten_tolerance),
+                        "price_offset_ticks": 2,
+                    },
+                )
+            )
+
+    async def trigger_emergency_flatten(self, *, reason: str) -> Dict[str, Any]:
+        async with self._lock:
+            if self.phase == "flatten" and self._flatten_active:
+                return {
+                    "phase": self.phase,
+                    "flatten_active": self._flatten_active,
+                    "reason": self._last_global_reason,
+                }
+
+            self.phase = "flatten"
+            self._flatten_active = True
+            self._flatten_started_at = time.time()
+            self._last_global_reason = reason
+            self._hedge_only_active_role = None
+            self.cooldown_ends_at = None
+            LOGGER.warning("Emergency flatten triggered: %s", reason)
+            self._broadcast_flatten(reason=reason)
+
+            return {
+                "phase": self.phase,
+                "flatten_active": self._flatten_active,
+                "reason": self._last_global_reason,
+            }
+
     def _enforce_hedge_only(self, *, net_exposure: Decimal, reason: str) -> None:
         active_role = self._role_to_reduce_net_exposure(net_exposure)
         self._hedge_only_active_role = active_role
@@ -374,6 +430,21 @@ class ClusterState:
             return self.primary_direction == "long"
         return self.primary_direction == "short"
 
+    def _all_agents_flat(self) -> bool:
+        tolerance = self.config.flatten_tolerance
+        return all(abs(agent.last_position) <= tolerance for agent in self.agents.values())
+
+    def _complete_flatten(self) -> None:
+        if not self._flatten_active:
+            return
+        self._flatten_active = False
+        self._flatten_started_at = None
+        self._hedge_only_active_role = None
+        reason = "emergency flatten complete; manual resume recommended"
+        self._last_global_reason = reason
+        self.phase = "running"
+        self._broadcast_pause(reason=reason)
+
 
 # ----------------------------------------------------------------------
 # HTTP handlers
@@ -390,6 +461,7 @@ class CoordinatorApp:
                 web.get("/command", self.handle_command),
                 web.get("/status", self.handle_status),
                 web.get("/dashboard", self.handle_dashboard),
+                web.post("/flatten", self.handle_flatten),
             ]
         )
 
@@ -431,11 +503,45 @@ class CoordinatorApp:
         return web.json_response(status)
 
     async def handle_dashboard(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
         try:
             html = DASHBOARD_PATH.read_text(encoding="utf-8")
         except FileNotFoundError:
             raise web.HTTPNotFound(text="dashboard asset missing; ensure cluster/dashboard.html exists")
         return web.Response(text=html, content_type="text/html")
+
+    async def handle_flatten(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        payload: Dict[str, Any]
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        requested_reason = payload.get("reason") if isinstance(payload, dict) else None
+        remote = request.remote or "dashboard"
+        reason = requested_reason or f"Emergency flatten triggered by {remote}"
+        result = await self.state.trigger_emergency_flatten(reason=reason)
+        return web.json_response(result)
+
+    def _enforce_dashboard_auth(self, request: web.Request) -> None:
+        username = self.state.config.dashboard_username
+        password = self.state.config.dashboard_password
+        if not username and not password:
+            return
+
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            raise web.HTTPUnauthorized(headers={"WWW-Authenticate": 'Basic realm="Cluster Dashboard"'})
+
+        token = header[6:]
+        try:
+            decoded = base64.b64decode(token).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            raise web.HTTPUnauthorized(headers={"WWW-Authenticate": 'Basic realm="Cluster Dashboard"'})
+
+        provided_username, _, provided_password = decoded.partition(":")
+        if (username or "") != provided_username or (password or "") != provided_password:
+            raise web.HTTPUnauthorized(headers={"WWW-Authenticate": 'Basic realm="Cluster Dashboard"'})
 
 
 def load_config(path: str) -> ClusterConfig:

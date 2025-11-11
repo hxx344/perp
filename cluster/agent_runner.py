@@ -172,6 +172,23 @@ class AgentRuntime:
             self._maker.resume_trading()
         elif action == "PAUSE":
             self._maker.pause_trading()
+        elif action == "FLATTEN":
+            metadata = command.get("metadata") if isinstance(command, dict) else None
+            tolerance_value = None
+            price_offset_ticks = 2
+            if isinstance(metadata, dict):
+                tolerance_value = metadata.get("tolerance")
+                maybe_offset = metadata.get("price_offset_ticks")
+                if maybe_offset is not None:
+                    try:
+                        price_offset_ticks = int(maybe_offset)
+                    except (TypeError, ValueError):
+                        price_offset_ticks = 2
+            tolerance = _decimal_from(tolerance_value, default="0.01") if tolerance_value is not None else None
+            await self._maker.emergency_flatten(
+                tolerance=tolerance,
+                price_offset_ticks=price_offset_ticks,
+            )
         else:
             LOGGER.warning("Unknown action '%s'", action)
 
