@@ -1307,6 +1307,29 @@ class SimpleMarketMaker:
             )
             return delay
 
+        status = self._extract_status_code(exc)
+        message = str(exc).lower()
+        # Lighter occasionally returns 500/50x during engine hiccups; treat these as
+        # transient and retry after a short cool-down instead of stopping the loop.
+        if status in {500, 502, 503, 504}:
+            delay = 5.0
+            self.logger.log(
+                f"Lighter service error {status}; retrying after {delay:.1f}s",
+                "WARNING",
+            )
+            return delay
+
+        # Signature API sometimes responds with empty/invalid nonce payloads (400),
+        # especially when their nonce service is briefly unavailable. A short retry
+        # typically succeeds once the upstream recovers.
+        if status == 400 and ("invalid nonce" in message or "couldn" in message and "nonce" in message):
+            delay = 5.0
+            self.logger.log(
+                f"Lighter nonce error; retrying after {delay:.1f}s",
+                "WARNING",
+            )
+            return delay
+
         self.logger.log(f"Iteration failed with unrecoverable error: {exc}", "ERROR")
         return None
 
