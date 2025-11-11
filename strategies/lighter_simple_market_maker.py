@@ -69,6 +69,7 @@ class SimpleMakerSettings:
     allowed_sides: Optional[Iterable[str]] = None
     order_quantity_min: Optional[Decimal] = None
     order_quantity_max: Optional[Decimal] = None
+    fill_cooldown_seconds: float = 10.0
 
     def effective_inventory_limit(self) -> Decimal:
         return self.inventory_limit if self.inventory_limit is not None else self.hedge_threshold
@@ -309,6 +310,8 @@ class SimpleMarketMaker:
         self._dynamic_quantity_range = self._initialize_quantity_range(settings)
         self._flatten_lock = asyncio.Lock()
         self._flatten_active = False
+        self._fill_cooldown_seconds = max(0.0, float(settings.fill_cooldown_seconds))
+        self._last_fill_timestamp: Dict[str, float] = {"buy": 0.0, "sell": 0.0}
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         await self.start()
@@ -745,6 +748,20 @@ class SimpleMarketMaker:
         if kept:
             return
 
+        if self._fill_cooldown_seconds > 0:
+            last_fill = self._last_fill_timestamp.get(side, 0.0)
+            cooldown_remaining = (last_fill + self._fill_cooldown_seconds) - time.time()
+            if cooldown_remaining > 0:
+                if side in self._tracked_orders:
+                    self._tracked_orders.pop(side, None)
+                self.logger.log(
+                    (
+                        "Skipping {side} order placement for {remaining:.2f}s due to recent fill"
+                    ).format(side=side, remaining=cooldown_remaining),
+                    "INFO",
+                )
+                return
+
         order_quantity = self._resolve_order_quantity()
         order_result = await self._lighter_client.place_limit_order(
             self._lighter_config.contract_id,
@@ -1148,6 +1165,8 @@ class SimpleMarketMaker:
                 direction = Decimal("-1")
 
             signed_quantity = base_delta * direction
+            if signed_quantity != 0 and side in ("buy", "sell"):
+                self._last_fill_timestamp[side] = time.time()
             if signed_quantity != 0 and price > 0:
                 self._apply_fill_to_session_pnl(signed_quantity, price)
 
@@ -1606,6 +1625,12 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
     parser.add_argument("--env-file", default=None, help="Optional path to a .env file to load before starting")
     parser.add_argument("--loop-sleep", default=3.0, type=float, help="Seconds between main loop iterations")
     parser.add_argument("--order-refresh-ticks", default=2, type=int, help="Price difference in ticks before replacing orders")
+    parser.add_argument(
+        "--fill-cooldown-seconds",
+        default=10.0,
+        type=float,
+        help="Seconds to wait after an order is filled before placing a new order on the same side",
+    )
     parser.add_argument("--metrics-interval", default=30.0, type=float, help="Seconds between account metrics logs")
     parser.add_argument("--no-console-log", action="store_true", help="Disable console logging output")
     parser.add_argument(
@@ -1647,6 +1672,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         env_file=args.env_file,
         loop_sleep_seconds=args.loop_sleep,
         order_refresh_ticks=max(1, args.order_refresh_ticks),
+    fill_cooldown_seconds=max(0.0, args.fill_cooldown_seconds),
         log_to_console=not args.no_console_log,
         metrics_interval_seconds=max(5.0, args.metrics_interval),
         allowed_sides=frozenset(args.allowed_sides) if args.allowed_sides else None,
