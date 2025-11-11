@@ -417,6 +417,23 @@ class LighterClient(BaseExchangeClient):
                             break
                         break
 
+        if current_account_tier_name is None:
+            try:
+                limits_snapshot = await account_api.account_limits(
+                    self.account_index,
+                    authorization=auth_token,
+                    auth=auth_token,
+                )
+            except Exception as exc:
+                _emit(
+                    "WARNING",
+                    f"Unable to fetch Lighter account limits for tier lookup: {exc}",
+                )
+            else:
+                tier_candidate = getattr(limits_snapshot, "user_tier", None)
+                if isinstance(tier_candidate, str) and tier_candidate.strip():
+                    current_account_tier_name = tier_candidate.strip()
+
         if current_account_tier_name and current_account_tier_name.casefold() == canonical_target:
             self._last_confirmed_tier_name = current_account_tier_name
             _emit(
