@@ -179,6 +179,13 @@
       </div>
     </div>
     <div class="card">
+      <h2>总余额</h2>
+      <div class="value" id="total-balance">-</div>
+      <div style="font-size:0.85rem;color:#94a3b8;">
+        总资产 <span id="total-asset">-</span>
+      </div>
+    </div>
+    <div class="card">
       <h2>主节点持仓</h2>
       <div class="value" id="primary-exposure">-</div>
       <div style="font-size:0.85rem;color:#94a3b8;">
@@ -197,6 +204,7 @@
         <th>VPS ID</th>
         <th>角色</th>
         <th>当前状态</th>
+        <th>余额</th>
         <th>持仓</th>
         <th>最近上报</th>
       </tr>
@@ -218,6 +226,8 @@
     const resumeEl = document.getElementById('resume');
     const cycleCapEl = document.getElementById('cycle-cap');
     const cooldownEl = document.getElementById('cooldown');
+  const totalBalanceEl = document.getElementById('total-balance');
+  const totalAssetEl = document.getElementById('total-asset');
     const agentsBody = document.querySelector('#agents tbody');
   const pauseBtn = document.getElementById('pauseBtn');
   const resumeBtn = document.getElementById('resumeBtn');
@@ -268,6 +278,7 @@
           <td>${agent.vps_id}</td>
           <td></td>
           <td></td>
+          <td>${formatNumber(agent.available_balance)}</td>
           <td>${formatNumber(agent.last_position)}</td>
           <td>${fmtTimestamp(agent.last_report_ts)}</td>
         `;
@@ -291,6 +302,8 @@
         limitEl.textContent = formatNumber(data.global_limit);
         resumeEl.textContent = formatNumber(data.resume_threshold);
         cycleCapEl.textContent = formatNumber(data.cycle_inventory_cap);
+  totalBalanceEl.textContent = formatNumber(data.total_available_balance);
+  totalAssetEl.textContent = formatNumber(data.total_account_value);
 
         if (data.cooldown_ends_at) {
           const next = new Date(data.cooldown_ends_at * 1000);

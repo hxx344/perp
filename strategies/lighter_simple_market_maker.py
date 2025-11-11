@@ -1530,6 +1530,25 @@ class SimpleMarketMaker:
             "net_position": net_position,
         }
 
+    def export_account_metrics(self) -> Dict[str, str]:
+        metrics = getattr(self, "_latest_metrics", {}) or {}
+
+        def _normalize(value: Any) -> Decimal:
+            if isinstance(value, Decimal):
+                return value
+            try:
+                return Decimal(str(value))
+            except Exception:
+                return Decimal("0")
+
+        available = _normalize(metrics.get("available_balance", Decimal("0")))
+        total_value = _normalize(metrics.get("total_asset_value", Decimal("0")))
+
+        return {
+            "available_balance": self._format_decimal(available, 2),
+            "total_asset_value": self._format_decimal(total_value, 2),
+        }
+
     def current_net_position(self) -> Decimal:
         return self._latest_net_position
 

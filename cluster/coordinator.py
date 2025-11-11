@@ -129,6 +129,8 @@ class AgentStatus:
     last_report_ts: float = field(default_factory=lambda: 0.0)
     pending_command: Optional[AgentCommand] = None
     current_mode: Literal["RUN", "PAUSE", "WAIT", "FLATTEN"] = "WAIT"
+    available_balance: Decimal = Decimal("0")
+    total_account_value: Decimal = Decimal("0")
 
     def queue_command(self, command: AgentCommand) -> None:
         self.pending_command = command
@@ -191,12 +193,16 @@ class ClusterState:
             "phase": self.phase,
             "last_position": str(agent.last_position),
             "last_report_ts": agent.last_report_ts,
+            "available_balance": str(agent.available_balance),
+            "total_account_value": str(agent.total_account_value),
         }
 
     async def get_cluster_status(self) -> Dict[str, Any]:
         async with self._lock:
             net_exposure = self._net_exposure()
             primary_exposure = self._primary_exposure()
+            total_available_balance = sum((agent.available_balance for agent in self.agents.values()), Decimal("0"))
+            total_account_value = sum((agent.total_account_value for agent in self.agents.values()), Decimal("0"))
             return {
                 "phase": self.phase,
                 "primary_direction": self.primary_direction,
@@ -212,17 +218,31 @@ class ClusterState:
                 "manual_pause": self._manual_pause_active,
                 "agents": [self._agent_snapshot(agent) for agent in self.agents.values()],
                 "last_pause_reason": self._last_global_reason,
+                "total_available_balance": str(total_available_balance),
+                "total_account_value": str(total_account_value),
             }
 
     # ------------------------------------------------------------------
     # Metrics updates & state machine evaluation
-    async def update_metrics(self, vps_id: str, net_position: Decimal, timestamp: float) -> Dict[str, Any]:
+    async def update_metrics(
+        self,
+        vps_id: str,
+        net_position: Decimal,
+        timestamp: float,
+        account_metrics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         async with self._lock:
             if vps_id not in self.agents:
                 raise web.HTTPNotFound(text=f"agent '{vps_id}' not registered")
             agent = self.agents[vps_id]
             agent.last_position = net_position
             agent.last_report_ts = timestamp
+            if account_metrics:
+                agent.available_balance = _to_decimal(account_metrics.get("available_balance"))
+                total_candidate = account_metrics.get("total_account_value")
+                if total_candidate is None:
+                    total_candidate = account_metrics.get("total_asset_value")
+                agent.total_account_value = _to_decimal(total_candidate)
             LOGGER.debug("Metrics update %s pos=%s", vps_id, net_position)
             self._evaluate_state()
             return {
@@ -553,7 +573,13 @@ class CoordinatorApp:
             raise web.HTTPBadRequest(text="vps_id required")
         net_position = _to_decimal(data.get("net_position"))
         timestamp = float(data.get("timestamp", time.time()))
-        result = await self.state.update_metrics(vps_id=vps_id, net_position=net_position, timestamp=timestamp)
+        account_metrics = data.get("account_metrics") if isinstance(data.get("account_metrics"), dict) else None
+        result = await self.state.update_metrics(
+            vps_id=vps_id,
+            net_position=net_position,
+            timestamp=timestamp,
+            account_metrics=account_metrics,
+        )
         return web.json_response(result)
 
     async def handle_command(self, request: web.Request) -> web.Response:

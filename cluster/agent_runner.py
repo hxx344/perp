@@ -124,12 +124,14 @@ class AgentRuntime:
         while True:
             try:
                 snapshot = self._maker.export_position_snapshot()
+                account_metrics = self._maker.export_account_metrics()
                 net_position = self._maker.current_net_position()
                 payload = {
                     "vps_id": self.vps_id,
                     "net_position": str(net_position),
                     "timestamp": time.time(),
                     "positions": snapshot,
+                    "account_metrics": account_metrics,
                 }
                 async with self.session.post(f"{self.coordinator_url}/metrics", json=payload) as response:
                     await _read_json(response)
