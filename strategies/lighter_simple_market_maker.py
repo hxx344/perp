@@ -473,12 +473,30 @@ class SimpleMarketMaker:
 
         ensure_callable = cast(Callable[..., Awaitable[bool]], ensure_method)
 
+        self.logger.log(
+            f"Ensuring Lighter account tier target='{target_tier}'"
+            + (f" (expected id {target_tier_id})" if target_tier_id is not None else ""),
+            "INFO",
+        )
+
         try:
-            await ensure_callable(target_tier=target_tier, target_tier_id=target_tier_id)
+            success = await ensure_callable(target_tier=target_tier, target_tier_id=target_tier_id)
         except Exception as exc:  # pragma: no cover - network/SDK failures
             self.logger.log(
                 f"Failed to enforce Lighter account tier '{target_tier}': {exc}",
                 "ERROR",
+            )
+            return
+
+        if success:
+            self.logger.log(
+                f"Lighter account tier enforcement completed for target '{target_tier}'",
+                "INFO",
+            )
+        else:
+            self.logger.log(
+                "Lighter account tier enforcement reported a potential issue; review preceding warnings",
+                "WARNING",
             )
 
     async def _configure_lighter_leverage(self) -> None:

@@ -18,7 +18,7 @@
 | 端口开放 | 协调器默认监听 `8080`，需要对四台 Agent 可达（建议仅内网或通过防火墙白名单） |
 | 时间同步 | 所有 VPS 需保留 NTP 自动对时，避免请求签名因时间漂移失败 |
 
-> **账户类型自动切换**：主节点与对冲节点在启动时会调用 Lighter 的 `changeAccountTier` 接口，将 `LIGHTER_ACCOUNT_INDEX` 对应账户切换为高级账户。默认目标 tier 为 `ADVANCED`；如需自定义，可通过环境变量 `LIGHTER_TARGET_ACCOUNT_TIER` 指定目标名（留空可跳过自动切换），并可选地设置 `LIGHTER_TARGET_ACCOUNT_TIER_ID`（整数）用于切换后的校验记录。
+> **账户类型自动切换**：主节点与对冲节点在启动时会调用 Lighter 的 `changeAccountTier` 接口，将 `LIGHTER_ACCOUNT_INDEX` 对应账户切换为高级账户。默认目标 tier 为 `ADVANCED`；如需自定义，可通过环境变量 `LIGHTER_TARGET_ACCOUNT_TIER` 指定目标名（留空可跳过自动切换），并可选地设置 `LIGHTER_TARGET_ACCOUNT_TIER_ID`（整数）用于切换后的校验记录。请求时会自动生成 10 分钟有效的签名 token，同时将请求与返回码写入控制台/日志，方便排查权限或 tier 不一致的问题。
 
 建议为协调器与 Agents 分别建立独立的 Python 虚拟环境，所有节点需共享相同的代码版本。
 

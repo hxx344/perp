@@ -323,27 +323,58 @@ class LighterClient(BaseExchangeClient):
     ) -> bool:
         """Ensure the configured Lighter account is upgraded to the desired tier."""
 
+        def _emit(level: str, message: str) -> None:
+            self.logger.log(message, level)
+
         normalized_tier = (target_tier or "").strip().upper()
         if not normalized_tier:
-            self.logger.log(
-                "Skipped Lighter tier enforcement because no target tier was provided",
+            _emit(
                 "WARNING",
+                "Skipped Lighter tier enforcement because no target tier was provided",
             )
             return False
 
         if self.api_client is None:
-            self.logger.log(
-                "Cannot enforce Lighter account tier: API client not initialized",
+            _emit(
                 "WARNING",
+                "Cannot enforce Lighter account tier: API client not initialized",
+            )
+            return False
+
+        if self.lighter_client is None:
+            await self._initialize_lighter_client()
+
+        auth_token: Optional[str] = None
+        token_error: Optional[str] = None
+        signer_client = getattr(self, "lighter_client", None)
+        if signer_client is not None and hasattr(signer_client, "create_auth_token_with_expiry"):
+            try:
+                auth_token, token_error = signer_client.create_auth_token_with_expiry()
+            except Exception as exc:  # pragma: no cover - defensive
+                token_error = str(exc)
+        else:
+            token_error = "Signer client missing auth token generator"
+
+        if token_error:
+            _emit(
+                "WARNING",
+                f"Lighter auth token generation warning: {token_error}",
+            )
+
+        auth_token = (auth_token or "").strip() or None
+        if not auth_token:
+            _emit(
+                "ERROR",
+                f"Unable to generate Lighter auth token for tier change: {token_error or 'unknown error'}",
             )
             return False
 
         try:
             account_api = lighter.AccountApi(self.api_client)
         except Exception as exc:  # pragma: no cover - SDK construction failure
-            self.logger.log(
-                f"Failed to construct Lighter AccountApi for tier enforcement: {exc}",
+            _emit(
                 "ERROR",
+                f"Failed to construct Lighter AccountApi for tier enforcement: {exc}",
             )
             return False
 
@@ -351,10 +382,11 @@ class LighterClient(BaseExchangeClient):
         try:
             account_snapshot = await account_api.account(by="index", value=str(self.account_index))
         except Exception as exc:
-            self.logger.log(
-                f"Unable to query Lighter account details before tier change: {exc}",
+            _emit(
                 "WARNING",
+                f"Unable to query Lighter account details before tier change: {exc}",
             )
+            account_snapshot = None
         else:
             accounts = getattr(account_snapshot, "accounts", None)
             if isinstance(accounts, list):
@@ -365,68 +397,89 @@ class LighterClient(BaseExchangeClient):
                         break
 
         if target_tier_id is not None and current_account_type == target_tier_id:
-            self.logger.log(
-                f"Lighter account {self.account_index} already at tier id {target_tier_id}",
+            _emit(
                 "INFO",
+                f"Lighter account {self.account_index} already at tier id {target_tier_id}",
             )
             return True
 
+        _emit(
+            "INFO",
+            f"Requesting tier '{normalized_tier}' for Lighter account {self.account_index}"
+            + (f" (expected id {target_tier_id})" if target_tier_id is not None else ""),
+        )
+
         try:
-            response = await account_api.change_account_tier(self.account_index, normalized_tier)
+            response = await account_api.change_account_tier(
+                self.account_index,
+                normalized_tier,
+                authorization=auth_token,
+                auth=auth_token,
+            )
         except Exception as exc:
-            self.logger.log(
-                f"Failed to change Lighter account tier to {normalized_tier}: {exc}",
+            _emit(
                 "ERROR",
+                f"Failed to change Lighter account tier to {normalized_tier}: {exc}",
             )
             return False
 
         response_code = getattr(response, "code", None)
         response_message = getattr(response, "message", "")
-        if response_code not in (None, 200):
-            self.logger.log(
-                f"Tier change request for account {self.account_index} returned code {response_code}: {response_message}",
-                "WARNING",
+        success_codes = {0, 1, 200, None}
+        success = response_code in success_codes
+        message_suffix = f" ({response_message})" if response_message else ""
+        if success:
+            _emit(
+                "INFO",
+                f"Tier change request for account {self.account_index} acknowledged with code {response_code}{message_suffix}",
             )
         else:
-            message = f" ({response_message})" if response_message else ""
-            self.logger.log(
-                f"Requested tier '{normalized_tier}' for Lighter account {self.account_index}{message}",
-                "INFO",
+            _emit(
+                "WARNING",
+                f"Tier change request for account {self.account_index} returned code {response_code}{message_suffix}",
             )
 
-        if target_tier_id is None:
-            return True
-
+        new_account_type: Optional[int] = None
         try:
             refreshed_snapshot = await account_api.account(by="index", value=str(self.account_index))
         except Exception as exc:
-            self.logger.log(
+            _emit(
+                "WARNING",
                 f"Unable to confirm Lighter tier change after request: {exc}",
-                "WARNING",
             )
-            return True
-
-        refreshed_accounts = getattr(refreshed_snapshot, "accounts", None)
-        new_account_type: Optional[int] = None
-        if isinstance(refreshed_accounts, list):
-            for entry in refreshed_accounts:
-                account_idx = getattr(entry, "account_index", getattr(entry, "index", None))
-                if account_idx == self.account_index:
-                    new_account_type = getattr(entry, "account_type", None)
-                    break
-
-        if new_account_type == target_tier_id:
-            self.logger.log(
-                f"Confirmed Lighter account {self.account_index} tier id {target_tier_id} after change",
-                "INFO",
-            )
+            refreshed_snapshot = None
         else:
-            self.logger.log(
-                f"Unable to confirm Lighter account tier id {target_tier_id}; current value {new_account_type}",
-                "WARNING",
+            refreshed_accounts = getattr(refreshed_snapshot, "accounts", None)
+            if isinstance(refreshed_accounts, list):
+                for entry in refreshed_accounts:
+                    account_idx = getattr(entry, "account_index", getattr(entry, "index", None))
+                    if account_idx == self.account_index:
+                        new_account_type = getattr(entry, "account_type", None)
+                        break
+
+        if new_account_type is not None:
+            _emit(
+                "INFO",
+                f"Lighter account {self.account_index} tier status: before={current_account_type} -> after={new_account_type}",
             )
 
-        return True
+        if target_tier_id is not None and new_account_type is not None:
+            if new_account_type != target_tier_id:
+                _emit(
+                    "WARNING",
+                    f"Expected tier id {target_tier_id} but observed {new_account_type} after change request",
+                )
+                return False
+            return success
+
+        if new_account_type is not None and current_account_type is not None and new_account_type == current_account_type:
+            _emit(
+                "WARNING",
+                "Lighter account tier unchanged after request; verify permissions or target tier",
+            )
+            return success
+
+        return success
 
     async def wait_for_market_data(self, timeout: float = 5.0) -> bool:
         """Block until the websocket provides bid/ask data or timeout."""
