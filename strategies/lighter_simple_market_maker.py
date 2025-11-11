@@ -1368,7 +1368,7 @@ class SimpleMarketMaker:
                         break
 
                     side = "sell" if net_position > 0 else "buy"
-                    quantity = abs(net_position)
+                    quantity = self._sample_flatten_quantity(net_position)
                     if quantity <= 0:
                         self.logger.log("Emergency flatten residual quantity zero; nothing to do", "INFO")
                         break
@@ -1478,6 +1478,25 @@ class SimpleMarketMaker:
 
         if quantity <= 0:
             quantity = lower
+
+        return quantity
+
+    def _sample_flatten_quantity(self, remaining: Decimal) -> Decimal:
+        remaining_abs = abs(remaining)
+        if remaining_abs <= 0:
+            return Decimal("0")
+
+        sampled = self._resolve_order_quantity()
+        quantity = min(remaining_abs, sampled)
+        if quantity <= 0:
+            quantity = remaining_abs
+
+        if self._quantity_step > 0 and quantity > 0:
+            steps = (quantity / self._quantity_step).to_integral_value(rounding=ROUND_DOWN)
+            if steps > 0:
+                quantity = steps * self._quantity_step
+            else:
+                quantity = remaining_abs
 
         return quantity
 

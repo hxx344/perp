@@ -150,12 +150,14 @@ class ClusterState:
         self._lock = asyncio.Lock()
         self.agents: Dict[str, AgentStatus] = {}
         self.primary_direction: Direction = config.initial_primary_direction
-        self.phase: Literal["initial", "running", "hedge_only", "cooldown", "flatten"] = "initial"
+        self.phase: Literal["initial", "running", "hedge_only", "cooldown", "flatten", "manual_pause"] = "initial"
         self.cooldown_ends_at: Optional[float] = None
         self._last_global_reason: Optional[str] = None
         self._hedge_only_active_role: Optional[AgentRole] = None
         self._flatten_active: bool = False
         self._flatten_started_at: Optional[float] = None
+        self._manual_pause_active: bool = False
+        self._phase_before_manual_pause: Optional[Literal["initial", "running", "hedge_only", "cooldown", "flatten", "manual_pause"]] = None
 
     # ------------------------------------------------------------------
     # Registration & basic inspection
@@ -207,6 +209,7 @@ class ClusterState:
                 "flatten_active": self._flatten_active,
                 "flatten_started_at": self._flatten_started_at,
                 "flatten_tolerance": str(self.config.flatten_tolerance),
+                "manual_pause": self._manual_pause_active,
                 "agents": [self._agent_snapshot(agent) for agent in self.agents.values()],
                 "last_pause_reason": self._last_global_reason,
             }
@@ -250,6 +253,9 @@ class ClusterState:
 
     def _evaluate_state(self) -> None:
         now = time.time()
+
+        if self._manual_pause_active:
+            return
 
         if self.phase == "flatten":
             if self._flatten_active and self._all_agents_flat():
@@ -358,6 +364,9 @@ class ClusterState:
                     "reason": self._last_global_reason,
                 }
 
+            if self._manual_pause_active:
+                raise web.HTTPConflict(text="manual pause active; resume before triggering flatten")
+
             self.phase = "flatten"
             self._flatten_active = True
             self._flatten_started_at = time.time()
@@ -370,6 +379,60 @@ class ClusterState:
             return {
                 "phase": self.phase,
                 "flatten_active": self._flatten_active,
+                "reason": self._last_global_reason,
+            }
+
+    async def manual_pause(self, *, reason: str) -> Dict[str, Any]:
+        async with self._lock:
+            if self._manual_pause_active:
+                return {
+                    "phase": self.phase,
+                    "manual_pause": self._manual_pause_active,
+                    "reason": self._last_global_reason,
+                }
+
+            if self.phase == "flatten" and self._flatten_active:
+                raise web.HTTPConflict(text="flatten in progress; cannot start manual pause")
+
+            self._manual_pause_active = True
+            self._phase_before_manual_pause = self.phase
+            self.phase = "manual_pause"
+            self.cooldown_ends_at = None
+            self._hedge_only_active_role = None
+            self._last_global_reason = reason
+            LOGGER.info("Manual pause engaged: %s", reason)
+            self._broadcast_pause(reason=reason)
+
+            return {
+                "phase": self.phase,
+                "manual_pause": self._manual_pause_active,
+                "reason": self._last_global_reason,
+            }
+
+    async def manual_resume(self, *, reason: str) -> Dict[str, Any]:
+        async with self._lock:
+            if not self._manual_pause_active:
+                return {
+                    "phase": self.phase,
+                    "manual_pause": self._manual_pause_active,
+                    "reason": self._last_global_reason,
+                }
+
+            self._manual_pause_active = False
+            restored_phase = self._phase_before_manual_pause or "running"
+            self._phase_before_manual_pause = None
+            self.phase = restored_phase
+            self._last_global_reason = reason
+            LOGGER.info("Manual pause released: %s", reason)
+
+            # Re-evaluate state and dispatch appropriate commands
+            self._evaluate_state()
+            if self.phase == "running" and not self._manual_pause_active:
+                self._broadcast_run(reason=reason)
+
+            return {
+                "phase": self.phase,
+                "manual_pause": self._manual_pause_active,
                 "reason": self._last_global_reason,
             }
 
@@ -461,6 +524,8 @@ class CoordinatorApp:
                 web.get("/command", self.handle_command),
                 web.get("/status", self.handle_status),
                 web.get("/dashboard", self.handle_dashboard),
+                web.post("/manual_pause", self.handle_manual_pause),
+                web.post("/manual_resume", self.handle_manual_resume),
                 web.post("/flatten", self.handle_flatten),
             ]
         )
@@ -509,6 +574,32 @@ class CoordinatorApp:
         except FileNotFoundError:
             raise web.HTTPNotFound(text="dashboard asset missing; ensure cluster/dashboard.html exists")
         return web.Response(text=html, content_type="text/html")
+
+    async def handle_manual_pause(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        payload: Dict[str, Any]
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        requested_reason = payload.get("reason") if isinstance(payload, dict) else None
+        remote = request.remote or "dashboard"
+        reason = requested_reason or f"Manual pause triggered by {remote}"
+        result = await self.state.manual_pause(reason=reason)
+        return web.json_response(result)
+
+    async def handle_manual_resume(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        payload: Dict[str, Any]
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        requested_reason = payload.get("reason") if isinstance(payload, dict) else None
+        remote = request.remote or "dashboard"
+        reason = requested_reason or f"Manual resume triggered by {remote}"
+        result = await self.state.manual_resume(reason=reason)
+        return web.json_response(result)
 
     async def handle_flatten(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)

@@ -157,8 +157,10 @@
 <body>
   <h1>Perp Cluster 实时面板</h1>
   <div class="actions">
+    <button id="pauseBtn" class="action-btn" style="background:linear-gradient(135deg,#60a5fa,#2563eb);color:#0f172a;box-shadow:0 8px 20px rgba(96,165,250,0.35);">全局暂停</button>
+    <button id="resumeBtn" class="action-btn" style="background:linear-gradient(135deg,#34d399,#059669);color:#022c22;box-shadow:0 8px 20px rgba(52,211,153,0.35);">恢复运行</button>
     <button id="flattenBtn" class="action-btn">紧急清仓</button>
-    <small id="flattenStatus">立即让所有节点挂出归零方向的限价单，执行过程中会暂停普通循环。</small>
+    <small id="controlStatus">暂停时所有节点会撤单并等待恢复；紧急清仓会反向逐步出清持仓。</small>
   </div>
   <div class="grid">
     <div class="card">
@@ -195,7 +197,7 @@
         <th>VPS ID</th>
         <th>角色</th>
         <th>当前状态</th>
-        <th>簿记持仓</th>
+        <th>持仓</th>
         <th>最近上报</th>
       </tr>
     </thead>
@@ -217,8 +219,10 @@
     const cycleCapEl = document.getElementById('cycle-cap');
     const cooldownEl = document.getElementById('cooldown');
     const agentsBody = document.querySelector('#agents tbody');
+  const pauseBtn = document.getElementById('pauseBtn');
+  const resumeBtn = document.getElementById('resumeBtn');
   const flattenBtn = document.getElementById('flattenBtn');
-  const flattenStatus = document.getElementById('flattenStatus');
+  const controlStatus = document.getElementById('controlStatus');
 
     function formatNumber(value) {
       if (value === null || value === undefined) return '-';
@@ -297,43 +301,88 @@
 
         updateAgents(data.agents || []);
 
+        const manualPause = Boolean(data.manual_pause);
+
+        if (manualPause) {
+          pauseBtn.disabled = true;
+          resumeBtn.disabled = false;
+          pauseBtn.textContent = '已暂停';
+          resumeBtn.textContent = '恢复运行';
+        } else {
+          pauseBtn.disabled = false;
+          resumeBtn.disabled = true;
+          pauseBtn.textContent = '全局暂停';
+          resumeBtn.textContent = '恢复运行 (待命)';
+        }
+
         if (data.flatten_active) {
           flattenBtn.disabled = true;
           flattenBtn.textContent = '清仓执行中…';
-          flattenStatus.textContent = '紧急清仓指令已下发，等待所有节点仓位归零后会自动暂停。';
+          controlStatus.textContent = '紧急清仓执行中，所有节点正在逐步回到零仓位。';
         } else {
-          flattenBtn.disabled = false;
-          flattenBtn.textContent = '紧急清仓';
-          flattenStatus.textContent = '立即让所有节点挂出归零方向的限价单，执行过程中会暂停普通循环。';
+          flattenBtn.disabled = manualPause;
+          flattenBtn.textContent = manualPause ? '已暂停（不可清仓）' : '紧急清仓';
+          controlStatus.textContent = manualPause
+            ? '全局暂停中，仅等待恢复指令。'
+            : '暂停时所有节点会撤单并等待恢复；紧急清仓会反向逐步出清持仓。';
         }
       } catch (error) {
         phaseReason.textContent = '无法获取状态：' + error.message;
       }
     }
 
-    async function triggerFlatten() {
-      const confirmed = window.confirm('确定要触发紧急清仓吗？所有节点将尝试把仓位降到 0，并暂停常规交易。');
-      if (!confirmed) return;
+    async function postJSON(url, body) {
       try {
-        flattenBtn.disabled = true;
-        flattenBtn.textContent = '提交中…';
-        const response = await fetch('/flatten', {
+        const response = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ reason: 'Dashboard flatten request' }),
+          body: JSON.stringify(body || {}),
         });
         if (!response.ok) {
           const text = await response.text();
           throw new Error(text || response.statusText);
         }
-        await refresh();
+        return await response.json();
       } catch (error) {
-        phaseReason.textContent = '清仓请求失败：' + error.message;
+        phaseReason.textContent = '操作失败：' + error.message;
+        throw error;
+      }
+    }
+
+    async function triggerPause() {
+      if (!window.confirm('确定要暂停所有节点吗？他们会撤单并等待恢复。')) return;
+      pauseBtn.disabled = true;
+      pauseBtn.textContent = '提交中…';
+      try {
+        await postJSON('/manual_pause', { reason: 'Dashboard pause request' });
+      } finally {
+        setTimeout(refresh, 800);
+      }
+    }
+
+    async function triggerResume() {
+      resumeBtn.disabled = true;
+      resumeBtn.textContent = '提交中…';
+      try {
+        await postJSON('/manual_resume', { reason: 'Dashboard resume request' });
+      } finally {
+        setTimeout(refresh, 800);
+      }
+    }
+
+    async function triggerFlatten() {
+      if (!window.confirm('确定要触发紧急清仓吗？所有节点将尝试把仓位降到 0，并暂停常规交易。')) return;
+      flattenBtn.disabled = true;
+      flattenBtn.textContent = '提交中…';
+      try {
+        await postJSON('/flatten', { reason: 'Dashboard flatten request' });
       } finally {
         setTimeout(refresh, 1000);
       }
     }
 
+    pauseBtn.addEventListener('click', triggerPause);
+    resumeBtn.addEventListener('click', triggerResume);
     flattenBtn.addEventListener('click', triggerFlatten);
 
     refresh();

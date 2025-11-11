@@ -166,7 +166,10 @@ python cluster/agent_runner.py \
 
 - **监控**：使用 `/status` 查看集群阶段 (`initial/running/hedge_only/cooldown`) 与各 Agent 持仓。
 - **监控**：
-  - `http://COORDINATOR_HOST:8080/dashboard` 提供开箱即用的网页面板，可在 Windows 浏览器中实时查看阶段、净敞口、各 VPS 状态等信息（每 2 秒自动刷新）。若配置了 `dashboard_username` / `dashboard_password`，浏览器会弹出登录框，输入相应账户即可访问。页面右上方新增“紧急清仓”按钮，会向协调器发出清仓指令：所有 Agent 会暂停普通循环、根据自身仓位方向挂对手价限价单直至仓位回到 `flatten_tolerance` 定义的容忍范围内。
+  - `http://COORDINATOR_HOST:8080/dashboard` 提供开箱即用的网页面板，可在 Windows 浏览器中实时查看阶段、净敞口、各 VPS 状态等信息（每 2 秒自动刷新）。若配置了 `dashboard_username` / `dashboard_password`，浏览器会弹出登录框，输入相应账户即可访问。页面提供三个常用控制：
+    - **全局暂停**：立即向所有 Agent 下发 `PAUSE`，节点会撤掉未成交订单并停止访问 Lighter，保持待命状态直至手动恢复。
+    - **恢复运行**：解除全局暂停，协调器会根据当前风控状态重新分发 `RUN` 或其他指令。
+    - **紧急清仓**：在非暂停状态下可用，会向协调器发出清仓指令；所有 Agent 会暂停普通循环，按照做市时的随机数量规则反向挂出限价单（使用更激进的对手价偏移）逐步削减库存，直到仓位回到 `flatten_tolerance` 定义的容忍范围内，随后自动保持暂停。
   - `GET /status` 仍可用于程序化监控，返回相同的 JSON 结构。
 - **日志**：
   - 协调器输出使用 `cluster.coordinator` logger。
