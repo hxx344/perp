@@ -156,7 +156,7 @@ python cluster/agent_runner.py \
 > **hedge_only 模式**：当全局净仓位达到 `global_exposure_limit` 时，协调器会选择**只保留能够削减当前净仓位的角色**继续运行。举例：
 > - 集群整体偏多（净仓位为正）时，只让负责做空的一侧继续 `RUN`，另一侧全部 `PAUSE`。
 > - 集群整体偏空（净仓位为负）时，会反过来暂停对冲节点，让主节点继续做多把净敞口拉回中性。
-> 当净仓位回落到 `global_exposure_limit × global_resume_ratio` 以下时，两侧都会收到恢复指令重新进入 `running`。
+> 当净仓位回落到 `global_exposure_limit × global_resume_ratio` 以下时，两侧都会收到恢复指令重新进入 `running`。重新进入 `running` 后，如果主节点的存量仓位仍然超过 `cycle_inventory_cap`，只有在**当前方向继续交易会让库存进一步扩大**时才会再次触发冷却；若翻面的新方向正好能把库存打回中性，则主节点会被允许持续运行直到库存压回阈值以内。
 
 ---
 

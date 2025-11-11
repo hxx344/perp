@@ -279,8 +279,9 @@ class ClusterState:
 
         # Running phase: check cycle inventory cap
         if self.phase == "running":
-            primary_abs = abs(self._primary_exposure())
-            if primary_abs >= self.config.cycle_inventory_cap:
+            primary_exposure = self._primary_exposure()
+            primary_abs = abs(primary_exposure)
+            if primary_abs >= self.config.cycle_inventory_cap and self._direction_matches_exposure(primary_exposure):
                 reason = (
                     f"primary exposure {primary_abs} reached cycle cap {self.config.cycle_inventory_cap}"
                 )
@@ -290,6 +291,12 @@ class ClusterState:
                 self._last_global_reason = reason
                 self._hedge_only_active_role = None
                 self._broadcast_pause(reason=reason)
+            elif primary_abs >= self.config.cycle_inventory_cap:
+                LOGGER.info(
+                    "primary exposure %s exceeds cap but new direction '%s' will reduce inventory; allowing run",
+                    primary_exposure,
+                    self.primary_direction,
+                )
 
     def _broadcast_run(self, *, reason: Optional[str]) -> None:
         for agent in self.agents.values():
@@ -359,6 +366,13 @@ class ClusterState:
         if net_exposure >= 0:
             return "hedge" if self.primary_direction == "long" else "primary"
         return "primary" if self.primary_direction == "long" else "hedge"
+
+    def _direction_matches_exposure(self, primary_exposure: Decimal) -> bool:
+        if primary_exposure == 0:
+            return False
+        if primary_exposure > 0:
+            return self.primary_direction == "long"
+        return self.primary_direction == "short"
 
 
 # ----------------------------------------------------------------------
