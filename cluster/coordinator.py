@@ -350,7 +350,7 @@ class ClusterState:
                     reason=reason,
                     metadata={
                         "tolerance": str(self.config.flatten_tolerance),
-                        "price_offset_ticks": 2,
+                        "price_offset_ticks": 0,
                     },
                 )
             )

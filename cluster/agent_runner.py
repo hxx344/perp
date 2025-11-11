@@ -175,7 +175,7 @@ class AgentRuntime:
         elif action == "FLATTEN":
             metadata = command.get("metadata") if isinstance(command, dict) else None
             tolerance_value = None
-            price_offset_ticks = 2
+            price_offset_ticks = 0
             if isinstance(metadata, dict):
                 tolerance_value = metadata.get("tolerance")
                 maybe_offset = metadata.get("price_offset_ticks")
@@ -183,7 +183,7 @@ class AgentRuntime:
                     try:
                         price_offset_ticks = int(maybe_offset)
                     except (TypeError, ValueError):
-                        price_offset_ticks = 2
+                        price_offset_ticks = 0
             tolerance = _decimal_from(tolerance_value, default="0.01") if tolerance_value is not None else None
             await self._maker.emergency_flatten(
                 tolerance=tolerance,

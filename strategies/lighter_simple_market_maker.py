@@ -1360,7 +1360,7 @@ class SimpleMarketMaker:
         self,
         *,
         tolerance: Optional[Decimal] = None,
-        price_offset_ticks: int = 2,
+        price_offset_ticks: int = 0,
         max_iterations: int = 30,
         sleep_interval: float = 1.5,
     ) -> None:
@@ -1396,6 +1396,9 @@ class SimpleMarketMaker:
                 await self._cancel_all_orders()
                 await self._update_state_guarded(force=True)
 
+                flatten_hot_update = await self._load_hot_update()
+                spread_scale = self._resolve_spread_scale(flatten_hot_update)
+
                 for attempt in range(1, max_iterations + 1):
                     net_position = self._lighter_inventory_base
                     if abs(net_position) <= tol:
@@ -1426,17 +1429,26 @@ class SimpleMarketMaker:
                         await self._update_state_guarded(force=True)
                         continue
 
-                    price = best_bid if side == "sell" else best_ask
+                    mid_price = (best_bid + best_ask) / 2
+                    price: Decimal
+                    if tick_size > 0:
+                        targets = compute_target_prices(mid_price, spread_scale, tick_size)
+                        price = targets["sell"] if side == "sell" else targets["buy"]
+                    else:  # pragma: no cover - defensive fallback
+                        price = best_bid if side == "sell" else best_ask
+
                     if price <= 0:
-                        self.logger.log("Emergency flatten aborted: invalid best bid/ask snapshot", "ERROR")
+                        self.logger.log("Emergency flatten aborted: invalid computed price", "ERROR")
                         break
 
                     offset_ticks = max(0, price_offset_ticks)
-                    offset = (Decimal(offset_ticks) * tick_size) if tick_size > 0 else Decimal("0")
-                    if side == "sell" and offset > 0:
-                        price = max(tick_size if tick_size > 0 else Decimal("0"), price - offset)
-                    elif side == "buy" and offset > 0:
-                        price = price + offset
+                    if tick_size > 0 and offset_ticks > 0:
+                        offset = Decimal(offset_ticks) * tick_size
+                        if side == "sell":
+                            price = price + offset
+                        else:
+                            price = max(tick_size, price - offset)
+                        price = price.quantize(tick_size, rounding=ROUND_HALF_UP)
 
                     try:
                         order_result = await self._lighter_client.place_limit_order(
