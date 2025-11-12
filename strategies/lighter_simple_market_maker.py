@@ -1421,7 +1421,7 @@ class SimpleMarketMaker:
         *,
         tolerance: Optional[Decimal] = None,
         price_offset_ticks: int = 0,
-        max_iterations: int = 30,
+        max_iterations: Optional[int] = None,
         sleep_interval: float = 1.5,
     ) -> None:
         if self._lighter_client is None or self._lighter_config is None:
@@ -1459,17 +1459,28 @@ class SimpleMarketMaker:
                 flatten_hot_update = await self._load_hot_update()
                 spread_scale = self._resolve_spread_scale(flatten_hot_update)
 
-                for attempt in range(1, max_iterations + 1):
+                order_attempts = 0
+                while True:
                     net_position = self._lighter_inventory_base
                     if abs(net_position) <= tol:
                         self.logger.log(
                             (
                                 "Emergency flatten complete after {attempt} iterations; residual={residual}"
                             ).format(
-                                attempt=attempt - 1,
+                                attempt=order_attempts,
                                 residual=self._format_decimal(net_position, 6),
                             ),
                             "WARNING",
+                        )
+                        break
+
+                    if max_iterations is not None and order_attempts >= max_iterations:
+                        residual = self._format_decimal(net_position, 6)
+                        self.logger.log(
+                            (
+                                "Emergency flatten max iterations reached; residual position {residual}"
+                            ).format(residual=residual),
+                            "ERROR",
                         )
                         break
 
@@ -1479,6 +1490,7 @@ class SimpleMarketMaker:
                         self.logger.log("Emergency flatten residual quantity zero; nothing to do", "INFO")
                         break
 
+                    attempt_number = order_attempts + 1
                     try:
                         best_bid, best_ask = await self._lighter_client.fetch_bbo_prices(
                             self._lighter_config.contract_id
@@ -1541,7 +1553,7 @@ class SimpleMarketMaker:
                             side=side,
                             qty=self._format_decimal(quantity, 6),
                             price=self._format_decimal(price, 6),
-                            attempt=attempt,
+                            attempt=attempt_number,
                         ),
                         "WARNING",
                     )
@@ -1549,14 +1561,7 @@ class SimpleMarketMaker:
                     await asyncio.sleep(max(sleep_interval, self.settings.loop_sleep_seconds))
                     await self._update_state_guarded(force=True)
                     await self._cancel_all_orders()
-                else:
-                    residual = self._format_decimal(self._lighter_inventory_base, 6)
-                    self.logger.log(
-                        (
-                            "Emergency flatten max iterations reached; residual position {residual}"
-                        ).format(residual=residual),
-                        "ERROR",
-                    )
+                    order_attempts = attempt_number
             finally:
                 await self._cancel_all_orders()
                 self._flatten_active = False

@@ -178,6 +178,7 @@ class AgentRuntime:
             metadata = command.get("metadata") if isinstance(command, dict) else None
             tolerance_value = None
             price_offset_ticks = 0
+            max_iterations = None
             if isinstance(metadata, dict):
                 tolerance_value = metadata.get("tolerance")
                 maybe_offset = metadata.get("price_offset_ticks")
@@ -186,10 +187,21 @@ class AgentRuntime:
                         price_offset_ticks = int(maybe_offset)
                     except (TypeError, ValueError):
                         price_offset_ticks = 0
+                maybe_max_iterations = metadata.get("max_iterations")
+                if maybe_max_iterations is not None:
+                    try:
+                        parsed_iterations = int(maybe_max_iterations)
+                        if parsed_iterations > 0:
+                            max_iterations = parsed_iterations
+                        else:
+                            max_iterations = None
+                    except (TypeError, ValueError):
+                        max_iterations = None
             tolerance = _decimal_from(tolerance_value, default="0.01") if tolerance_value is not None else None
             await self._maker.emergency_flatten(
                 tolerance=tolerance,
                 price_offset_ticks=price_offset_ticks,
+                max_iterations=max_iterations,
             )
         else:
             LOGGER.warning("Unknown action '%s'", action)
