@@ -60,6 +60,127 @@
         color: #7f8fa9;
         font-size: 0.85rem;
       }
+
+      .section-header {
+        display: flex;
+        align-items: baseline;
+        gap: 0.75rem;
+        margin-top: 2.5rem;
+        margin-bottom: 1rem;
+      }
+
+      .section-header h2 {
+        margin: 0;
+        font-size: 1.25rem;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.15rem 0.6rem;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        background: #273042;
+        color: #c7d2e8;
+      }
+
+      .badge-group {
+        display: inline-flex;
+        gap: 0.35rem;
+        align-items: center;
+      }
+
+      .badge-muted {
+        background: #1f2533;
+        color: #8a94a6;
+      }
+
+      .badge-warn {
+        background: #4a1f1f;
+        color: #ffc9c9;
+      }
+
+      .badge-info {
+        background: #19314d;
+        color: #a4d5ff;
+      }
+
+      .agent-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 1.25rem;
+      }
+
+      .agent-card {
+        transition: box-shadow 0.25s ease, transform 0.25s ease;
+        border: 1px solid transparent;
+      }
+
+      .agent-card.recent {
+        box-shadow: 0 0 0 2px rgba(76, 201, 240, 0.25);
+      }
+
+      .agent-card.stale {
+        border-color: rgba(255, 171, 64, 0.45);
+        opacity: 0.7;
+      }
+
+      .agent-card header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.1rem;
+      }
+
+      .agent-name {
+        font-weight: 600;
+        font-size: 1.05rem;
+        color: #f5f7fb;
+      }
+
+      .agent-metrics {
+        display: grid;
+        gap: 0.6rem;
+        margin: 0;
+      }
+
+      .agent-metrics div {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+      }
+
+      .agent-metrics dt {
+        margin: 0;
+        font-size: 0.75rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #7f8fa9;
+      }
+
+      .agent-metrics dd {
+        margin: 0;
+        font-weight: 600;
+        font-size: 1.25rem;
+      }
+
+      .timestamp {
+        margin-top: 1.25rem;
+        font-size: 0.8rem;
+        color: #8a94a6;
+      }
+
+      .empty {
+        margin: 1rem 0 0;
+        color: #8a94a6;
+        font-size: 0.9rem;
+      }
+
+      .hidden {
+        display: none !important;
+      }
     </style>
   </head>
   <body>
@@ -85,39 +206,154 @@
       </article>
     </section>
 
+    <section class="agent-section">
+      <div class="section-header">
+        <h2>Per-VPS Metrics</h2>
+        <span class="badge badge-muted" id="agent-count">0 active</span>
+      </div>
+      <p class="empty" id="agent-empty">Waiting for VPS metrics…</p>
+      <div class="agent-grid hidden" id="agent-grid"></div>
+    </section>
+
     <p class="updated" id="updated">Awaiting data…</p>
 
     <script>
+      const agentGrid = document.getElementById('agent-grid');
+      const agentEmpty = document.getElementById('agent-empty');
+      const agentCount = document.getElementById('agent-count');
+      const updatedElement = document.getElementById('updated');
+
+      const numberFormatter = new Intl.NumberFormat(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 6,
+        notation: 'compact'
+      });
+
+      function toNumber(value) {
+        if (value === null || value === undefined) {
+          return 0;
+        }
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : 0;
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function renderAggregate(data) {
+        const position = toNumber(data.position ?? data?.aggregate?.position);
+        const pnl = toNumber(data.cumulative_pnl ?? data?.aggregate?.cumulative_pnl);
+        const volume = toNumber(data.cumulative_volume ?? data?.aggregate?.cumulative_volume);
+        const cyclesRaw = Number(data.total_cycles ?? data?.aggregate?.total_cycles ?? 0);
+
+        document.getElementById('position').textContent = numberFormatter.format(position);
+        document.getElementById('pnl').textContent = numberFormatter.format(pnl);
+        document.getElementById('volume').textContent = numberFormatter.format(volume);
+        document.getElementById('cycles').textContent = Number.isFinite(cyclesRaw) ? cyclesRaw : '--';
+
+        if (data.last_update_ts) {
+          const updatedDate = new Date(Number(data.last_update_ts) * 1000);
+          const latestAgent = data.last_agent_id ? ` (agent: ${data.last_agent_id})` : '';
+          updatedElement.textContent = `Last update: ${updatedDate.toLocaleString()}${latestAgent}`;
+        } else {
+          updatedElement.textContent = 'Awaiting data…';
+        }
+      }
+
+      function renderAgents(data) {
+        const entries = Object.entries(data?.agents ?? {});
+        const staleSet = new Set(data?.stale_agents ?? []);
+        const lastAgentId = data?.last_agent_id ?? null;
+
+        agentGrid.innerHTML = '';
+
+        if (!entries.length) {
+          agentGrid.classList.add('hidden');
+          agentEmpty.classList.remove('hidden');
+          agentEmpty.textContent = 'Waiting for VPS metrics…';
+          agentCount.textContent = '0 active';
+          return;
+        }
+
+        agentGrid.classList.remove('hidden');
+        agentEmpty.classList.add('hidden');
+
+        entries.sort((a, b) => a[0].localeCompare(b[0], undefined, { sensitivity: 'base' }));
+
+        let activeCount = 0;
+
+        for (const [agentId, metrics] of entries) {
+          const safeId = escapeHtml(agentId);
+          const position = numberFormatter.format(toNumber(metrics.position));
+          const pnl = numberFormatter.format(toNumber(metrics.cumulative_pnl));
+          const volume = numberFormatter.format(toNumber(metrics.cumulative_volume));
+          const cyclesRaw = Number(metrics.total_cycles ?? 0);
+          const cycles = Number.isFinite(cyclesRaw) ? cyclesRaw : '--';
+
+          const updatedTs = Number(metrics.last_update_ts ?? 0) * 1000;
+          const updatedText = Number.isFinite(updatedTs) && updatedTs > 0
+            ? new Date(updatedTs).toLocaleString()
+            : 'Awaiting data…';
+
+          const card = document.createElement('article');
+          card.className = 'agent-card card';
+
+          const isStale = staleSet.has(agentId);
+          if (isStale) {
+            card.classList.add('stale');
+          } else {
+            activeCount += 1;
+          }
+          if (lastAgentId && agentId === lastAgentId) {
+            card.classList.add('recent');
+          }
+
+          card.innerHTML = `
+            <header>
+              <span class="agent-name">${safeId}</span>
+              <span class="badge-group">
+                ${lastAgentId && agentId === lastAgentId ? '<span class="badge badge-info">Latest</span>' : ''}
+                ${isStale ? '<span class="badge badge-warn">Stale</span>' : ''}
+              </span>
+            </header>
+            <dl class="agent-metrics">
+              <div><dt>Position</dt><dd>${position}</dd></div>
+              <div><dt>Total Cycles</dt><dd>${cycles}</dd></div>
+              <div><dt>Cumulative PnL</dt><dd>${pnl}</dd></div>
+              <div><dt>Total Volume</dt><dd>${volume}</dd></div>
+            </dl>
+            <p class="timestamp">Updated ${escapeHtml(updatedText)}</p>
+          `;
+
+          agentGrid.appendChild(card);
+        }
+
+        agentCount.textContent = `${activeCount} active / ${entries.length} total`;
+      }
+
       async function refreshMetrics() {
         try {
           const response = await fetch('/metrics', { cache: 'no-store' });
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
+
           const data = await response.json();
-          const fmt = new Intl.NumberFormat(undefined, {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 6,
-            notation: 'compact'
-          });
-
-          const pos = Number(data.position ?? 0);
-          const pnl = Number(data.cumulative_pnl ?? 0);
-          const vol = Number(data.cumulative_volume ?? 0);
-
-          document.getElementById('position').textContent = fmt.format(pos);
-          document.getElementById('cycles').textContent = data.total_cycles ?? '--';
-          document.getElementById('pnl').textContent = fmt.format(pnl);
-          document.getElementById('volume').textContent = fmt.format(vol);
-
-          if (data.last_update_ts) {
-            const updated = new Date(data.last_update_ts * 1000);
-            document.getElementById('updated').textContent = `Last update: ${updated.toLocaleString()}`;
-          } else {
-            document.getElementById('updated').textContent = 'Awaiting data…';
-          }
+          renderAggregate(data);
+          renderAgents(data);
         } catch (error) {
-          document.getElementById('updated').textContent = `Dashboard error: ${error}`;
+          updatedElement.textContent = `Dashboard error: ${error}`;
+          agentCount.textContent = '—';
+          agentGrid.innerHTML = '';
+          agentGrid.classList.add('hidden');
+          agentEmpty.classList.remove('hidden');
+          agentEmpty.textContent = 'Unable to load metrics at the moment.';
         }
       }
 

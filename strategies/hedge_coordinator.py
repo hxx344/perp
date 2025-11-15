@@ -41,63 +41,147 @@ LOGGER = logging.getLogger("hedge.coordinator")
 class HedgeState:
     """Shared mutable state tracked by the coordinator."""
 
+    agent_id: Optional[str] = None
     position: Decimal = Decimal("0")
     total_cycles: int = 0
     cumulative_pnl: Decimal = Decimal("0")
     cumulative_volume: Decimal = Decimal("0")
     last_update_ts: float = field(default_factory=time.time)
 
+    def update_from_payload(self, payload: Dict[str, Any]) -> None:
+        position_raw = payload.get("position")
+        cycles_raw = payload.get("total_cycles")
+        pnl_raw = payload.get("cumulative_pnl")
+        volume_raw = payload.get("cumulative_volume")
+
+        if position_raw is not None:
+            try:
+                self.position = Decimal(str(position_raw))
+            except Exception:
+                LOGGER.warning("Invalid position payload: %s", position_raw)
+
+        if cycles_raw is not None:
+            try:
+                self.total_cycles = int(cycles_raw)
+            except Exception:
+                LOGGER.warning("Invalid cycle payload: %s", cycles_raw)
+
+        if pnl_raw is not None:
+            try:
+                self.cumulative_pnl = Decimal(str(pnl_raw))
+            except Exception:
+                LOGGER.warning("Invalid pnl payload: %s", pnl_raw)
+
+        if volume_raw is not None:
+            try:
+                self.cumulative_volume = Decimal(str(volume_raw))
+            except Exception:
+                LOGGER.warning("Invalid volume payload: %s", volume_raw)
+
+        self.last_update_ts = time.time()
+
     def serialize(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "position": str(self.position),
             "total_cycles": self.total_cycles,
             "cumulative_pnl": str(self.cumulative_pnl),
             "cumulative_volume": str(self.cumulative_volume),
             "last_update_ts": self.last_update_ts,
         }
+        if self.agent_id is not None:
+            payload["agent_id"] = self.agent_id
+        return payload
+
+    @classmethod
+    def aggregate(cls, states: Dict[str, "HedgeState"]) -> "HedgeState":
+        aggregate = cls(agent_id="aggregate")
+        aggregate.last_update_ts = 0.0
+        for state in states.values():
+            aggregate.position += state.position
+            aggregate.total_cycles += int(state.total_cycles)
+            aggregate.cumulative_pnl += state.cumulative_pnl
+            aggregate.cumulative_volume += state.cumulative_volume
+            if state.last_update_ts > aggregate.last_update_ts:
+                aggregate.last_update_ts = state.last_update_ts
+
+        if aggregate.last_update_ts == 0.0:
+            aggregate.last_update_ts = time.time()
+        return aggregate
 
 
 class HedgeCoordinator:
     """aiohttp based coordinator that stores the latest hedging metrics."""
 
     def __init__(self) -> None:
-        self._state = HedgeState()
+        self._states: Dict[str, HedgeState] = {}
         self._lock = asyncio.Lock()
+        self._eviction_seconds = 6 * 3600  # prune entries idle for 6 hours
+        self._stale_warning_seconds = 5 * 60  # tag agents as stale after 5 minutes
+        self._last_agent_id: Optional[str] = None
+
+    @staticmethod
+    def _normalize_agent_id(raw: Any) -> str:
+        if raw is None:
+            return "default"
+        try:
+            text = str(raw).strip()
+        except Exception:
+            text = ""
+        if not text:
+            return "default"
+        if len(text) > 120:
+            text = text[:120]
+        return text
+
+    def _prune_stale(self, now: float) -> None:
+        if self._eviction_seconds <= 0:
+            return
+        to_remove = [
+            agent_id
+            for agent_id, state in self._states.items()
+            if now - state.last_update_ts > self._eviction_seconds
+        ]
+        for agent_id in to_remove:
+            LOGGER.info("Pruning stale agent '%s' after %.0f seconds of inactivity", agent_id, self._eviction_seconds)
+            self._states.pop(agent_id, None)
+
+    def _build_snapshot(self, now: float) -> Dict[str, Any]:
+        aggregate = HedgeState.aggregate(self._states)
+        agents_payload = {agent_id: state.serialize() for agent_id, state in self._states.items()}
+
+        snapshot = aggregate.serialize()
+        snapshot.pop("agent_id", None)
+        snapshot["agents"] = agents_payload
+        snapshot["agent_count"] = len(agents_payload)
+        snapshot["stale_agents"] = [
+            agent_id
+            for agent_id, state in self._states.items()
+            if now - state.last_update_ts > self._stale_warning_seconds
+        ]
+        snapshot["last_agent_id"] = self._last_agent_id
+        return snapshot
 
     async def update(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        position_raw = payload.get("position")
-        cycles_raw = payload.get("total_cycles")
-        pnl_raw = payload.get("cumulative_pnl")
-        volume_raw = payload.get("cumulative_volume")
-
         async with self._lock:
-            try:
-                if position_raw is not None:
-                    self._state.position = Decimal(str(position_raw))
-            except Exception:
-                LOGGER.warning("Invalid position payload: %s", position_raw)
-            try:
-                if cycles_raw is not None:
-                    self._state.total_cycles = int(cycles_raw)
-            except Exception:
-                LOGGER.warning("Invalid cycle payload: %s", cycles_raw)
-            try:
-                if pnl_raw is not None:
-                    self._state.cumulative_pnl = Decimal(str(pnl_raw))
-            except Exception:
-                LOGGER.warning("Invalid pnl payload: %s", pnl_raw)
-            try:
-                if volume_raw is not None:
-                    self._state.cumulative_volume = Decimal(str(volume_raw))
-            except Exception:
-                LOGGER.warning("Invalid volume payload: %s", volume_raw)
+            agent_id = self._normalize_agent_id(payload.get("agent_id"))
+            state = self._states.get(agent_id)
+            if state is None:
+                state = HedgeState(agent_id=agent_id)
+                self._states[agent_id] = state
 
-            self._state.last_update_ts = time.time()
-            return self._state.serialize()
+            state.update_from_payload(payload)
+
+            now = time.time()
+            self._prune_stale(now)
+            self._last_agent_id = agent_id
+            snapshot = self._build_snapshot(now)
+            return snapshot
 
     async def snapshot(self) -> Dict[str, Any]:
         async with self._lock:
-            return self._state.serialize()
+            now = time.time()
+            self._prune_stale(now)
+            return self._build_snapshot(now)
 
 
 class CoordinatorApp:

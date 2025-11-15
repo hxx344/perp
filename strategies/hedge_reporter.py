@@ -10,9 +10,10 @@ import aiohttp
 class HedgeMetricsReporter:
     """Async helper that pushes hedging metrics to the coordinator service."""
 
-    def __init__(self, base_url: str, *, timeout: float = 5.0) -> None:
+    def __init__(self, base_url: str, *, timeout: float = 5.0, agent_id: Optional[str] = None) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
+        self._agent_id = (agent_id or "").strip() or None
         self._session: Optional[aiohttp.ClientSession] = None
         self._lock = asyncio.Lock()
 
@@ -30,6 +31,7 @@ class HedgeMetricsReporter:
         total_cycles: int,
         cumulative_pnl: Decimal,
         cumulative_volume: Decimal,
+        agent_id: Optional[str] = None,
     ) -> None:
         session = await self._ensure_session()
         url = f"{self._base_url}/update"
@@ -39,6 +41,10 @@ class HedgeMetricsReporter:
             "cumulative_pnl": str(cumulative_pnl),
             "cumulative_volume": str(cumulative_volume),
         }
+
+        agent_identifier = (agent_id or self._agent_id or "").strip()
+        if agent_identifier:
+            payload["agent_id"] = agent_identifier
 
         try:
             async with session.post(url, json=payload) as response:

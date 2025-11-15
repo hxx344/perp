@@ -26,6 +26,7 @@ import os
 import gc
 import tracemalloc
 import math
+import socket
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -424,6 +425,7 @@ class CycleConfig:
     lighter_quantity_max: Optional[Decimal] = None
     preserve_initial_position: bool = False
     coordinator_url: Optional[str] = None
+    coordinator_agent_id: Optional[str] = None
     virtual_aster_price_source: str = "aster"
     virtual_aster_reference_symbol: Optional[str] = None
     aster_maker_depth_level: int = DEFAULT_ASTER_MAKER_DEPTH_LEVEL
@@ -1312,6 +1314,14 @@ class HedgingCycleExecutor:
             log_to_console=bool(getattr(config, "log_to_console", False)),
         )
 
+        agent_id = (getattr(config, "coordinator_agent_id", None) or "").strip()
+        if not agent_id:
+            try:
+                agent_id = socket.gethostname()
+            except Exception:
+                agent_id = ""
+        self._coordinator_agent_id = agent_id or None
+
         self._lighter_quantity_min = config.lighter_quantity_min
         self._lighter_quantity_max = config.lighter_quantity_max
         self._lighter_quantity_step = Decimal("0.001")
@@ -1508,6 +1518,7 @@ class HedgingCycleExecutor:
                 total_cycles=total_cycles,
                 cumulative_pnl=cumulative_pnl,
                 cumulative_volume=cumulative_volume,
+                agent_id=self._coordinator_agent_id,
             )
         except Exception as exc:
             self.logger.log(
@@ -2126,7 +2137,10 @@ class HedgingCycleExecutor:
         coordinator_url = (self.config.coordinator_url or "").strip()
         if coordinator_url:
             try:
-                self._metrics_reporter = HedgeMetricsReporter(coordinator_url)
+                self._metrics_reporter = HedgeMetricsReporter(
+                    coordinator_url,
+                    agent_id=self._coordinator_agent_id,
+                )
                 self.logger.log(
                     f"Hedge coordinator reporting enabled (endpoint={coordinator_url})",
                     "INFO",
@@ -3417,6 +3431,10 @@ def _parse_args() -> argparse.Namespace:
         help="Optional base URL of the hedge coordinator/dashboard (e.g. http://localhost:8899)",
     )
     parser.add_argument(
+        "--coordinator-agent",
+        help="Identifier reported to the coordinator to distinguish this VPS (defaults to hostname)",
+    )
+    parser.add_argument(
         "--cycles",
         type=int,
         default=0,
@@ -3809,7 +3827,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         delay_between_cycles=max(0.0, args.cycle_delay),
         virtual_aster_maker=args.virtual_aster_maker,
         preserve_initial_position=bool(getattr(args, "preserve_initial_position", False)),
-    coordinator_url=getattr(args, "coordinator_url", None),
+        coordinator_url=getattr(args, "coordinator_url", None),
+        coordinator_agent_id=getattr(args, "coordinator_agent", None),
         virtual_aster_price_source=args.virtual_maker_price_source,
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
         aster_maker_depth_level=aster_maker_depth,
