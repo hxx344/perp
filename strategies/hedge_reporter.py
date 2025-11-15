@@ -54,6 +54,36 @@ class HedgeMetricsReporter:
         except Exception as exc:
             raise RuntimeError(f"Failed to report hedge metrics: {exc}") from exc
 
+    async def fetch_control(self, *, agent_id: Optional[str] = None) -> Dict[str, Any]:
+        session = await self._ensure_session()
+        url = f"{self._base_url}/control"
+        identifier = (agent_id or self._agent_id or "").strip()
+        params = {"agent_id": identifier} if identifier else None
+
+        try:
+            async with session.get(url, params=params) as response:
+                try:
+                    payload = await response.json(content_type=None)
+                except aiohttp.ContentTypeError as exc:
+                    text = await response.text()
+                    raise RuntimeError(
+                        f"Coordinator control response not JSON: {text}"
+                    ) from exc
+
+                if response.status >= 400:
+                    raise RuntimeError(
+                        f"Coordinator control request failed: HTTP {response.status} {payload}"
+                    )
+
+                if not isinstance(payload, dict):
+                    raise RuntimeError(
+                        f"Unexpected coordinator control payload type: {type(payload).__name__}"
+                    )
+
+                return payload
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch coordinator control state: {exc}") from exc
+
     async def aclose(self) -> None:
         if self._session is not None and not self._session.closed:
             await self._session.close()

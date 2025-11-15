@@ -118,6 +118,7 @@ class HedgeCoordinator:
         self._eviction_seconds = 6 * 3600  # prune entries idle for 6 hours
         self._stale_warning_seconds = 5 * 60  # tag agents as stale after 5 minutes
         self._last_agent_id: Optional[str] = None
+        self._controls: Dict[str, Dict[str, Any]] = {}
 
     @staticmethod
     def _normalize_agent_id(raw: Any) -> str:
@@ -144,10 +145,72 @@ class HedgeCoordinator:
         for agent_id in to_remove:
             LOGGER.info("Pruning stale agent '%s' after %.0f seconds of inactivity", agent_id, self._eviction_seconds)
             self._states.pop(agent_id, None)
+            self._controls.pop(agent_id, None)
+
+    def _ensure_control(self, agent_id: str) -> Dict[str, Any]:
+        control = self._controls.get(agent_id)
+        if control is None:
+            control = {"paused": False, "updated_at": None}
+            self._controls[agent_id] = control
+        return control
+
+    def _serialize_control(self, agent_id: str, control: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "agent_id": agent_id,
+            "paused": bool(control.get("paused", False)),
+            "updated_at": control.get("updated_at"),
+        }
+
+    def _controls_snapshot(self) -> Dict[str, Any]:
+        controls_payload = {
+            agent_id: self._serialize_control(agent_id, control)
+            for agent_id, control in self._controls.items()
+        }
+        paused_agents = [agent_id for agent_id, control in controls_payload.items() if control.get("paused")]
+        return {
+            "controls": controls_payload,
+            "paused_agents": paused_agents,
+        }
+
+    async def set_agent_paused(self, agent_id: str, paused: bool) -> Dict[str, Any]:
+        normalized = self._normalize_agent_id(agent_id)
+        async with self._lock:
+            control = self._ensure_control(normalized)
+            control["paused"] = bool(paused)
+            control["updated_at"] = time.time()
+            LOGGER.info("Coordinator control update: agent=%s paused=%s", normalized, control["paused"])
+            snapshot = self._controls_snapshot()
+            snapshot["agent"] = self._serialize_control(normalized, control)
+            return snapshot
+
+    async def toggle_agent_pause(self, agent_id: str) -> Dict[str, Any]:
+        normalized = self._normalize_agent_id(agent_id)
+        async with self._lock:
+            control = self._ensure_control(normalized)
+            control["paused"] = not bool(control.get("paused", False))
+            control["updated_at"] = time.time()
+            LOGGER.info("Coordinator control toggle: agent=%s paused=%s", normalized, control["paused"])
+            snapshot = self._controls_snapshot()
+            snapshot["agent"] = self._serialize_control(normalized, control)
+            return snapshot
+
+    async def control_snapshot(self, agent_id: Optional[str] = None) -> Dict[str, Any]:
+        async with self._lock:
+            snapshot = self._controls_snapshot()
+            if agent_id is not None:
+                normalized = self._normalize_agent_id(agent_id)
+                control = self._ensure_control(normalized)
+                snapshot["agent"] = self._serialize_control(normalized, control)
+            return snapshot
 
     def _build_snapshot(self, now: float) -> Dict[str, Any]:
         aggregate = HedgeState.aggregate(self._states)
         agents_payload = {agent_id: state.serialize() for agent_id, state in self._states.items()}
+
+        for agent_id, payload in agents_payload.items():
+            control = self._controls.get(agent_id)
+            if control is not None:
+                payload["paused"] = bool(control.get("paused", False))
 
         snapshot = aggregate.serialize()
         snapshot.pop("agent_id", None)
@@ -159,6 +222,8 @@ class HedgeCoordinator:
             if now - state.last_update_ts > self._stale_warning_seconds
         ]
         snapshot["last_agent_id"] = self._last_agent_id
+        controls_snapshot = self._controls_snapshot()
+        snapshot.update(controls_snapshot)
         return snapshot
 
     async def update(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -194,6 +259,8 @@ class CoordinatorApp:
                 web.get("/dashboard", self.handle_dashboard),
                 web.get("/metrics", self.handle_metrics),
                 web.post("/update", self.handle_update),
+                web.get("/control", self.handle_control_get),
+                web.post("/control", self.handle_control_update),
             ]
         )
 
@@ -224,6 +291,44 @@ class CoordinatorApp:
 
         state = await self._coordinator.update(body)
         return web.json_response(state)
+
+    async def handle_control_get(self, request: web.Request) -> web.Response:
+        agent_id = request.rel_url.query.get("agent_id")
+        snapshot = await self._coordinator.control_snapshot(agent_id)
+        return web.json_response(snapshot)
+
+    async def handle_control_update(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="control payload must be JSON")
+
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="control payload must be an object")
+
+        agent_id_raw = body.get("agent_id")
+        if agent_id_raw is None:
+            raise web.HTTPBadRequest(text="agent_id is required")
+
+        action_raw = body.get("action")
+        paused_flag = body.get("paused")
+
+        if action_raw is not None:
+            action = str(action_raw).strip().lower()
+            if action == "pause":
+                snapshot = await self._coordinator.set_agent_paused(agent_id_raw, True)
+            elif action in {"resume", "unpause"}:
+                snapshot = await self._coordinator.set_agent_paused(agent_id_raw, False)
+            elif action == "toggle":
+                snapshot = await self._coordinator.toggle_agent_pause(agent_id_raw)
+            else:
+                raise web.HTTPBadRequest(text="invalid control action")
+        elif paused_flag is not None:
+            snapshot = await self._coordinator.set_agent_paused(agent_id_raw, bool(paused_flag))
+        else:
+            raise web.HTTPBadRequest(text="control payload requires 'action' or 'paused'")
+
+        return web.json_response(snapshot)
 
 
 async def _run_app(args: argparse.Namespace) -> None:

@@ -127,6 +127,11 @@
         opacity: 0.7;
       }
 
+      .agent-card.paused {
+        border-color: rgba(125, 140, 170, 0.35);
+        background: #202431;
+      }
+
       .agent-card header {
         display: flex;
         justify-content: space-between;
@@ -170,6 +175,43 @@
         margin-top: 1.25rem;
         font-size: 0.8rem;
         color: #8a94a6;
+      }
+
+      .control-actions {
+        display: flex;
+        gap: 0.75rem;
+        margin-top: 1.25rem;
+        align-items: center;
+      }
+
+      .updated-note {
+        color: #8a94a6;
+        font-size: 0.75rem;
+      }
+
+      button {
+        appearance: none;
+        border: none;
+        border-radius: 6px;
+        padding: 0.55rem 1.1rem;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        background: linear-gradient(135deg, #2b63ff, #7a62ff);
+        color: #f5f7fb;
+        box-shadow: 0 10px 25px rgba(43, 99, 255, 0.2);
+        transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+      }
+
+      button:hover:not(:disabled) {
+        transform: translateY(-2px);
+        box-shadow: 0 14px 28px rgba(43, 99, 255, 0.25);
+      }
+
+      button:disabled {
+        cursor: wait;
+        opacity: 0.65;
+        box-shadow: none;
       }
 
       .empty {
@@ -266,10 +308,42 @@
         }
       }
 
+      async function sendControl(agentId, action, button) {
+        if (!agentId || !action) {
+          return;
+        }
+
+        const previousText = button?.textContent ?? '';
+        if (button) {
+          button.disabled = true;
+          button.textContent = action === 'pause' ? 'Pausing…' : 'Resuming…';
+        }
+
+        try {
+          const response = await fetch('/control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_id: agentId, action })
+          });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          await refreshMetrics();
+        } catch (error) {
+          updatedElement.textContent = `Control update failed: ${error}`;
+        } finally {
+          if (button) {
+            button.disabled = false;
+            button.textContent = previousText || (action === 'pause' ? 'Pause' : 'Resume');
+          }
+        }
+      }
+
       function renderAgents(data) {
         const entries = Object.entries(data?.agents ?? {});
         const staleSet = new Set(data?.stale_agents ?? []);
         const lastAgentId = data?.last_agent_id ?? null;
+        const controls = data?.controls ?? {};
 
         agentGrid.innerHTML = '';
 
@@ -287,6 +361,7 @@
         entries.sort((a, b) => a[0].localeCompare(b[0], undefined, { sensitivity: 'base' }));
 
         let activeCount = 0;
+        let pausedCount = 0;
 
         for (const [agentId, metrics] of entries) {
           const safeId = escapeHtml(agentId);
@@ -301,24 +376,47 @@
             ? new Date(updatedTs).toLocaleString()
             : 'Awaiting data…';
 
+          const control = controls[agentId] ?? {};
+          const isPaused = Boolean(control.paused);
+          const controlTs = Number(control.updated_at ?? 0) * 1000;
+          const pausedSinceText = isPaused && Number.isFinite(controlTs) && controlTs > 0
+            ? new Date(controlTs).toLocaleString()
+            : null;
+
           const card = document.createElement('article');
           card.className = 'agent-card card';
 
           const isStale = staleSet.has(agentId);
           if (isStale) {
             card.classList.add('stale');
-          } else {
+          }
+          if (isPaused) {
+            card.classList.add('paused');
+            pausedCount += 1;
+          }
+          if (!isStale && !isPaused) {
             activeCount += 1;
           }
           if (lastAgentId && agentId === lastAgentId) {
             card.classList.add('recent');
           }
 
+          const statusParts = [];
+          statusParts.push(isPaused ? 'Paused' : 'Active');
+          if (isStale) {
+            statusParts.push('Stale');
+          }
+          if (pausedSinceText) {
+            statusParts.push(`since ${pausedSinceText}`);
+          }
+          const statusText = statusParts.join(' · ');
+
           card.innerHTML = `
             <header>
               <span class="agent-name">${safeId}</span>
               <span class="badge-group">
                 ${lastAgentId && agentId === lastAgentId ? '<span class="badge badge-info">Latest</span>' : ''}
+                ${isPaused ? '<span class="badge badge-muted">Paused</span>' : ''}
                 ${isStale ? '<span class="badge badge-warn">Stale</span>' : ''}
               </span>
             </header>
@@ -328,13 +426,29 @@
               <div><dt>Cumulative PnL</dt><dd>${pnl}</dd></div>
               <div><dt>Total Volume</dt><dd>${volume}</dd></div>
             </dl>
-            <p class="timestamp">Updated ${escapeHtml(updatedText)}</p>
+            <p class="timestamp">${escapeHtml(statusText || 'Status unknown')}</p>
+            <div class="control-actions">
+              <button type="button" data-agent="${safeId}">${isPaused ? 'Resume' : 'Pause'}</button>
+              <span class="updated-note">Updated ${escapeHtml(updatedText)}</span>
+            </div>
           `;
+
+          const controlButton = card.querySelector('button');
+          if (controlButton) {
+            controlButton.addEventListener('click', () => {
+              const action = isPaused ? 'resume' : 'pause';
+              sendControl(agentId, action, controlButton);
+            });
+          }
 
           agentGrid.appendChild(card);
         }
 
-        agentCount.textContent = `${activeCount} active / ${entries.length} total`;
+        const summaryParts = [];
+        summaryParts.push(`${activeCount} active`);
+        summaryParts.push(`${pausedCount} paused`);
+        summaryParts.push(`${entries.length} total`);
+        agentCount.textContent = summaryParts.join(' · ');
       }
 
       async function refreshMetrics() {

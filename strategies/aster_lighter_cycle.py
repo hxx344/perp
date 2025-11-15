@@ -426,6 +426,7 @@ class CycleConfig:
     preserve_initial_position: bool = False
     coordinator_url: Optional[str] = None
     coordinator_agent_id: Optional[str] = None
+    coordinator_pause_poll_seconds: float = 5.0
     virtual_aster_price_source: str = "aster"
     virtual_aster_reference_symbol: Optional[str] = None
     aster_maker_depth_level: int = DEFAULT_ASTER_MAKER_DEPTH_LEVEL
@@ -1321,6 +1322,9 @@ class HedgingCycleExecutor:
             except Exception:
                 agent_id = ""
         self._coordinator_agent_id = agent_id or None
+        self._coordinator_paused = False
+        self._pause_poll_seconds = max(1.0, float(getattr(config, "coordinator_pause_poll_seconds", 5.0) or 5.0))
+        self._last_reported_position = Decimal("0")
 
         self._lighter_quantity_min = config.lighter_quantity_min
         self._lighter_quantity_max = config.lighter_quantity_max
@@ -1492,6 +1496,68 @@ class HedgingCycleExecutor:
             "INFO",
         )
 
+    async def _refresh_pause_state(self) -> bool:
+        if not self._metrics_reporter:
+            self._coordinator_paused = False
+            return False
+
+        try:
+            snapshot = await self._metrics_reporter.fetch_control(agent_id=self._coordinator_agent_id)
+        except Exception as exc:
+            self.logger.log(
+                f"Unable to query coordinator control state: {exc}",
+                "WARNING",
+            )
+            return self._coordinator_paused
+
+        paused = False
+        if isinstance(snapshot, dict):
+            agent_state: Optional[Dict[str, Any]] = None
+            candidate = snapshot.get("agent")
+            if isinstance(candidate, dict):
+                agent_state = candidate
+            elif isinstance(snapshot.get("controls"), dict) and self._coordinator_agent_id:
+                controls_dict = snapshot.get("controls")
+                if isinstance(controls_dict, dict):
+                    raw_agent_state = controls_dict.get(self._coordinator_agent_id)
+                    if isinstance(raw_agent_state, dict):
+                        agent_state = raw_agent_state
+
+            if agent_state is not None:
+                paused = bool(agent_state.get("paused", False))
+            elif isinstance(snapshot.get("paused"), bool):
+                paused = bool(snapshot.get("paused"))
+
+        self._coordinator_paused = paused
+        return paused
+
+    async def wait_for_resume(self, context: str) -> None:
+        if not self._metrics_reporter:
+            self._coordinator_paused = False
+            return
+
+        delay = max(1.0, float(self._pause_poll_seconds))
+        first_notification = True
+
+        while True:
+            paused = await self._refresh_pause_state()
+            if not paused:
+                if not first_notification:
+                    self.logger.log(
+                        f"Coordinator pause cleared; resuming ({context})",
+                        "INFO",
+                    )
+                return
+
+            if first_notification:
+                self.logger.log(
+                    f"Coordinator pause active ({context}); waiting for resume signal",
+                    "WARNING",
+                )
+                first_notification = False
+
+            await asyncio.sleep(delay)
+
     async def report_metrics(
         self,
         *,
@@ -1502,10 +1568,22 @@ class HedgingCycleExecutor:
         if not self._metrics_reporter:
             return
 
-        position = Decimal("0")
-        if self.lighter_client:
+        await self._refresh_pause_state()
+
+        position = self._last_reported_position
+        if self.lighter_client and not self._coordinator_paused:
             try:
-                position = await self.lighter_client.get_account_positions()
+                raw_position = await self.lighter_client.get_account_positions()
+                if isinstance(raw_position, Decimal):
+                    position = raw_position
+                else:
+                    position = Decimal(str(raw_position))
+                self._last_reported_position = position
+            except (InvalidOperation, ValueError, TypeError) as exc:
+                self.logger.log(
+                    f"Unexpected Lighter position payload for coordinator report: {exc}",
+                    "WARNING",
+                )
             except Exception as exc:
                 self.logger.log(
                     f"Unable to fetch Lighter position for coordinator report: {exc}",
@@ -3876,6 +3954,8 @@ async def _async_main(args: argparse.Namespace) -> None:
                         executor.apply_depth_config(payload)
                     except Exception as exc:
                         executor.logger.log(f"Failed to apply hot update config: {exc}", "WARNING")
+
+            await executor.wait_for_resume("before cycle start")
 
             cycle_index += 1
             depth_levels = {
