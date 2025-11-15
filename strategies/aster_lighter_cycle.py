@@ -50,6 +50,7 @@ from exchanges.aster import AsterMarketDataWebSocket
 from exchanges.base import OrderInfo
 from helpers.logger import TradingLogger
 from trading_bot import TradingConfig
+from hedge_reporter import HedgeMetricsReporter
 
 DEFAULT_ASTER_MAKER_DEPTH_LEVEL = 10
 MIN_CYCLE_INTERVAL_SECONDS = 60.0
@@ -419,6 +420,7 @@ class CycleConfig:
     lighter_quantity_min: Optional[Decimal] = None
     lighter_quantity_max: Optional[Decimal] = None
     preserve_initial_position: bool = False
+    coordinator_url: Optional[str] = None
     virtual_aster_price_source: str = "aster"
     virtual_aster_reference_symbol: Optional[str] = None
     aster_maker_depth_level: int = DEFAULT_ASTER_MAKER_DEPTH_LEVEL
@@ -1325,6 +1327,7 @@ class HedgingCycleExecutor:
             self._virtual_price_source = "aster"
         self._virtual_reference_symbol = config.virtual_aster_reference_symbol
         self._binance_price_client: Optional["_BinanceFuturesPriceSource"] = None
+        self._metrics_reporter: Optional[HedgeMetricsReporter] = None
 
         base_depth_candidate = getattr(config, "aster_maker_depth_level", DEFAULT_ASTER_MAKER_DEPTH_LEVEL)
         self._aster_maker_depth_level = self._normalize_depth_value(
@@ -1475,6 +1478,39 @@ class HedgingCycleExecutor:
             ),
             "INFO",
         )
+
+    async def report_metrics(
+        self,
+        *,
+        total_cycles: int,
+        cumulative_pnl: Decimal,
+        cumulative_volume: Decimal,
+    ) -> None:
+        if not self._metrics_reporter:
+            return
+
+        position = Decimal("0")
+        if self.lighter_client:
+            try:
+                position = await self.lighter_client.get_account_positions()
+            except Exception as exc:
+                self.logger.log(
+                    f"Unable to fetch Lighter position for coordinator report: {exc}",
+                    "WARNING",
+                )
+
+        try:
+            await self._metrics_reporter.report(
+                position=position,
+                total_cycles=total_cycles,
+                cumulative_pnl=cumulative_pnl,
+                cumulative_volume=cumulative_volume,
+            )
+        except Exception as exc:
+            self.logger.log(
+                f"Failed to push metrics to coordinator: {exc}",
+                "WARNING",
+            )
 
     def apply_depth_config(self, payload: Dict[str, Any]) -> None:
         if not payload:
@@ -2084,6 +2120,21 @@ class HedgingCycleExecutor:
             "INFO",
         )
 
+        coordinator_url = (self.config.coordinator_url or "").strip()
+        if coordinator_url:
+            try:
+                self._metrics_reporter = HedgeMetricsReporter(coordinator_url)
+                self.logger.log(
+                    f"Hedge coordinator reporting enabled (endpoint={coordinator_url})",
+                    "INFO",
+                )
+            except Exception as exc:
+                self._metrics_reporter = None
+                self.logger.log(
+                    f"Failed to initialise hedge coordinator reporter: {exc}",
+                    "WARNING",
+                )
+
         target_leverage = getattr(self.config, "lighter_leverage", DEFAULT_LIGHTER_LEVERAGE) or DEFAULT_LIGHTER_LEVERAGE
         try:
             target_leverage = int(target_leverage)
@@ -2162,6 +2213,12 @@ class HedgingCycleExecutor:
                 await self._binance_price_client.aclose()
             except Exception:
                 pass
+        if self._metrics_reporter is not None:
+            try:
+                await self._metrics_reporter.aclose()
+            except Exception:
+                pass
+            self._metrics_reporter = None
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.logger.log("Hedging cycle shutdown complete", "INFO")
@@ -3353,6 +3410,10 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--coordinator-url",
+        help="Optional base URL of the hedge coordinator/dashboard (e.g. http://localhost:8899)",
+    )
+    parser.add_argument(
         "--cycles",
         type=int,
         default=0,
@@ -3745,6 +3806,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         delay_between_cycles=max(0.0, args.cycle_delay),
         virtual_aster_maker=args.virtual_aster_maker,
         preserve_initial_position=bool(getattr(args, "preserve_initial_position", False)),
+    coordinator_url=getattr(args, "coordinator_url", None),
         virtual_aster_price_source=args.virtual_maker_price_source,
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
         aster_maker_depth_level=aster_maker_depth,
@@ -3774,6 +3836,14 @@ async def _async_main(args: argparse.Namespace) -> None:
         ConnectionError,
         OSError,
     )
+    try:
+        await executor.report_metrics(
+            total_cycles=cycle_index,
+            cumulative_pnl=cumulative_pnl,
+            cumulative_volume=cumulative_volume,
+        )
+    except Exception:
+        pass
     try:
         while True:
             payload: Optional[Dict[str, Any]] = None
@@ -3826,6 +3896,12 @@ async def _async_main(args: argparse.Namespace) -> None:
                         "ERROR",
                     )
 
+                await executor.report_metrics(
+                    total_cycles=cycle_index,
+                    cumulative_pnl=cumulative_pnl,
+                    cumulative_volume=cumulative_volume,
+                )
+
                 sleep_seconds = _compute_cycle_pause_seconds(
                     cycle_start_time,
                     config.delay_between_cycles,
@@ -3853,6 +3929,12 @@ async def _async_main(args: argparse.Namespace) -> None:
                         f"Emergency flatten after network error failed: {flatten_exc}",
                         "ERROR",
                     )
+
+                await executor.report_metrics(
+                    total_cycles=cycle_index,
+                    cumulative_pnl=cumulative_pnl,
+                    cumulative_volume=cumulative_volume,
+                )
 
                 if network_error_count >= 3:
                     executor.logger.log(
@@ -3930,6 +4012,12 @@ async def _async_main(args: argparse.Namespace) -> None:
 
                 await executor._log_leaderboard_points(cycle_index)
 
+            await executor.report_metrics(
+                total_cycles=cycle_index,
+                cumulative_pnl=cumulative_pnl,
+                cumulative_volume=cumulative_volume,
+            )
+
             try:
                 await executor.ensure_lighter_flat()
             except Exception as exc:
@@ -3966,6 +4054,14 @@ async def _async_main(args: argparse.Namespace) -> None:
                 f"Emergency flatten failed during shutdown: {exc}",
                 "ERROR",
             )
+        try:
+            await executor.report_metrics(
+                total_cycles=cycle_index,
+                cumulative_pnl=cumulative_pnl,
+                cumulative_volume=cumulative_volume,
+            )
+        except Exception:
+            pass
         await executor.shutdown()
 
 

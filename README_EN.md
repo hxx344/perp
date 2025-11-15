@@ -256,6 +256,19 @@ Key options:
    optionally override the Binance contract symbol via `--virtual-maker-symbol` (defaults to the resolved Aster contract ID).
 - `--preserve-initial-position`: Capture the current Lighter position at startup and restore it after each cycle
    (and during shutdown) whenever it drifts from that baseline, rather than forcing the account to flat exposure.
+- `--coordinator-url`: When provided, the bot will push live metrics to the lightweight dashboard served by
+   `strategies/hedge_coordinator.py` (see below).
+
+### Optional coordinator & dashboard
+
+To follow the hedging run remotely, start the bundled coordinator service:
+
+```bash
+python strategies/hedge_coordinator.py --host 0.0.0.0 --port 8899
+```
+
+Then run the hedging bot with `--coordinator-url http://<host>:8899`. The dashboard (available at
+`/dashboard`) shows the latest Lighter position, cumulative cycle count, PnL, and traded volume.
 
 ## GRVT–Lighter Hedging Cycle
 

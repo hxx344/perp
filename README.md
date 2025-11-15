@@ -292,9 +292,21 @@ python strategies/aster_lighter_cycle.py \
 - 默认等待超时为 5 秒，可通过 `--max-wait` 调整。
 - `--max-retries` 默认 100 次，`--retry-delay` 默认 5 秒，两者共同控制 Aster Maker 单的重试次数与重试间隔，避免超时直接退出。
 - `--preserve-initial-position`：启动时记录 Lighter 初始净仓位；在每轮循环与退出阶段若检测到当前仓位与初始值不一致，会自动下单恢复为初始仓位（默认关闭，仅在显式加上该参数时生效）。
+- `--coordinator-url`：可选参数，指向 `strategies/hedge_coordinator.py` 暴露的 HTTP 服务地址，用于实时上报指标供面板展示。
 - 如果仅想在虚拟环境中监听价格并触发 Lighter Taker，可使用 `--virtual-aster-maker`；
    配合 `--virtual-maker-price-source bn` 可改为监听 Binance 永续合约的买四/卖四价格，
    如需自定义 Binance 符号可通过 `--virtual-maker-symbol` 覆盖（默认沿用解析到的 Aster 合约 ID）。
+
+### 可选：协调机与面板
+
+若希望远程查看对冲执行情况，可先启动附带的轻量协调机：
+
+```bash
+python strategies/hedge_coordinator.py --host 0.0.0.0 --port 8899
+```
+
+随后运行对冲脚本时带上 `--coordinator-url http://<host>:8899`，即可在浏览器访问 `/dashboard`
+查看当前 Lighter 仓位、累计循环次数、累计收益以及累计成交量等指标。
 
 ## GRVT-Lighter 对冲循环
 

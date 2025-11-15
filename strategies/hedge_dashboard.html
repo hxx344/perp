@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hedge Metrics Dashboard</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+        background: #111;
+        color: #f2f4f8;
+      }
+
+      body {
+        margin: 0;
+        padding: 2rem;
+        max-width: 960px;
+        margin-inline: auto;
+      }
+
+      h1 {
+        font-size: 1.75rem;
+        margin-bottom: 0.5rem;
+      }
+
+      .subtitle {
+        color: #8a94a6;
+        margin-bottom: 2rem;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1.25rem;
+      }
+
+      .card {
+        background: #1b1d24;
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
+      }
+
+      .card h2 {
+        font-size: 0.9rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin: 0 0 0.75rem;
+        color: #7f8fa9;
+      }
+
+      .value {
+        font-size: 2rem;
+        font-weight: 600;
+      }
+
+      .updated {
+        margin-top: 2rem;
+        color: #7f8fa9;
+        font-size: 0.85rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Hedging Cycle Overview</h1>
+    <p class="subtitle">Live metrics reported by the Aster–Lighter hedging executor.</p>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Current Position</h2>
+        <div class="value" id="position">--</div>
+      </article>
+      <article class="card">
+        <h2>Total Cycles</h2>
+        <div class="value" id="cycles">--</div>
+      </article>
+      <article class="card">
+        <h2>Cumulative PnL</h2>
+        <div class="value" id="pnl">--</div>
+      </article>
+      <article class="card">
+        <h2>Total Volume</h2>
+        <div class="value" id="volume">--</div>
+      </article>
+    </section>
+
+    <p class="updated" id="updated">Awaiting data…</p>
+
+    <script>
+      async function refreshMetrics() {
+        try {
+          const response = await fetch('/metrics', { cache: 'no-store' });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const data = await response.json();
+          const fmt = new Intl.NumberFormat(undefined, {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 6,
+            notation: 'compact'
+          });
+
+          const pos = Number(data.position ?? 0);
+          const pnl = Number(data.cumulative_pnl ?? 0);
+          const vol = Number(data.cumulative_volume ?? 0);
+
+          document.getElementById('position').textContent = fmt.format(pos);
+          document.getElementById('cycles').textContent = data.total_cycles ?? '--';
+          document.getElementById('pnl').textContent = fmt.format(pnl);
+          document.getElementById('volume').textContent = fmt.format(vol);
+
+          if (data.last_update_ts) {
+            const updated = new Date(data.last_update_ts * 1000);
+            document.getElementById('updated').textContent = `Last update: ${updated.toLocaleString()}`;
+          } else {
+            document.getElementById('updated').textContent = 'Awaiting data…';
+          }
+        } catch (error) {
+          document.getElementById('updated').textContent = `Dashboard error: ${error}`;
+        }
+      }
+
+      refreshMetrics();
+      setInterval(refreshMetrics, 2000);
+    </script>
+  </body>
+</html>
