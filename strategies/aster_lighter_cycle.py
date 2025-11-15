@@ -418,6 +418,7 @@ class CycleConfig:
     direction_seed: Optional[int] = None
     lighter_quantity_min: Optional[Decimal] = None
     lighter_quantity_max: Optional[Decimal] = None
+    preserve_initial_position: bool = False
     virtual_aster_price_source: str = "aster"
     virtual_aster_reference_symbol: Optional[str] = None
     aster_maker_depth_level: int = DEFAULT_ASTER_MAKER_DEPTH_LEVEL
@@ -1310,6 +1311,10 @@ class HedgingCycleExecutor:
         self._lighter_quantity_max = config.lighter_quantity_max
         self._lighter_quantity_step = Decimal("0.001")
         self._current_cycle_lighter_quantity: Optional[Decimal] = None
+        self._preserve_initial_lighter_position = bool(
+            getattr(config, "preserve_initial_position", False)
+        )
+        self._baseline_lighter_position: Optional[Decimal] = None
         self._virtual_price_source = (config.virtual_aster_price_source or "aster").lower()
         allowed_virtual_sources = {"aster", "bn"}
         if self._virtual_price_source not in allowed_virtual_sources:
@@ -1439,6 +1444,37 @@ class HedgingCycleExecutor:
             depth = 500
 
         return depth
+
+    async def _capture_initial_lighter_position(self) -> None:
+        if not self.lighter_client:
+            return
+
+        try:
+            position_raw = await self.lighter_client.get_account_positions()
+        except Exception as exc:
+            self.logger.log(
+                f"Failed to capture initial Lighter position: {exc}",
+                "WARNING",
+            )
+            return
+
+        try:
+            baseline = position_raw if isinstance(position_raw, Decimal) else Decimal(str(position_raw))
+        except (InvalidOperation, ValueError, TypeError):
+            self.logger.log(
+                "Unable to interpret initial Lighter position; defaulting baseline to 0",
+                "WARNING",
+            )
+            baseline = Decimal("0")
+
+        self._baseline_lighter_position = baseline
+        self.logger.log(
+            (
+                "Initial Lighter position preservation enabled; baseline captured at "
+                f"{_format_decimal(baseline)} contracts"
+            ),
+            "INFO",
+        )
 
     def apply_depth_config(self, payload: Dict[str, Any]) -> None:
         if not payload:
@@ -2092,6 +2128,8 @@ class HedgingCycleExecutor:
             f"Configured leg quantities -> Aster: {self.config.aster_quantity}, Lighter: {lighter_quantity_display}",
             "INFO",
         )
+        if self._preserve_initial_lighter_position and self._baseline_lighter_position is None:
+            await self._capture_initial_lighter_position()
         self.logger.log("Hedging cycle setup complete", "INFO")
 
         # Start housekeeping loop
@@ -3006,17 +3044,65 @@ class HedgingCycleExecutor:
             self.logger.log("Lighter client unavailable; skipping emergency flatten", "WARNING")
             return
 
-        position = await self.lighter_client.get_account_positions()
-        if position == 0:
-            self.logger.log("No Lighter position detected; no emergency action required", "INFO")
-            # Add a blank line for readability before the next cycle output
+        try:
+            current_position_raw = await self.lighter_client.get_account_positions()
+        except Exception as exc:
+            self.logger.log(
+                f"Failed to query Lighter position during preservation check: {exc}",
+                "ERROR",
+            )
+            return
+
+        try:
+            position = (
+                current_position_raw
+                if isinstance(current_position_raw, Decimal)
+                else Decimal(str(current_position_raw))
+            )
+        except (InvalidOperation, ValueError, TypeError):
+            self.logger.log(
+                f"Unable to interpret Lighter position value '{current_position_raw}'; assuming 0",
+                "WARNING",
+            )
+            position = Decimal("0")
+
+        target_position = Decimal("0")
+        if self._preserve_initial_lighter_position:
+            if self._baseline_lighter_position is None:
+                await self._capture_initial_lighter_position()
+            if self._baseline_lighter_position is not None:
+                target_position = self._baseline_lighter_position
+
+        delta = position - target_position
+
+        if delta == Decimal("0"):
+            if self._preserve_initial_lighter_position:
+                self.logger.log(
+                    (
+                        "Lighter position matches baseline "
+                        f"{_format_decimal(target_position)}; no restoration required"
+                    ),
+                    "INFO",
+                )
+            else:
+                self.logger.log("No Lighter position detected; no emergency action required", "INFO")
             if bool(getattr(self.config, "log_to_console", False)):
                 print()
             return
 
-        # Positive values denote a net long position; negative values denote a net short position.
-        side = "sell" if position > 0 else "buy"
-        quantity = abs(position)
+        # Positive deltas denote excess long exposure relative to the target; negative deltas denote excess short exposure.
+        side = "sell" if delta > 0 else "buy"
+        quantity = abs(delta)
+
+        if self._preserve_initial_lighter_position:
+            self.logger.log(
+                (
+                    "Restoring Lighter position to baseline: current="
+                    f"{_format_decimal(position)} contracts, target={_format_decimal(target_position)}, "
+                    f"action={side.upper()} {_format_decimal(quantity)}"
+                ),
+                "INFO",
+            )
 
         reference_price = self._last_leg1_price
         if reference_price is None or reference_price <= 0:
@@ -3108,7 +3194,7 @@ class HedgingCycleExecutor:
             fill_info = await self._wait_for_lighter_fill(
                 str(order_result.order_id),
                 "EMERGENCY_FLATTEN",
-                expected_final_position=Decimal("0"),
+                expected_final_position=target_position,
                 expected_fill_size=quantity,
                 expected_side=side,
                 position_before=position,
@@ -3248,6 +3334,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--virtual-maker-symbol",
         help="Optional contract symbol used by the virtual maker price source (defaults to the resolved Aster contract id)",
+    )
+    parser.add_argument(
+        "--preserve-initial-position",
+        action="store_true",
+        help=(
+            "Capture the initial Lighter position at startup and restore it after each cycle and on shutdown "
+            "instead of forcing the account flat"
+        ),
     )
     parser.add_argument(
         "--hot-update-url",
@@ -3650,12 +3744,13 @@ async def _async_main(args: argparse.Namespace) -> None:
         max_cycles=max(0, args.cycles),
         delay_between_cycles=max(0.0, args.cycle_delay),
         virtual_aster_maker=args.virtual_aster_maker,
+        preserve_initial_position=bool(getattr(args, "preserve_initial_position", False)),
         virtual_aster_price_source=args.virtual_maker_price_source,
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
         aster_maker_depth_level=aster_maker_depth,
         aster_leg1_depth_level=leg1_depth_arg,
         aster_leg3_depth_level=leg3_depth_arg,
-    hot_update_url=hot_update_url,
+        hot_update_url=hot_update_url,
         memory_clean_interval_seconds=args.memory_clean_interval,
         memory_warn_mb=args.memory_warn_mb,
         log_to_console=bool(log_to_console_option),

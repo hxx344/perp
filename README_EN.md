@@ -254,6 +254,8 @@ Key options:
 - `--virtual-aster-maker`: Simulate the Aster maker legs without sending real orders; combine with
    `--virtual-maker-price-source bn` to watch Binance futures level-4 prices instead of Aster depth, and
    optionally override the Binance contract symbol via `--virtual-maker-symbol` (defaults to the resolved Aster contract ID).
+- `--preserve-initial-position`: Capture the current Lighter position at startup and restore it after each cycle
+   (and during shutdown) whenever it drifts from that baseline, rather than forcing the account to flat exposure.
 
 ## GRVT–Lighter Hedging Cycle
 
