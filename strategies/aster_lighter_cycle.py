@@ -50,7 +50,10 @@ from exchanges.aster import AsterMarketDataWebSocket
 from exchanges.base import OrderInfo
 from helpers.logger import TradingLogger
 from trading_bot import TradingConfig
-from hedge_reporter import HedgeMetricsReporter
+try:  # pragma: no cover - package/script compatibility
+    from .hedge_reporter import HedgeMetricsReporter
+except ImportError:  # pragma: no cover - fallback when executed as a script
+    from hedge_reporter import HedgeMetricsReporter
 
 DEFAULT_ASTER_MAKER_DEPTH_LEVEL = 10
 MIN_CYCLE_INTERVAL_SECONDS = 60.0
