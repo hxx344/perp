@@ -32,6 +32,8 @@ class HedgeMetricsReporter:
         cumulative_pnl: Decimal,
         cumulative_volume: Decimal,
         agent_id: Optional[str] = None,
+        available_balance: Optional[Decimal] = None,
+        total_account_value: Optional[Decimal] = None,
     ) -> None:
         session = await self._ensure_session()
         url = f"{self._base_url}/update"
@@ -45,6 +47,12 @@ class HedgeMetricsReporter:
         agent_identifier = (agent_id or self._agent_id or "").strip()
         if agent_identifier:
             payload["agent_id"] = agent_identifier
+
+        if available_balance is not None:
+            payload["available_balance"] = str(available_balance)
+
+        if total_account_value is not None:
+            payload["total_account_value"] = str(total_account_value)
 
         try:
             async with session.post(url, json=payload) as response:

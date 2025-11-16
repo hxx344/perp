@@ -246,6 +246,14 @@
         <h2>Total Volume</h2>
         <div class="value" id="volume">--</div>
       </article>
+      <article class="card">
+        <h2>Available Balance</h2>
+        <div class="value" id="available-balance">--</div>
+      </article>
+      <article class="card">
+        <h2>Total Account Value</h2>
+        <div class="value" id="account-value">--</div>
+      </article>
     </section>
 
     <section class="agent-section">
@@ -293,11 +301,24 @@
         const pnl = toNumber(data.cumulative_pnl ?? data?.aggregate?.cumulative_pnl);
         const volume = toNumber(data.cumulative_volume ?? data?.aggregate?.cumulative_volume);
         const cyclesRaw = Number(data.total_cycles ?? data?.aggregate?.total_cycles ?? 0);
+        const available = toNumber(
+          data.available_balance ??
+          data.total_available_balance ??
+          data?.aggregate?.available_balance
+        );
+        const accountValue = toNumber(
+          data.total_account_value ??
+          data.account_value ??
+          data?.aggregate?.total_account_value ??
+          data?.aggregate?.account_value
+        );
 
         document.getElementById('position').textContent = numberFormatter.format(position);
         document.getElementById('pnl').textContent = numberFormatter.format(pnl);
         document.getElementById('volume').textContent = numberFormatter.format(volume);
         document.getElementById('cycles').textContent = Number.isFinite(cyclesRaw) ? cyclesRaw : '--';
+        document.getElementById('available-balance').textContent = numberFormatter.format(available);
+        document.getElementById('account-value').textContent = numberFormatter.format(accountValue);
 
         if (data.last_update_ts) {
           const updatedDate = new Date(Number(data.last_update_ts) * 1000);
@@ -368,6 +389,20 @@
           const position = numberFormatter.format(toNumber(metrics.position));
           const pnl = numberFormatter.format(toNumber(metrics.cumulative_pnl));
           const volume = numberFormatter.format(toNumber(metrics.cumulative_volume));
+          const available = numberFormatter.format(
+            toNumber(
+              metrics.available_balance ??
+              metrics.available ??
+              metrics.total_available_balance
+            )
+          );
+          const accountValue = numberFormatter.format(
+            toNumber(
+              metrics.total_account_value ??
+              metrics.account_value ??
+              metrics.total_asset_value
+            )
+          );
           const cyclesRaw = Number(metrics.total_cycles ?? 0);
           const cycles = Number.isFinite(cyclesRaw) ? cyclesRaw : '--';
 
@@ -425,6 +460,8 @@
               <div><dt>Total Cycles</dt><dd>${cycles}</dd></div>
               <div><dt>Cumulative PnL</dt><dd>${pnl}</dd></div>
               <div><dt>Total Volume</dt><dd>${volume}</dd></div>
+              <div><dt>Available</dt><dd>${available}</dd></div>
+              <div><dt>Account Value</dt><dd>${accountValue}</dd></div>
             </dl>
             <p class="timestamp">${escapeHtml(statusText || 'Status unknown')}</p>
             <div class="control-actions">

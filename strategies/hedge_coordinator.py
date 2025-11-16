@@ -12,6 +12,10 @@ Usage
 
     python strategies/hedge_coordinator.py --host 0.0.0.0 --port 8899
 
+Optional HTTP Basic authentication for the dashboard can be enabled with::
+
+    python strategies/hedge_coordinator.py --dashboard-username admin --dashboard-password secret
+
 The hedging bot can then be started with ``--coordinator-url http://host:8899``
 so that it will POST metrics to ``/update`` after every cycle and during
 shutdown.
@@ -21,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import binascii
 import logging
 import signal
 import time
@@ -46,6 +52,8 @@ class HedgeState:
     total_cycles: int = 0
     cumulative_pnl: Decimal = Decimal("0")
     cumulative_volume: Decimal = Decimal("0")
+    available_balance: Decimal = Decimal("0")
+    account_value: Decimal = Decimal("0")
     last_update_ts: float = field(default_factory=time.time)
 
     def update_from_payload(self, payload: Dict[str, Any]) -> None:
@@ -53,6 +61,10 @@ class HedgeState:
         cycles_raw = payload.get("total_cycles")
         pnl_raw = payload.get("cumulative_pnl")
         volume_raw = payload.get("cumulative_volume")
+        available_raw = payload.get("available_balance")
+        account_value_raw = payload.get("total_account_value")
+        if account_value_raw is None:
+            account_value_raw = payload.get("total_asset_value")
 
         if position_raw is not None:
             try:
@@ -78,6 +90,18 @@ class HedgeState:
             except Exception:
                 LOGGER.warning("Invalid volume payload: %s", volume_raw)
 
+        if available_raw is not None:
+            try:
+                self.available_balance = Decimal(str(available_raw))
+            except Exception:
+                LOGGER.warning("Invalid available balance payload: %s", available_raw)
+
+        if account_value_raw is not None:
+            try:
+                self.account_value = Decimal(str(account_value_raw))
+            except Exception:
+                LOGGER.warning("Invalid account value payload: %s", account_value_raw)
+
         self.last_update_ts = time.time()
 
     def serialize(self) -> Dict[str, Any]:
@@ -86,6 +110,8 @@ class HedgeState:
             "total_cycles": self.total_cycles,
             "cumulative_pnl": str(self.cumulative_pnl),
             "cumulative_volume": str(self.cumulative_volume),
+            "available_balance": str(self.available_balance),
+            "total_account_value": str(self.account_value),
             "last_update_ts": self.last_update_ts,
         }
         if self.agent_id is not None:
@@ -101,6 +127,8 @@ class HedgeState:
             aggregate.total_cycles += int(state.total_cycles)
             aggregate.cumulative_pnl += state.cumulative_pnl
             aggregate.cumulative_volume += state.cumulative_volume
+            aggregate.available_balance += state.available_balance
+            aggregate.account_value += state.account_value
             if state.last_update_ts > aggregate.last_update_ts:
                 aggregate.last_update_ts = state.last_update_ts
 
@@ -250,8 +278,15 @@ class HedgeCoordinator:
 
 
 class CoordinatorApp:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        dashboard_username: Optional[str] = None,
+        dashboard_password: Optional[str] = None,
+    ) -> None:
         self._coordinator = HedgeCoordinator()
+        self._dashboard_username = (dashboard_username or "").strip()
+        self._dashboard_password = (dashboard_password or "").strip()
         self._app = web.Application()
         self._app.add_routes(
             [
@@ -269,14 +304,17 @@ class CoordinatorApp:
         return self._app
 
     async def handle_dashboard_redirect(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
         raise web.HTTPFound("/dashboard")
 
     async def handle_dashboard(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
         if not DASHBOARD_PATH.exists():
             raise web.HTTPNotFound(text="dashboard asset missing; ensure hedge_dashboard.html exists")
         return web.FileResponse(path=DASHBOARD_PATH)
 
     async def handle_metrics(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
         payload = await self._coordinator.snapshot()
         return web.json_response(payload)
 
@@ -293,11 +331,13 @@ class CoordinatorApp:
         return web.json_response(state)
 
     async def handle_control_get(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
         agent_id = request.rel_url.query.get("agent_id")
         snapshot = await self._coordinator.control_snapshot(agent_id)
         return web.json_response(snapshot)
 
     async def handle_control_update(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
         try:
             body = await request.json()
         except Exception:
@@ -330,11 +370,38 @@ class CoordinatorApp:
 
         return web.json_response(snapshot)
 
+    def _enforce_dashboard_auth(self, request: web.Request) -> None:
+        username = self._dashboard_username
+        password = self._dashboard_password
+
+        if not username and not password:
+            return
+
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            raise web.HTTPUnauthorized(headers={"WWW-Authenticate": 'Basic realm="Hedge Dashboard"'})
+
+        token = header[6:]
+        try:
+            decoded = base64.b64decode(token).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            raise web.HTTPUnauthorized(headers={"WWW-Authenticate": 'Basic realm="Hedge Dashboard"'})
+
+        provided_username, _, provided_password = decoded.partition(":")
+        if username != provided_username or password != provided_password:
+            raise web.HTTPUnauthorized(headers={"WWW-Authenticate": 'Basic realm="Hedge Dashboard"'})
+
 
 async def _run_app(args: argparse.Namespace) -> None:
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
-    coordinator_app = CoordinatorApp()
+    coordinator_app = CoordinatorApp(
+        dashboard_username=args.dashboard_username,
+        dashboard_password=args.dashboard_password,
+    )
+
+    if (args.dashboard_username or "") or (args.dashboard_password or ""):
+        LOGGER.info("Dashboard authentication enabled; protected endpoints require HTTP Basic credentials")
     runner = web.AppRunner(coordinator_app.app)
     await runner.setup()
 
@@ -366,6 +433,14 @@ def _parse_args() -> argparse.Namespace:
         "--log-level",
         default="INFO",
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
+    )
+    parser.add_argument(
+        "--dashboard-username",
+        help="Optional username required to access the dashboard (enables HTTP Basic auth)",
+    )
+    parser.add_argument(
+        "--dashboard-password",
+        help="Optional password required to access the dashboard (enables HTTP Basic auth)",
     )
     return parser.parse_args()
 

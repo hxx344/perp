@@ -1587,6 +1587,8 @@ class HedgingCycleExecutor:
         await self._refresh_pause_state()
 
         position = self._last_reported_position
+        available_balance: Optional[Decimal] = None
+        total_account_value: Optional[Decimal] = None
         if self.lighter_client and not self._coordinator_paused:
             try:
                 raw_position = await self.lighter_client.get_account_positions()
@@ -1605,6 +1607,39 @@ class HedgingCycleExecutor:
                     f"Unable to fetch Lighter position for coordinator report: {exc}",
                     "WARNING",
                 )
+            try:
+                account_snapshot = await self.lighter_client.get_account_metrics()
+            except Exception as exc:
+                self.logger.log(
+                    f"Unable to fetch Lighter account metrics for coordinator report: {exc}",
+                    "WARNING",
+                )
+            else:
+                if isinstance(account_snapshot, dict):
+                    available_candidate = account_snapshot.get("available_balance")
+                    total_candidate = account_snapshot.get("total_account_value")
+                    if total_candidate is None:
+                        total_candidate = account_snapshot.get("total_asset_value")
+
+                    try:
+                        if available_candidate is not None:
+                            available_balance = Decimal(str(available_candidate))
+                    except (InvalidOperation, ValueError, TypeError):
+                        available_balance = None
+                        self.logger.log(
+                            f"Invalid available balance in account metrics: {available_candidate}",
+                            "WARNING",
+                        )
+
+                    try:
+                        if total_candidate is not None:
+                            total_account_value = Decimal(str(total_candidate))
+                    except (InvalidOperation, ValueError, TypeError):
+                        total_account_value = None
+                        self.logger.log(
+                            f"Invalid total account value in account metrics: {total_candidate}",
+                            "WARNING",
+                        )
 
         try:
             await self._metrics_reporter.report(
@@ -1613,6 +1648,8 @@ class HedgingCycleExecutor:
                 cumulative_pnl=cumulative_pnl,
                 cumulative_volume=cumulative_volume,
                 agent_id=self._coordinator_agent_id,
+                available_balance=available_balance,
+                total_account_value=total_account_value,
             )
         except Exception as exc:
             self.logger.log(
