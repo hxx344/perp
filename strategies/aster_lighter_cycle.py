@@ -427,6 +427,8 @@ class CycleConfig:
     coordinator_url: Optional[str] = None
     coordinator_agent_id: Optional[str] = None
     coordinator_pause_poll_seconds: float = 5.0
+    coordinator_username: Optional[str] = None
+    coordinator_password: Optional[str] = None
     virtual_aster_price_source: str = "aster"
     virtual_aster_reference_symbol: Optional[str] = None
     aster_maker_depth_level: int = DEFAULT_ASTER_MAKER_DEPTH_LEVEL
@@ -1338,6 +1340,12 @@ class HedgingCycleExecutor:
             except Exception:
                 agent_id = ""
         self._coordinator_agent_id = agent_id or None
+        self._coordinator_username = (
+            getattr(config, "coordinator_username", None) or ""
+        ).strip() or None
+        self._coordinator_password = (
+            getattr(config, "coordinator_password", None) or ""
+        ).strip() or None
         self._coordinator_paused = False
         self._pause_poll_seconds = max(1.0, float(getattr(config, "coordinator_pause_poll_seconds", 5.0) or 5.0))
         self._last_reported_position = Decimal("0")
@@ -2271,9 +2279,12 @@ class HedgingCycleExecutor:
                 self._metrics_reporter = HedgeMetricsReporter(
                     coordinator_url,
                     agent_id=self._coordinator_agent_id,
+                    auth_username=self._coordinator_username,
+                    auth_password=self._coordinator_password,
                 )
+                auth_label = "with credentials" if self._coordinator_username or self._coordinator_password else "without credentials"
                 self.logger.log(
-                    f"Hedge coordinator reporting enabled (endpoint={coordinator_url})",
+                    f"Hedge coordinator reporting enabled (endpoint={coordinator_url}, {auth_label})",
                     "INFO",
                 )
             except Exception as exc:
@@ -3569,6 +3580,14 @@ def _parse_args() -> argparse.Namespace:
         help="Identifier reported to the coordinator to distinguish this VPS (defaults to hostname)",
     )
     parser.add_argument(
+        "--coordinator-username",
+        help="Optional username for coordinator HTTP Basic auth",
+    )
+    parser.add_argument(
+        "--coordinator-password",
+        help="Optional password for coordinator HTTP Basic auth",
+    )
+    parser.add_argument(
         "--cycles",
         type=int,
         default=0,
@@ -3968,6 +3987,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         preserve_initial_position=bool(getattr(args, "preserve_initial_position", False)),
         coordinator_url=getattr(args, "coordinator_url", None),
         coordinator_agent_id=getattr(args, "coordinator_agent", None),
+    coordinator_username=getattr(args, "coordinator_username", None),
+    coordinator_password=getattr(args, "coordinator_password", None),
         virtual_aster_price_source=args.virtual_maker_price_source,
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
         aster_maker_depth_level=aster_maker_depth,
