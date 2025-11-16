@@ -414,7 +414,7 @@ class CycleConfig:
     max_wait_seconds: float
     lighter_max_wait_seconds: float
     poll_interval: float
-    max_retries: int
+    max_retries: int  # <=0 disables retry limit
     retry_delay_seconds: float
     max_cycles: int
     delay_between_cycles: float
@@ -444,6 +444,7 @@ class CycleConfig:
     tracemalloc_group_by: str = "lineno"  # one of: lineno, traceback, filename
     tracemalloc_filter: Optional[str] = None  # only include entries whose path/trace contains this substring
     tracemalloc_frames: int = 25
+    enforce_min_cycle_interval: bool = True
     lighter_leverage: int = 50
 
 
@@ -512,10 +513,18 @@ def _format_decimal(value: Optional[Decimal], places: int = 6) -> str:
     return text
 
 
-def _compute_cycle_pause_seconds(cycle_start_time: float, configured_delay: float) -> float:
+def _compute_cycle_pause_seconds(
+    cycle_start_time: float,
+    configured_delay: float,
+    *,
+    enforce_min_interval: bool = True,
+) -> float:
     elapsed = max(0.0, time.time() - cycle_start_time)
-    remaining_for_min = max(0.0, MIN_CYCLE_INTERVAL_SECONDS - elapsed)
-    return float(max(configured_delay, remaining_for_min))
+    if enforce_min_interval:
+        remaining_for_min = max(0.0, MIN_CYCLE_INTERVAL_SECONDS - elapsed)
+        return float(max(configured_delay, remaining_for_min))
+
+    return float(max(0.0, configured_delay))
 
 
 _LEADERBOARD_ENDPOINT = "/api/v1/leaderboard"
@@ -885,6 +894,8 @@ async def _request_lighter_intent_address(
         session = aiohttp.ClientSession(timeout=timeout)
         close_session = True
 
+    assert session is not None
+
     try:
         url = f"{base_url.rstrip('/')}/api/v1/createIntentAddress"
         form_payload = {
@@ -933,6 +944,8 @@ async def _fetch_lighter_account_overview(
         timeout = aiohttp.ClientTimeout(total=15)
         session = aiohttp.ClientSession(timeout=timeout)
         close_session = True
+
+    assert session is not None
 
     try:
         url = f"{base_url.rstrip('/')}/api/v1/account"
@@ -1308,6 +1321,9 @@ class HedgingCycleExecutor:
 
     def __init__(self, config: CycleConfig):
         self.config = config
+        self.config.enforce_min_cycle_interval = bool(
+            getattr(config, "enforce_min_cycle_interval", True)
+        )
         ticker_label = f"{config.aster_ticker}_{config.lighter_ticker}".replace("/", "-")
         self.logger = TradingLogger(
             exchange="hedge",
@@ -2412,7 +2428,7 @@ class HedgingCycleExecutor:
                     f"{leg_name} | Attempt {attempt} timed out. Repricing and retrying...",
                     "WARNING",
                 )
-                if attempt >= self.config.max_retries:
+                if self.config.max_retries > 0 and attempt >= self.config.max_retries:
                     raise
                 skip_retry_delay = True
                 continue
@@ -2496,7 +2512,7 @@ class HedgingCycleExecutor:
                     f"{leg_name} | Attempt {attempt} timed out. Repricing and retrying...",
                     "WARNING",
                 )
-                if attempt >= self.config.max_retries:
+                if self.config.max_retries > 0 and attempt >= self.config.max_retries:
                     raise
                 skip_retry_delay = True
                 continue
@@ -2555,7 +2571,7 @@ class HedgingCycleExecutor:
                     f"{leg_name} | Virtual pricing attempt {attempt} failed: {last_error}",
                     "ERROR",
                 )
-                if attempt >= self.config.max_retries:
+                if self.config.max_retries > 0 and attempt >= self.config.max_retries:
                     raise RuntimeError(
                         f"{leg_name} | Unable to determine virtual Aster price after {attempt} attempts: {last_error}"
                     )
@@ -2573,7 +2589,7 @@ class HedgingCycleExecutor:
                     f"{leg_name} | Virtual Aster order at {target_price} timed out on attempt {attempt}. Retrying...",
                     "WARNING",
                 )
-                if attempt >= self.config.max_retries:
+                if self.config.max_retries > 0 and attempt >= self.config.max_retries:
                     raise
                 skip_retry_delay = True
                 continue
@@ -2649,7 +2665,10 @@ class HedgingCycleExecutor:
         if reference_price <= 0:
             raise RuntimeError(f"{leg_name} | Invalid reference price {reference_price} for Lighter taker order")
 
-        max_attempts = min(5, max(1, self.config.max_retries))
+        if self.config.max_retries <= 0:
+            max_attempts = 5
+        else:
+            max_attempts = min(5, self.config.max_retries)
         current_slippage = self.config.slippage_pct
         last_error: Optional[Exception] = None
         if self._current_cycle_lighter_quantity is None:
@@ -3448,7 +3467,7 @@ def _parse_args() -> argparse.Namespace:
         "--max-retries",
         type=int,
         default=500,
-        help="Maximum number of retries for Aster maker orders before aborting",
+        help="Maximum number of retries for Aster maker orders before aborting (set 0 for unlimited)",
     )
     parser.add_argument(
         "--retry-delay",
@@ -3524,8 +3543,13 @@ def _parse_args() -> argparse.Namespace:
         default=0.0,
         help=(
             "Additional delay in seconds between successive hedging cycles. "
-            "Actual cadence enforces at least 60 seconds between cycle starts"
+            "Actual cadence enforces at least 60 seconds between cycle starts unless --disable-min-cycle-interval is used"
         ),
+    )
+    parser.add_argument(
+        "--disable-min-cycle-interval",
+        action="store_true",
+        help="Allow successive hedging cycles without enforcing the default 60-second minimum interval",
     )
     parser.add_argument(
         "--env-file",
@@ -3921,6 +3945,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         tracemalloc_group_by=str(getattr(args, "tracemalloc_group_by", "lineno") or "lineno"),
         tracemalloc_filter=getattr(args, "tracemalloc_filter", None),
         tracemalloc_frames=int(getattr(args, "tracemalloc_frames", 25) or 25),
+        enforce_min_cycle_interval=not bool(getattr(args, "disable_min_cycle_interval", False)),
         lighter_leverage=lighter_leverage,
     )
 
@@ -4007,15 +4032,13 @@ async def _async_main(args: argparse.Namespace) -> None:
                 sleep_seconds = _compute_cycle_pause_seconds(
                     cycle_start_time,
                     config.delay_between_cycles,
+                    enforce_min_interval=executor.config.enforce_min_cycle_interval,
                 )
                 if sleep_seconds > 0:
-                    executor.logger.log(
-                        (
-                            f"Waiting {sleep_seconds:.2f} seconds before next cycle "
-                            f"(minimum interval {MIN_CYCLE_INTERVAL_SECONDS:.0f}s enforced)"
-                        ),
-                        "INFO",
-                    )
+                    message = f"Waiting {sleep_seconds:.2f} seconds before next cycle"
+                    if executor.config.enforce_min_cycle_interval:
+                        message += f" (minimum interval {MIN_CYCLE_INTERVAL_SECONDS:.0f}s enforced)"
+                    executor.logger.log(message, "INFO")
                     await asyncio.sleep(sleep_seconds)
                 continue
             except network_error_exceptions as exc:
@@ -4050,15 +4073,13 @@ async def _async_main(args: argparse.Namespace) -> None:
                     _compute_cycle_pause_seconds(
                         cycle_start_time,
                         config.delay_between_cycles,
+                        enforce_min_interval=executor.config.enforce_min_cycle_interval,
                     ),
                 )
-                executor.logger.log(
-                    (
-                        f"Pausing {pause_seconds:.2f} seconds before attempting next cycle "
-                        f"(minimum interval {MIN_CYCLE_INTERVAL_SECONDS:.0f}s enforced)"
-                    ),
-                    "WARNING",
-                )
+                message = f"Pausing {pause_seconds:.2f} seconds before attempting next cycle"
+                if executor.config.enforce_min_cycle_interval:
+                    message += f" (minimum interval {MIN_CYCLE_INTERVAL_SECONDS:.0f}s enforced)"
+                executor.logger.log(message, "WARNING")
                 await asyncio.sleep(pause_seconds)
                 continue
             else:
@@ -4138,15 +4159,13 @@ async def _async_main(args: argparse.Namespace) -> None:
             sleep_seconds = _compute_cycle_pause_seconds(
                 cycle_start_time,
                 config.delay_between_cycles,
+                enforce_min_interval=executor.config.enforce_min_cycle_interval,
             )
             if sleep_seconds > 0:
-                executor.logger.log(
-                    (
-                        f"Waiting {sleep_seconds:.2f} seconds before next cycle "
-                        f"(minimum interval {MIN_CYCLE_INTERVAL_SECONDS:.0f}s enforced)"
-                    ),
-                    "INFO",
-                )
+                message = f"Waiting {sleep_seconds:.2f} seconds before next cycle"
+                if executor.config.enforce_min_cycle_interval:
+                    message += f" (minimum interval {MIN_CYCLE_INTERVAL_SECONDS:.0f}s enforced)"
+                executor.logger.log(message, "INFO")
                 await asyncio.sleep(sleep_seconds)
     finally:
         try:
