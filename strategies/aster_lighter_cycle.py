@@ -1321,6 +1321,31 @@ async def _auto_provision_lighter_credentials(env_path: Path) -> None:
 class HedgingCycleExecutor:
     """Coordinates the four-leg hedging cycle between Aster and Lighter."""
 
+    @staticmethod
+    def _normalize_agent_identifier(value: Optional[str]) -> str:
+        text = ""
+        if value is not None:
+            try:
+                text = str(value).strip()
+            except Exception:
+                text = ""
+
+        if not text:
+            try:
+                text = socket.gethostname()
+            except Exception:
+                text = ""
+            else:
+                text = (text or "").strip()
+
+        if not text:
+            text = "default"
+
+        if len(text) > 120:
+            text = text[:120]
+
+        return text
+
     def __init__(self, config: CycleConfig):
         self.config = config
         self.config.enforce_min_cycle_interval = bool(
@@ -1333,13 +1358,13 @@ class HedgingCycleExecutor:
             log_to_console=bool(getattr(config, "log_to_console", False)),
         )
 
-        agent_id = (getattr(config, "coordinator_agent_id", None) or "").strip()
-        if not agent_id:
-            try:
-                agent_id = socket.gethostname()
-            except Exception:
-                agent_id = ""
-        self._coordinator_agent_id = agent_id or None
+        agent_id_raw = getattr(config, "coordinator_agent_id", None)
+        self._coordinator_agent_id = self._normalize_agent_identifier(agent_id_raw)
+        self.config.coordinator_agent_id = self._coordinator_agent_id
+        self.logger.log(
+            f"Hedge coordinator agent id resolved to '{self._coordinator_agent_id}'",
+            "INFO",
+        )
         self._coordinator_username = (
             getattr(config, "coordinator_username", None) or ""
         ).strip() or None
