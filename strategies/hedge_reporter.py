@@ -50,6 +50,8 @@ class HedgeMetricsReporter:
         agent_id: Optional[str] = None,
         available_balance: Optional[Decimal] = None,
         total_account_value: Optional[Decimal] = None,
+        instrument: Optional[str] = None,
+        depths: Optional[Dict[str, Any]] = None,
     ) -> None:
         session = await self._ensure_session()
         url = f"{self._base_url}/update"
@@ -69,6 +71,12 @@ class HedgeMetricsReporter:
 
         if total_account_value is not None:
             payload["total_account_value"] = str(total_account_value)
+
+        if instrument is not None:
+            payload["instrument"] = instrument
+
+        if depths:
+            payload["depths"] = depths
 
         try:
             async with session.post(url, json=payload, auth=self._basic_auth) as response:

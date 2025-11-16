@@ -1622,6 +1622,12 @@ class HedgingCycleExecutor:
         position = self._last_reported_position
         available_balance: Optional[Decimal] = None
         total_account_value: Optional[Decimal] = None
+        instrument_label = f"{self.config.aster_ticker.upper()} / {self.config.lighter_ticker}".strip()
+        depth_snapshot = {
+            "maker": int(self._aster_maker_depth_level),
+            "leg1": int(self._aster_leg1_depth_level),
+            "leg3": int(self._aster_leg3_depth_level),
+        }
         if self.lighter_client and not self._coordinator_paused:
             try:
                 raw_position = await self.lighter_client.get_account_positions()
@@ -1683,6 +1689,8 @@ class HedgingCycleExecutor:
                 agent_id=self._coordinator_agent_id,
                 available_balance=available_balance,
                 total_account_value=total_account_value,
+                instrument=instrument_label,
+                depths=depth_snapshot,
             )
         except Exception as exc:
             self.logger.log(

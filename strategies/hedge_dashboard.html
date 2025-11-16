@@ -403,6 +403,22 @@
               metrics.total_asset_value
             )
           );
+          const instrumentText = metrics.instrument ? escapeHtml(metrics.instrument) : '—';
+          let depthDisplay = '—';
+          if (metrics.depths && typeof metrics.depths === 'object') {
+            const depthEntries = Object.entries(metrics.depths)
+              .map(([key, value]) => {
+                const depthValue = Number(value);
+                if (!Number.isFinite(depthValue)) {
+                  return null;
+                }
+                return `${escapeHtml(String(key))} ${depthValue}`;
+              })
+              .filter(Boolean);
+            if (depthEntries.length) {
+              depthDisplay = depthEntries.join(' · ');
+            }
+          }
           const cyclesRaw = Number(metrics.total_cycles ?? 0);
           const cycles = Number.isFinite(cyclesRaw) ? cyclesRaw : '--';
 
@@ -462,6 +478,8 @@
               <div><dt>Total Volume</dt><dd>${volume}</dd></div>
               <div><dt>Available</dt><dd>${available}</dd></div>
               <div><dt>Account Value</dt><dd>${accountValue}</dd></div>
+              <div><dt>Instrument</dt><dd>${instrumentText}</dd></div>
+              <div><dt>Depth</dt><dd>${escapeHtml(depthDisplay)}</dd></div>
             </dl>
             <p class="timestamp">${escapeHtml(statusText || 'Status unknown')}</p>
             <div class="control-actions">

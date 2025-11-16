@@ -54,6 +54,8 @@ class HedgeState:
     cumulative_volume: Decimal = Decimal("0")
     available_balance: Decimal = Decimal("0")
     account_value: Decimal = Decimal("0")
+    instrument: Optional[str] = None
+    depths: Dict[str, int] = field(default_factory=dict)
     last_update_ts: float = field(default_factory=time.time)
 
     def update_from_payload(self, payload: Dict[str, Any]) -> None:
@@ -65,6 +67,9 @@ class HedgeState:
         account_value_raw = payload.get("total_account_value")
         if account_value_raw is None:
             account_value_raw = payload.get("total_asset_value")
+        instrument_raw = payload.get("instrument") or payload.get("instrument_label")
+        depths_raw = payload.get("depths")
+        maker_depth_raw = payload.get("maker_depth")
 
         if position_raw is not None:
             try:
@@ -102,6 +107,30 @@ class HedgeState:
             except Exception:
                 LOGGER.warning("Invalid account value payload: %s", account_value_raw)
 
+        if instrument_raw is not None:
+            try:
+                text = str(instrument_raw).strip()
+            except Exception:
+                text = ""
+            if text:
+                self.instrument = text
+
+        updated_depths: Dict[str, int] = {}
+        if isinstance(depths_raw, dict):
+            for key, value in depths_raw.items():
+                try:
+                    updated_depths[str(key)] = int(value)
+                except Exception:
+                    continue
+        elif maker_depth_raw is not None:
+            try:
+                updated_depths["maker"] = int(maker_depth_raw)
+            except Exception:
+                pass
+
+        if updated_depths:
+            self.depths = updated_depths
+
         self.last_update_ts = time.time()
 
     def serialize(self) -> Dict[str, Any]:
@@ -112,6 +141,8 @@ class HedgeState:
             "cumulative_volume": str(self.cumulative_volume),
             "available_balance": str(self.available_balance),
             "total_account_value": str(self.account_value),
+            "instrument": self.instrument,
+            "depths": self.depths,
             "last_update_ts": self.last_update_ts,
         }
         if self.agent_id is not None:
@@ -122,6 +153,7 @@ class HedgeState:
     def aggregate(cls, states: Dict[str, "HedgeState"]) -> "HedgeState":
         aggregate = cls(agent_id="aggregate")
         aggregate.last_update_ts = 0.0
+        instruments: set[str] = set()
         for state in states.values():
             aggregate.position += state.position
             aggregate.total_cycles += int(state.total_cycles)
@@ -129,8 +161,13 @@ class HedgeState:
             aggregate.cumulative_volume += state.cumulative_volume
             aggregate.available_balance += state.available_balance
             aggregate.account_value += state.account_value
+            if state.instrument:
+                instruments.add(state.instrument)
             if state.last_update_ts > aggregate.last_update_ts:
                 aggregate.last_update_ts = state.last_update_ts
+
+        if instruments:
+            aggregate.instrument = ", ".join(sorted(instruments))
 
         if aggregate.last_update_ts == 0.0:
             aggregate.last_update_ts = time.time()
@@ -244,6 +281,7 @@ class HedgeCoordinator:
         snapshot.pop("agent_id", None)
         snapshot["agents"] = agents_payload
         snapshot["agent_count"] = len(agents_payload)
+        snapshot["instruments"] = sorted({state.instrument for state in self._states.values() if state.instrument})
         snapshot["stale_agents"] = [
             agent_id
             for agent_id, state in self._states.items()
