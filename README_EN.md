@@ -309,6 +309,7 @@ Key options:
 - `EDGEX_BASE_URL`: EdgeX API base URL (default: https://pro.edgex.exchange)
 - `EDGEX_WS_URL`: EdgeX WebSocket URL (default: wss://quote.edgex.exchange)
 - `EDGEX_PUBLIC_WS_URL`: Optional public market data WebSocket URL (default: wss://quote.edgex.exchange/api/v1/public/ws)
+- `EDGEX_FORCE_PUBLIC`: Set to `1`/`true` to force the virtual maker to use the public WebSocket feed even if private credentials are available
 
 #### Backpack Configuration
 

@@ -597,8 +597,12 @@ class _EdgeXPriceSource:
         self._tick_size: Decimal = Decimal("0")
         self._mode: str = "auto"
         self._public_data: Optional[_EdgeXPublicMarketData] = None
+        self._force_public = self._should_force_public()
 
     async def initialize(self) -> Tuple[str, Decimal]:
+        if self._force_public:
+            return await self._initialize_public()
+
         if self._client is not None and self._contract_id is not None:
             return self._contract_id, self._tick_size
 
@@ -679,6 +683,11 @@ class _EdgeXPriceSource:
         )
         return self._contract_id, self._tick_size
 
+    @staticmethod
+    def _should_force_public() -> bool:
+        value = os.getenv("EDGEX_FORCE_PUBLIC", "")
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+
     async def _initialize_public(self) -> Tuple[str, Decimal]:
         if self._public_data is None:
             reference_symbol = self.symbol or ""
@@ -687,6 +696,8 @@ class _EdgeXPriceSource:
             self._public_data = _EdgeXPublicMarketData(reference_symbol, self.logger)
 
         self._mode = "public"
+        if self._force_public:
+            self.logger.log("EdgeX price source forced to public WebSocket mode", "INFO")
         contract_id, tick_size = await self._public_data.initialize()
         self._contract_id = contract_id
         self._tick_size = tick_size

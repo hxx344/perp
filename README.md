@@ -352,6 +352,7 @@ python strategies/grvt_lighter_cycle.py \
 - `EDGEX_BASE_URL`: EdgeX API 基础 URL（默认：https://pro.edgex.exchange）
 - `EDGEX_WS_URL`: EdgeX WebSocket URL（默认：wss://quote.edgex.exchange）
 - `EDGEX_PUBLIC_WS_URL`: EdgeX 公共行情 WebSocket（默认：wss://quote.edgex.exchange/api/v1/public/ws）
+- `EDGEX_FORCE_PUBLIC`: 设置为 `1`/`true` 可强制虚拟 maker 使用公开行情，即使环境中存在私有凭证
 
 #### Backpack 配置
 
