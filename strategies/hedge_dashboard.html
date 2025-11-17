@@ -63,15 +63,31 @@
 
       .section-header {
         display: flex;
-        align-items: baseline;
-        gap: 0.75rem;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem 1.25rem;
         margin-top: 2.5rem;
         margin-bottom: 1rem;
+      }
+
+      .section-header-info {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
       }
 
       .section-header h2 {
         margin: 0;
         font-size: 1.25rem;
+      }
+
+      .section-header-controls {
+        display: flex;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        align-items: center;
       }
 
       .badge {
@@ -214,6 +230,19 @@
         box-shadow: none;
       }
 
+      .button-danger {
+        background: linear-gradient(135deg, #ef476f, #ff9a5a);
+      }
+
+      .button-success {
+        background: linear-gradient(135deg, #2dce89, #28a745);
+      }
+
+      .button-ghost {
+        background: rgba(39, 48, 66, 0.6);
+        color: #dbe4ff;
+      }
+
       .empty {
         margin: 1rem 0 0;
         color: #8a94a6;
@@ -258,8 +287,17 @@
 
     <section class="agent-section">
       <div class="section-header">
-        <h2>Per-VPS Metrics</h2>
-        <span class="badge badge-muted" id="agent-count">0 active</span>
+        <div class="section-header-info">
+          <h2>Per-VPS Metrics</h2>
+          <div class="badge-group">
+            <span class="badge badge-muted" id="agent-count">0 active</span>
+            <span class="badge badge-info hidden" id="default-pause-indicator">Paused by default</span>
+          </div>
+        </div>
+        <div class="section-header-controls">
+          <button type="button" class="button-danger" id="pause-all">Pause All</button>
+          <button type="button" class="button-success" id="resume-all">Resume All</button>
+        </div>
       </div>
       <p class="empty" id="agent-empty">Waiting for VPS metrics…</p>
       <div class="agent-grid hidden" id="agent-grid"></div>
@@ -271,7 +309,12 @@
       const agentGrid = document.getElementById('agent-grid');
       const agentEmpty = document.getElementById('agent-empty');
       const agentCount = document.getElementById('agent-count');
-      const updatedElement = document.getElementById('updated');
+  const updatedElement = document.getElementById('updated');
+  const defaultPauseIndicator = document.getElementById('default-pause-indicator');
+      const pauseAllButton = document.getElementById('pause-all');
+      const resumeAllButton = document.getElementById('resume-all');
+      let batchBusy = false;
+      let lastDefaultPaused = false;
 
       const numberFormatter = new Intl.NumberFormat(undefined, {
         minimumFractionDigits: 2,
@@ -329,6 +372,23 @@
         }
       }
 
+      function updateBatchButtons() {
+        if (!pauseAllButton || !resumeAllButton) {
+          return;
+        }
+
+        if (batchBusy) {
+          pauseAllButton.disabled = true;
+          resumeAllButton.disabled = true;
+        } else {
+          pauseAllButton.disabled = lastDefaultPaused;
+          resumeAllButton.disabled = !lastDefaultPaused;
+        }
+
+        pauseAllButton.classList.toggle('button-ghost', lastDefaultPaused);
+        resumeAllButton.classList.toggle('button-ghost', !lastDefaultPaused);
+      }
+
       async function sendControl(agentId, action, button) {
         if (!agentId || !action) {
           return;
@@ -360,6 +420,45 @@
         }
       }
 
+      async function sendBatchControl(action, button) {
+        if (!action) {
+          return;
+        }
+
+        const buttons = [pauseAllButton, resumeAllButton].filter(Boolean);
+        const previousTexts = new Map();
+
+        batchBusy = true;
+        updateBatchButtons();
+
+        if (button) {
+          previousTexts.set(button, button.textContent);
+          button.textContent = action === 'pause' ? 'Pausing…' : 'Resuming…';
+        }
+
+        try {
+          const response = await fetch('/control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope: 'all', action })
+          });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          await refreshMetrics();
+        } catch (error) {
+          updatedElement.textContent = `Control update failed: ${error}`;
+        } finally {
+          batchBusy = false;
+          buttons.forEach((btn) => {
+            if (btn && previousTexts.has(btn)) {
+              btn.textContent = previousTexts.get(btn);
+            }
+          });
+          updateBatchButtons();
+        }
+      }
+
       function renderAgents(data) {
         const entries = Object.entries(data?.agents ?? {});
         const staleSet = new Set(data?.stale_agents ?? []);
@@ -384,7 +483,7 @@
         let activeCount = 0;
         let pausedCount = 0;
 
-        for (const [agentId, metrics] of entries) {
+  for (const [agentId, metrics] of entries) {
           const safeId = escapeHtml(agentId);
           const position = numberFormatter.format(toNumber(metrics.position));
           const pnl = numberFormatter.format(toNumber(metrics.cumulative_pnl));
@@ -504,6 +603,14 @@
         summaryParts.push(`${pausedCount} paused`);
         summaryParts.push(`${entries.length} total`);
         agentCount.textContent = summaryParts.join(' · ');
+
+          const defaultPaused = Boolean(data?.default_paused);
+          if (defaultPauseIndicator) {
+            defaultPauseIndicator.classList.toggle('hidden', !defaultPaused);
+          }
+
+          lastDefaultPaused = defaultPaused;
+          updateBatchButtons();
       }
 
       async function refreshMetrics() {
@@ -524,6 +631,13 @@
           agentEmpty.classList.remove('hidden');
           agentEmpty.textContent = 'Unable to load metrics at the moment.';
         }
+      }
+
+      if (pauseAllButton) {
+        pauseAllButton.addEventListener('click', () => sendBatchControl('pause', pauseAllButton));
+      }
+      if (resumeAllButton) {
+        resumeAllButton.addEventListener('click', () => sendBatchControl('resume', resumeAllButton));
       }
 
       refreshMetrics();

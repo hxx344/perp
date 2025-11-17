@@ -184,6 +184,7 @@ class HedgeCoordinator:
         self._stale_warning_seconds = 5 * 60  # tag agents as stale after 5 minutes
         self._last_agent_id: Optional[str] = None
         self._controls: Dict[str, Dict[str, Any]] = {}
+        self._default_paused: bool = False
 
     @staticmethod
     def _normalize_agent_id(raw: Any) -> str:
@@ -215,7 +216,7 @@ class HedgeCoordinator:
     def _ensure_control(self, agent_id: str) -> Dict[str, Any]:
         control = self._controls.get(agent_id)
         if control is None:
-            control = {"paused": False, "updated_at": None}
+            control = {"paused": self._default_paused, "updated_at": time.time() if self._default_paused else None}
             self._controls[agent_id] = control
         return control
 
@@ -235,7 +236,19 @@ class HedgeCoordinator:
         return {
             "controls": controls_payload,
             "paused_agents": paused_agents,
+            "default_paused": self._default_paused,
         }
+
+    async def set_all_paused(self, paused: bool) -> Dict[str, Any]:
+        async with self._lock:
+            self._default_paused = bool(paused)
+            now = time.time()
+            for control in self._controls.values():
+                control["paused"] = bool(paused)
+                control["updated_at"] = now
+            snapshot = self._controls_snapshot()
+            snapshot.update({"scope": "all", "paused": bool(paused)})
+            return snapshot
 
     async def set_agent_paused(self, agent_id: str, paused: bool) -> Dict[str, Any]:
         normalized = self._normalize_agent_id(agent_id)
@@ -384,12 +397,31 @@ class CoordinatorApp:
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="control payload must be an object")
 
+        action_raw = body.get("action")
+        paused_flag = body.get("paused")
+        scope_raw = body.get("scope")
+        scope = str(scope_raw).strip().lower() if isinstance(scope_raw, str) else None
+
+        if scope == "all":
+            if action_raw is None and paused_flag is None:
+                raise web.HTTPBadRequest(text="control payload requires action or paused flag for scope 'all'")
+
+            if action_raw is not None:
+                action = str(action_raw).strip().lower()
+                if action == "pause":
+                    snapshot = await self._coordinator.set_all_paused(True)
+                elif action in {"resume", "unpause"}:
+                    snapshot = await self._coordinator.set_all_paused(False)
+                else:
+                    raise web.HTTPBadRequest(text="invalid control action for scope 'all'")
+            else:
+                snapshot = await self._coordinator.set_all_paused(bool(paused_flag))
+
+            return web.json_response(snapshot)
+
         agent_id_raw = body.get("agent_id")
         if agent_id_raw is None:
             raise web.HTTPBadRequest(text="agent_id is required")
-
-        action_raw = body.get("action")
-        paused_flag = body.get("paused")
 
         if action_raw is not None:
             action = str(action_raw).strip().lower()
