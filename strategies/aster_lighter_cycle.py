@@ -186,7 +186,7 @@ class _EdgeXPublicMarketData:
     def __init__(self, symbol: str, logger: TradingLogger, depth: int = 200) -> None:
         self.symbol = (symbol or "").strip()
         self.logger = logger
-        self._depth = 200 if depth <= 0 else min(depth, 200)
+        self._depth = self._normalize_depth(depth)
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
@@ -215,6 +215,16 @@ class _EdgeXPublicMarketData:
             if not normalized_symbol.endswith("USD"):
                 normalized_symbol = f"{normalized_symbol}USD"
             self._target_contract_name = normalized_symbol
+
+    @staticmethod
+    def _normalize_depth(depth: int) -> int:
+        try:
+            value = int(depth)
+        except (TypeError, ValueError):
+            return 200
+        if value <= 15:
+            return 15
+        return 200
 
     async def initialize(self) -> Tuple[str, Decimal]:
         if self._ready and self._contract_id:
@@ -688,6 +698,16 @@ class _EdgeXPriceSource:
         value = os.getenv("EDGEX_FORCE_PUBLIC", "")
         return value.strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _normalize_depth_limit(limit: int) -> int:
+        try:
+            value = int(limit)
+        except (TypeError, ValueError):
+            return 200
+        if value <= 15:
+            return 15
+        return 200
+
     async def _initialize_public(self) -> Tuple[str, Decimal]:
         if self._public_data is None:
             reference_symbol = self.symbol or ""
@@ -738,7 +758,7 @@ class _EdgeXPriceSource:
         contract_id = self._contract_id
         assert contract_id is not None
 
-        limit = max(5, min(int(limit), 200))
+        limit = self._normalize_depth_limit(limit)
         try:
             params = GetOrderBookDepthParams(contract_id=int(contract_id), limit=limit)
         except (TypeError, ValueError):
