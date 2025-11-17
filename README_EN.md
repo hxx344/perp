@@ -252,8 +252,12 @@ Key options:
 - `--aster-leg3-depth`: Override the depth level for the Aster reverse maker leg (defaults to `--aster-maker-depth`).
 - Before each hedging cycle the executor checks the configured L1 wallet and bridges any native USDC balance above 1 USDC to the linked Lighter account before submitting new orders.
 - `--virtual-aster-maker`: Simulate the Aster maker legs without sending real orders; combine with
-   `--virtual-maker-price-source bn` to watch Binance futures level-4 prices instead of Aster depth, and
-   optionally override the Binance contract symbol via `--virtual-maker-symbol` (defaults to the resolved Aster contract ID).
+   `--virtual-maker-price-source bn` to watch Binance futures level-4 prices instead of Aster depth,
+   or `--virtual-maker-price-source edgex` to source prices from EdgeX. If `EDGEX_ACCOUNT_ID` and
+   `EDGEX_STARK_PRIVATE_KEY` are set the script uses the official SDK; otherwise it falls back to the
+   public WebSocket feed (configurable via `EDGEX_PUBLIC_WS_URL`). Optionally override the contract
+   symbol via `--virtual-maker-symbol` (defaults to the resolved Aster contract ID or ticker,
+   depending on the source).
 - `--preserve-initial-position`: Capture the current Lighter position at startup and restore it after each cycle
    (and during shutdown) whenever it drifts from that baseline, rather than forcing the account to flat exposure.
 - `--coordinator-url`: When provided, the bot will push live metrics to the lightweight dashboard served by
@@ -304,6 +308,7 @@ Key options:
 - `EDGEX_STARK_PRIVATE_KEY`: Your EdgeX api private key
 - `EDGEX_BASE_URL`: EdgeX API base URL (default: https://pro.edgex.exchange)
 - `EDGEX_WS_URL`: EdgeX WebSocket URL (default: wss://quote.edgex.exchange)
+- `EDGEX_PUBLIC_WS_URL`: Optional public market data WebSocket URL (default: wss://quote.edgex.exchange/api/v1/public/ws)
 
 #### Backpack Configuration
 

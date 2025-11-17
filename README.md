@@ -294,8 +294,10 @@ python strategies/aster_lighter_cycle.py \
 - `--preserve-initial-position`：启动时记录 Lighter 初始净仓位；在每轮循环与退出阶段若检测到当前仓位与初始值不一致，会自动下单恢复为初始仓位（默认关闭，仅在显式加上该参数时生效）。
 - `--coordinator-url`：可选参数，指向 `strategies/hedge_coordinator.py` 暴露的 HTTP 服务地址，用于实时上报指标供面板展示。
 - 如果仅想在虚拟环境中监听价格并触发 Lighter Taker，可使用 `--virtual-aster-maker`；
-   配合 `--virtual-maker-price-source bn` 可改为监听 Binance 永续合约的买四/卖四价格，
-   如需自定义 Binance 符号可通过 `--virtual-maker-symbol` 覆盖（默认沿用解析到的 Aster 合约 ID）。
+   配合 `--virtual-maker-price-source bn` 可改为监听 Binance 永续合约的买四/卖四价格；
+   选择 `--virtual-maker-price-source edgex` 则可使用 EdgeX 行情：若配置了 `EDGEX_ACCOUNT_ID` 与
+   `EDGEX_STARK_PRIVATE_KEY` 会走官方 SDK，否则自动退回公开 WebSocket (`EDGEX_PUBLIC_WS_URL` 可覆写)。
+   如需自定义监听合约，可通过 `--virtual-maker-symbol` 覆盖（默认沿用解析到的 Aster 合约 ID 或标的）。
 
 ### 可选：协调机与面板
 
@@ -349,6 +351,7 @@ python strategies/grvt_lighter_cycle.py \
 - `EDGEX_STARK_PRIVATE_KEY`: 您的 EdgeX API 私钥
 - `EDGEX_BASE_URL`: EdgeX API 基础 URL（默认：https://pro.edgex.exchange）
 - `EDGEX_WS_URL`: EdgeX WebSocket URL（默认：wss://quote.edgex.exchange）
+- `EDGEX_PUBLIC_WS_URL`: EdgeX 公共行情 WebSocket（默认：wss://quote.edgex.exchange/api/v1/public/ws）
 
 #### Backpack 配置
 

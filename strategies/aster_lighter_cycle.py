@@ -39,6 +39,8 @@ from web3 import Web3
 from web3.exceptions import TimeExhausted
 from web3.types import TxParams, Wei
 
+from edgex_sdk import Client as EdgeXApiClient, GetOrderBookDepthParams
+
 from lighter.api.account_api import AccountApi
 from lighter.api_client import ApiClient
 from lighter.configuration import Configuration
@@ -175,6 +177,623 @@ class _BinanceFuturesPriceSource:
         if self._session is not None and not self._session.closed:
             await self._session.close()
 
+
+class _EdgeXPublicMarketData:
+    """EdgeX public WebSocket market data connector (no auth required)."""
+
+    _DEFAULT_WS_URL = "wss://quote.edgex.exchange/api/v1/public/ws"
+
+    def __init__(self, symbol: str, logger: TradingLogger, depth: int = 200) -> None:
+        self.symbol = (symbol or "").strip()
+        self.logger = logger
+        self._depth = 200 if depth <= 0 else min(depth, 200)
+
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
+        self._ws_task: Optional[asyncio.Task] = None
+
+        self._metadata_event: asyncio.Event = asyncio.Event()
+        self._orderbook_event: asyncio.Event = asyncio.Event()
+
+        self._contract_id: Optional[str] = None
+        self._tick_size: Decimal = Decimal("0")
+        self._target_contract_id: Optional[str] = None
+        self._target_contract_name: Optional[str] = None
+
+        self._bids: Dict[str, Decimal] = {}
+        self._asks: Dict[str, Decimal] = {}
+        self._book_lock = asyncio.Lock()
+
+        self._closed = False
+        self._ready = False
+        self._public_ws_url = os.getenv("EDGEX_PUBLIC_WS_URL", self._DEFAULT_WS_URL)
+
+        normalized_symbol = self.symbol.upper().replace("-", "").replace("/", "").strip()
+        if normalized_symbol.isdigit():
+            self._target_contract_id = normalized_symbol
+        elif normalized_symbol:
+            if not normalized_symbol.endswith("USD"):
+                normalized_symbol = f"{normalized_symbol}USD"
+            self._target_contract_name = normalized_symbol
+
+    async def initialize(self) -> Tuple[str, Decimal]:
+        if self._ready and self._contract_id:
+            return self._contract_id, self._tick_size
+
+        await self._ensure_connection()
+        await self._subscribe({"type": "subscribe", "channel": "metadata"})
+
+        try:
+            await asyncio.wait_for(self._metadata_event.wait(), timeout=15)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("EdgeX public metadata subscription did not respond in time") from exc
+
+        if not self._contract_id:
+            raise RuntimeError("EdgeX public metadata did not include requested contract")
+
+        depth_channel = f"depth.{self._contract_id}.{self._depth}"
+        await self._subscribe({"type": "subscribe", "channel": depth_channel})
+
+        try:
+            await asyncio.wait_for(self._orderbook_event.wait(), timeout=15)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("EdgeX public depth snapshot not received in time") from exc
+
+        self._ready = True
+        self.logger.log(
+            (
+                "EdgeX public WS price source initialised "
+                f"(contract={self._contract_id}, tick={self._tick_size}, channel={depth_channel})"
+            ),
+            "INFO",
+        )
+        assert self._contract_id is not None
+        return self._contract_id, self._tick_size
+
+    async def _ensure_connection(self) -> None:
+        if self._ws and not self._ws.closed:
+            return
+
+        if self._closed:
+            raise RuntimeError("EdgeX public WS connector already closed")
+
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=20)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+
+        assert self._session is not None
+        self._ws = await self._session.ws_connect(self._public_ws_url)
+        self._ws_task = asyncio.create_task(self._receiver_loop())
+
+    async def _subscribe(self, payload: Dict[str, Any]) -> None:
+        ws = self._ws
+        if ws is None or ws.closed:
+            raise RuntimeError("EdgeX public WS is not connected")
+        await ws.send_json(payload)
+
+    async def _receiver_loop(self) -> None:
+        assert self._ws is not None
+        ws = self._ws
+        try:
+            async for message in ws:
+                if message.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        payload = json.loads(message.data)
+                    except json.JSONDecodeError:
+                        self.logger.log(
+                            f"EdgeX public WS received non-JSON payload: {message.data}",
+                            "WARNING",
+                        )
+                        continue
+                    await self._handle_message(payload)
+                elif message.type == aiohttp.WSMsgType.BINARY:
+                    # EdgeX WS only uses JSON payloads; ignore binary frames.
+                    continue
+                elif message.type == aiohttp.WSMsgType.ERROR:
+                    err = ws.exception()
+                    self.logger.log(f"EdgeX public WS encountered error: {err}", "ERROR")
+                    break
+        except asyncio.CancelledError:  # pragma: no cover - lifecycle cleanup
+            pass
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self.logger.log(f"EdgeX public WS receiver failed: {exc}", "ERROR")
+        finally:
+            await self._close_ws()
+
+    async def _handle_message(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        message_type = payload.get("type")
+        if message_type == "ping":
+            await self._respond_pong(payload)
+            return
+
+        channel = payload.get("channel")
+        if message_type == "payload":
+            content = payload.get("content", {})
+            channel = content.get("channel", channel)
+            if channel == "metadata":
+                self._process_metadata(content)
+            elif channel and channel.startswith("depth."):
+                await self._process_depth(content)
+            return
+
+        if message_type == "subscribed":
+            self.logger.log(f"EdgeX public WS subscribed: {channel}", "DEBUG")
+        elif message_type == "error":
+            self.logger.log(
+                f"EdgeX public WS error: {payload.get('content')}",
+                "ERROR",
+            )
+
+    async def _respond_pong(self, payload: Dict[str, Any]) -> None:
+        ws = self._ws
+        if ws is None or ws.closed:
+            return
+        response = {"type": "pong", "time": payload.get("time")}
+        await ws.send_json(response)
+
+    def _process_metadata(self, content: Dict[str, Any]) -> None:
+        data_entries = content.get("data")
+        if not isinstance(data_entries, list):
+            return
+
+        for entry in data_entries:
+            contract_list = []
+            if isinstance(entry, dict):
+                if isinstance(entry.get("contract"), list):
+                    contract_list = entry["contract"]
+                elif isinstance(entry.get("contracts"), list):
+                    contract_list = entry["contracts"]
+
+            for contract in contract_list:
+                if not isinstance(contract, dict):
+                    continue
+
+                contract_id = str(contract.get("contractId", "")).strip()
+                contract_name = str(contract.get("contractName", "")).strip().upper()
+                symbol = str(contract.get("symbol", "")).strip().upper().replace("-", "").replace("/", "")
+
+                match = False
+                if self._target_contract_id and contract_id == self._target_contract_id:
+                    match = True
+                elif self._target_contract_name and contract_name == self._target_contract_name:
+                    match = True
+                elif not self._target_contract_id and not self._target_contract_name and symbol:
+                    normalized_symbol = self.symbol.upper().replace("-", "").replace("/", "")
+                    if not normalized_symbol.endswith("USD"):
+                        normalized_symbol = f"{normalized_symbol}USD"
+                    match = symbol == normalized_symbol
+
+                if not match:
+                    continue
+
+                tick_raw = contract.get("tickSize")
+                try:
+                    tick = Decimal(str(tick_raw))
+                    if tick <= 0:
+                        tick = Decimal("0")
+                except (InvalidOperation, ValueError, TypeError):
+                    tick = Decimal("0")
+
+                self._contract_id = contract_id or self._target_contract_id
+                self._tick_size = tick
+                if not self._metadata_event.is_set():
+                    self._metadata_event.set()
+                return
+
+    async def _process_depth(self, content: Dict[str, Any]) -> None:
+        data_entries = content.get("data")
+        if not isinstance(data_entries, list):
+            return
+
+        for snapshot in data_entries:
+            if not isinstance(snapshot, dict):
+                continue
+
+            depth_type = str(snapshot.get("depthType", "")).strip().upper()
+            bids = snapshot.get("bids", [])
+            asks = snapshot.get("asks", [])
+
+            async with self._book_lock:
+                if depth_type == "SNAPSHOT":
+                    self._bids = self._levels_to_map(bids, absolute=True)
+                    self._asks = self._levels_to_map(asks, absolute=True)
+                    self._truncate_book(self._bids)
+                    self._truncate_book(self._asks)
+                else:
+                    self._apply_incremental(self._bids, bids)
+                    self._apply_incremental(self._asks, asks)
+
+            if depth_type == "SNAPSHOT" and not self._orderbook_event.is_set():
+                self._orderbook_event.set()
+
+    def _levels_to_map(self, levels: Any, *, absolute: bool) -> Dict[str, Decimal]:
+        result: Dict[str, Decimal] = {}
+        if not isinstance(levels, list):
+            return result
+
+        for level in levels:
+            price, size = self._parse_level(level)
+            if price is None or size is None:
+                continue
+            if absolute:
+                if size > 0:
+                    result[price] = size
+            else:
+                result[price] = size
+        return result
+
+    def _apply_incremental(self, side: Dict[str, Decimal], updates: Any) -> None:
+        if not isinstance(updates, list):
+            return
+
+        for update in updates:
+            price, delta = self._parse_level(update)
+            if price is None or delta is None:
+                continue
+
+            if delta == 0:
+                side.pop(price, None)
+                continue
+
+            current = side.get(price, Decimal("0"))
+            new_size = current + delta
+            if new_size <= 0:
+                side.pop(price, None)
+            else:
+                side[price] = new_size
+
+        self._truncate_book(side)
+
+    def _truncate_book(self, side: Dict[str, Decimal]) -> None:
+        if len(side) <= self._depth:
+            return
+
+        try:
+            sorted_prices = sorted((Decimal(price_str), price_str) for price_str in side.keys())
+        except (InvalidOperation, ValueError):
+            return
+
+        if side is self._bids:
+            sorted_prices = sorted_prices[::-1]
+
+        for _, price_str in sorted_prices[self._depth :]:
+            side.pop(price_str, None)
+
+    @staticmethod
+    def _parse_level(level: Any) -> Tuple[Optional[str], Optional[Decimal]]:
+        if isinstance(level, list) and len(level) >= 2:
+            price_raw, size_raw = level[0], level[1]
+        elif isinstance(level, dict):
+            price_raw = level.get("price") or level.get("p")
+            size_raw = level.get("size") or level.get("s") or level.get("quantity")
+        else:
+            return None, None
+
+        try:
+            price_decimal = Decimal(str(price_raw))
+            size_decimal = Decimal(str(size_raw))
+        except (InvalidOperation, ValueError, TypeError):
+            return None, None
+
+        if price_decimal <= 0:
+            return None, None
+
+        price_str = format(price_decimal, "f")
+        return price_str, size_decimal
+
+    async def fetch_order_book(
+        self, limit: int = 50
+    ) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
+        await self._ensure_ready()
+        limit = max(1, min(limit, self._depth))
+
+        async with self._book_lock:
+            bids = self._sorted_levels(self._bids, reverse=True)[:limit]
+            asks = self._sorted_levels(self._asks, reverse=False)[:limit]
+        return bids, asks
+
+    async def fetch_bbo_prices(self) -> Tuple[Decimal, Decimal]:
+        await self._ensure_ready()
+        async with self._book_lock:
+            best_bid = self._sorted_levels(self._bids, reverse=True, top_only=True)
+            best_ask = self._sorted_levels(self._asks, reverse=False, top_only=True)
+
+        bid_price = best_bid[0][0] if best_bid else Decimal("0")
+        ask_price = best_ask[0][0] if best_ask else Decimal("0")
+        return bid_price, ask_price
+
+    async def get_depth_level_price(
+        self, direction: str, level: int
+    ) -> Tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+        await self._ensure_ready()
+        level = max(1, min(level, self._depth))
+
+        async with self._book_lock:
+            bids = self._sorted_levels(self._bids, reverse=True)
+            asks = self._sorted_levels(self._asks, reverse=False)
+
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+
+        depth_price: Optional[Decimal]
+        if direction.lower() == "buy":
+            depth_price = bids[level - 1][0] if level <= len(bids) else (bids[-1][0] if bids else None)
+        elif direction.lower() == "sell":
+            depth_price = asks[level - 1][0] if level <= len(asks) else (asks[-1][0] if asks else None)
+        else:
+            depth_price = None
+
+        return depth_price, best_bid, best_ask
+
+    def _sorted_levels(
+        self,
+        side: Dict[str, Decimal],
+        *,
+        reverse: bool,
+        top_only: bool = False,
+    ) -> List[Tuple[Decimal, Decimal]]:
+        items: List[Tuple[Decimal, Decimal]] = []
+        for price_str, quantity in side.items():
+            if quantity <= 0:
+                continue
+            try:
+                price_decimal = Decimal(price_str)
+            except (InvalidOperation, ValueError):
+                continue
+            items.append((price_decimal, quantity))
+
+        items.sort(key=lambda item: item[0], reverse=reverse)
+        if top_only:
+            return items[:1]
+        return items
+
+    async def _ensure_ready(self) -> None:
+        if not self._ready:
+            await self.initialize()
+
+    async def _close_ws(self) -> None:
+        if self._ws is not None and not self._ws.closed:
+            await self._ws.close()
+        self._ws = None
+
+    async def aclose(self) -> None:
+        self._closed = True
+        if self._ws_task is not None:
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+            self._ws_task = None
+
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+
+        if self._session is not None:
+            try:
+                await self._session.close()
+            except Exception:
+                pass
+            self._session = None
+
+
+class _EdgeXPriceSource:
+    """Minimal EdgeX market data helper for virtual pricing."""
+
+    _DEFAULT_BASE_URL = "https://pro.edgex.exchange"
+
+    def __init__(self, symbol: str, logger: TradingLogger) -> None:
+        self.symbol = (symbol or "").strip()
+        self.logger = logger
+        self._client: Optional[EdgeXApiClient] = None
+        self._contract_id: Optional[str] = None
+        self._tick_size: Decimal = Decimal("0")
+        self._mode: str = "auto"
+        self._public_data: Optional[_EdgeXPublicMarketData] = None
+
+    async def initialize(self) -> Tuple[str, Decimal]:
+        if self._client is not None and self._contract_id is not None:
+            return self._contract_id, self._tick_size
+
+        account_id = os.getenv("EDGEX_ACCOUNT_ID")
+        private_key = os.getenv("EDGEX_STARK_PRIVATE_KEY")
+        base_url = os.getenv("EDGEX_BASE_URL", self._DEFAULT_BASE_URL)
+
+        if not account_id or not private_key:
+            return await self._initialize_public()
+
+        self._mode = "private"
+
+        try:
+            account_numeric = int(account_id)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Invalid EDGEX_ACCOUNT_ID '{account_id}'") from exc
+
+        self._client = EdgeXApiClient(
+            base_url=base_url,
+            account_id=account_numeric,
+            stark_private_key=private_key,
+        )
+
+        client = self._client
+        if client is None:
+            raise RuntimeError("EdgeX client initialisation failed")
+
+        metadata = await client.get_metadata()
+        data = metadata.get("data", {}) if isinstance(metadata, dict) else {}
+        contract_list = data.get("contractList", []) if isinstance(data, dict) else []
+        if not contract_list:
+            raise RuntimeError("EdgeX metadata did not contain any contracts")
+
+        normalized_symbol = self.symbol.strip().upper()
+        contract_id_candidate: Optional[str] = None
+        contract_name_candidate: Optional[str] = None
+        if normalized_symbol.isdigit():
+            contract_id_candidate = normalized_symbol
+        elif normalized_symbol:
+            contract_name_candidate = normalized_symbol
+            if not contract_name_candidate.endswith("USD"):
+                contract_name_candidate = f"{contract_name_candidate}USD"
+
+        tick_size = Decimal("0")
+        for contract in contract_list:
+            contract_id = str(contract.get("contractId", "")).strip()
+            contract_name = str(contract.get("contractName", "")).strip().upper()
+
+            match = False
+            if contract_id_candidate and contract_id == contract_id_candidate:
+                match = True
+            elif contract_name_candidate and contract_name == contract_name_candidate:
+                match = True
+
+            if not match:
+                continue
+
+            tick_raw = contract.get("tickSize")
+            try:
+                tick_size = Decimal(str(tick_raw))
+                if tick_size <= 0:
+                    tick_size = Decimal("0")
+            except (InvalidOperation, ValueError, TypeError):
+                tick_size = Decimal("0")
+
+            contract_id_candidate = contract_id
+            break
+
+        if not contract_id_candidate:
+            identifier = contract_name_candidate or normalized_symbol or "<unspecified>"
+            raise RuntimeError(f"EdgeX contract '{identifier}' not found in metadata")
+
+        self._contract_id = contract_id_candidate
+        self._tick_size = tick_size
+        self.logger.log(
+            f"EdgeX price source initialised (contract={contract_id_candidate}, tick={tick_size})",
+            "INFO",
+        )
+        return self._contract_id, self._tick_size
+
+    async def _initialize_public(self) -> Tuple[str, Decimal]:
+        if self._public_data is None:
+            reference_symbol = self.symbol or ""
+            if not reference_symbol:
+                raise RuntimeError("EdgeX public price source requires a contract symbol or identifier")
+            self._public_data = _EdgeXPublicMarketData(reference_symbol, self.logger)
+
+        self._mode = "public"
+        contract_id, tick_size = await self._public_data.initialize()
+        self._contract_id = contract_id
+        self._tick_size = tick_size
+        return contract_id, tick_size
+
+    def _ensure_ready(self) -> EdgeXApiClient:
+        client = self._client
+        contract_id = self._contract_id
+        if client is None or contract_id is None:
+            raise RuntimeError("EdgeX price source not initialised")
+        return client
+
+    @staticmethod
+    def _parse_levels(levels: Any) -> List[Tuple[Decimal, Decimal]]:
+        results: List[Tuple[Decimal, Decimal]] = []
+        if not isinstance(levels, list):
+            return results
+        for entry in levels:
+            if not isinstance(entry, dict):
+                continue
+            price_raw = entry.get("price") or entry.get("p")
+            size_raw = entry.get("size") or entry.get("s") or entry.get("quantity")
+            try:
+                price = Decimal(str(price_raw))
+                size = Decimal(str(size_raw))
+            except (InvalidOperation, ValueError, TypeError):
+                continue
+            if price <= 0 or size < 0:
+                continue
+            results.append((price, size))
+        return results
+
+    async def fetch_order_book(self, limit: int = 50) -> Tuple[List[Tuple[Decimal, Decimal]], List[Tuple[Decimal, Decimal]]]:
+        if self._mode == "public" and self._public_data is not None:
+            return await self._public_data.fetch_order_book(limit=limit)
+
+        client = self._ensure_ready()
+        contract_id = self._contract_id
+        assert contract_id is not None
+
+        limit = max(5, min(int(limit), 200))
+        try:
+            params = GetOrderBookDepthParams(contract_id=int(contract_id), limit=limit)
+        except (TypeError, ValueError):
+            params = GetOrderBookDepthParams(contract_id=contract_id, limit=limit)
+
+        order_book = await client.quote.get_order_book_depth(params)
+        data = order_book.get("data") if isinstance(order_book, dict) else None
+        snapshot = data[0] if isinstance(data, list) and data else {}
+
+        bids = self._parse_levels(snapshot.get("bids"))
+        asks = self._parse_levels(snapshot.get("asks"))
+
+        bids.sort(key=lambda item: item[0], reverse=True)
+        asks.sort(key=lambda item: item[0])
+        return bids, asks
+
+    async def fetch_bbo_prices(self) -> Tuple[Decimal, Decimal]:
+        if self._mode == "public" and self._public_data is not None:
+            return await self._public_data.fetch_bbo_prices()
+
+        bids, asks = await self.fetch_order_book(limit=15)
+        best_bid = bids[0][0] if bids else Decimal("0")
+        best_ask = asks[0][0] if asks else Decimal("0")
+        return best_bid, best_ask
+
+    async def get_depth_level_price(
+        self,
+        direction: str,
+        level: int,
+    ) -> Tuple[Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+        if self._mode == "public" and self._public_data is not None:
+            return await self._public_data.get_depth_level_price(direction, level)
+
+        bids, asks = await self.fetch_order_book(limit=max(level, 20))
+
+        best_bid = bids[0][0] if bids else None
+        best_ask = asks[0][0] if asks else None
+
+        depth_price: Optional[Decimal]
+        if direction.lower() == "buy":
+            depth_price = bids[level - 1][0] if level <= len(bids) else (bids[-1][0] if bids else None)
+        elif direction.lower() == "sell":
+            depth_price = asks[level - 1][0] if level <= len(asks) else (asks[-1][0] if asks else None)
+        else:
+            depth_price = None
+
+        return depth_price, best_bid, best_ask
+
+    async def aclose(self) -> None:
+        if self._mode == "public" and self._public_data is not None:
+            try:
+                await self._public_data.aclose()
+            except Exception:
+                pass
+            finally:
+                self._public_data = None
+            return
+
+        client = self._client
+        if client is not None:
+            try:
+                await client.close()
+            except Exception:
+                pass
+            finally:
+                self._client = None
 
 class _AsterPublicDataClient:
     """Minimal Aster market data helper that avoids authenticated endpoints."""
@@ -1384,7 +2003,7 @@ class HedgingCycleExecutor:
         )
         self._baseline_lighter_position: Optional[Decimal] = None
         self._virtual_price_source = (config.virtual_aster_price_source or "aster").lower()
-        allowed_virtual_sources = {"aster", "bn"}
+        allowed_virtual_sources = {"aster", "bn", "edgex"}
         if self._virtual_price_source not in allowed_virtual_sources:
             self.logger.log(
                 f"Invalid virtual maker price source '{config.virtual_aster_price_source}', fallback to 'aster'",
@@ -1393,6 +2012,7 @@ class HedgingCycleExecutor:
             self._virtual_price_source = "aster"
         self._virtual_reference_symbol = config.virtual_aster_reference_symbol
         self._binance_price_client: Optional["_BinanceFuturesPriceSource"] = None
+        self._edgex_price_client: Optional["_EdgeXPriceSource"] = None
         self._metrics_reporter: Optional[HedgeMetricsReporter] = None
 
         base_depth_candidate = getattr(config, "aster_maker_depth_level", DEFAULT_ASTER_MAKER_DEPTH_LEVEL)
@@ -2335,7 +2955,10 @@ class HedgingCycleExecutor:
         await self._ensure_lighter_leverage(target_leverage)
 
         if not self._virtual_reference_symbol:
-            self._virtual_reference_symbol = aster_contract_id
+            if self._virtual_price_source == "edgex":
+                self._virtual_reference_symbol = self.config.aster_ticker
+            else:
+                self._virtual_reference_symbol = aster_contract_id
 
         if self._virtual_reference_symbol:
             normalized_symbol = (
@@ -2354,6 +2977,18 @@ class HedgingCycleExecutor:
             )
             self.logger.log(
                 f"Virtual maker price source set to Binance ({self._virtual_reference_symbol})",
+                "INFO",
+            )
+        elif self._virtual_price_source == "edgex":
+            reference_symbol = self._virtual_reference_symbol or self.config.aster_ticker
+            reference_symbol = (reference_symbol or "").strip()
+            if not reference_symbol:
+                raise ValueError("Virtual maker price source 'edgex' requires a contract symbol or identifier")
+            self._edgex_price_client = _EdgeXPriceSource(reference_symbol, self.logger)
+            contract_id, _ = await self._edgex_price_client.initialize()
+            self._virtual_reference_symbol = contract_id
+            self.logger.log(
+                f"Virtual maker price source set to EdgeX (contract {contract_id})",
                 "INFO",
             )
         if not await self.lighter_client.wait_for_market_data(timeout=10):
@@ -2405,6 +3040,12 @@ class HedgingCycleExecutor:
                 await self._binance_price_client.aclose()
             except Exception:
                 pass
+        if self._edgex_price_client is not None:
+            try:
+                await self._edgex_price_client.aclose()
+            except Exception:
+                pass
+            self._edgex_price_client = None
         if self._metrics_reporter is not None:
             try:
                 await self._metrics_reporter.aclose()
@@ -2625,9 +3266,10 @@ class HedgingCycleExecutor:
         *,
         depth_level: int,
     ) -> LegResult:
-        if not self._has_aster_market_data() and not (
-            self._virtual_price_source == "bn" and self._binance_price_client
-        ):
+        using_binance = self._virtual_price_source == "bn" and self._binance_price_client
+        using_edgex = self._virtual_price_source == "edgex" and self._edgex_price_client
+
+        if not self._has_aster_market_data() and not (using_binance or using_edgex):
             raise RuntimeError("Aster market data source is not available")
 
         overall_start = time.time()
@@ -2678,7 +3320,12 @@ class HedgingCycleExecutor:
         latency = max(fill_timestamp - overall_start, 0.0)
         order_id = f"virtual-{leg_name}-{int(fill_timestamp * 1000)}"
 
-        source_label = "binance" if self._virtual_price_source == "bn" else "aster"
+        if self._virtual_price_source == "bn":
+            source_label = "binance"
+        elif self._virtual_price_source == "edgex":
+            source_label = "edgex"
+        else:
+            source_label = "aster"
         self.logger.log(
             f"{leg_name} | Virtual Aster maker filled {quantity} @ {fill_price} (target {target_price}, source={source_label})",
             "INFO",
@@ -2705,9 +3352,10 @@ class HedgingCycleExecutor:
         target_price: Decimal,
     ) -> Tuple[Decimal, float]:
         has_aster_data = self._has_aster_market_data()
-        if not has_aster_data and not (
-            self._virtual_price_source == "bn" and self._binance_price_client
-        ):
+        using_binance = self._virtual_price_source == "bn" and self._binance_price_client
+        using_edgex = self._virtual_price_source == "edgex" and self._edgex_price_client
+
+        if not has_aster_data and not (using_binance or using_edgex):
             raise RuntimeError("Aster market data source is not available")
         if has_aster_data:
             # Ensure contract id is present for downstream logging/behaviour.
@@ -2719,6 +3367,8 @@ class HedgingCycleExecutor:
         while True:
             if self._virtual_price_source == "bn" and self._binance_price_client:
                 best_bid, best_ask = await self._binance_price_client.fetch_bbo_prices()
+            elif self._virtual_price_source == "edgex" and self._edgex_price_client:
+                best_bid, best_ask = await self._edgex_price_client.fetch_bbo_prices()
             else:
                 best_bid, best_ask = await self._fetch_aster_bbo_prices()
             now = time.time()
@@ -3126,6 +3776,36 @@ class HedgingCycleExecutor:
         )
         return price
 
+    async def _calculate_edgex_maker_price(self, direction: str) -> Decimal:
+        if not self._edgex_price_client:
+            raise RuntimeError("EdgeX price source is not configured")
+
+        tick = self.aster_config.tick_size if self.aster_config.tick_size > 0 else Decimal("0")
+        level = max(1, int(self._aster_maker_depth_level))
+        depth_price, best_bid, best_ask = await self._edgex_price_client.get_depth_level_price(
+            direction,
+            level=level,
+        )
+
+        best_bid = best_bid if best_bid is not None else Decimal("0")
+        best_ask = best_ask if best_ask is not None else Decimal("0")
+
+        if depth_price is None or depth_price <= 0:
+            fb_bid, fb_ask = await self._edgex_price_client.fetch_bbo_prices()
+            best_bid = fb_bid if fb_bid > 0 else best_bid
+            best_ask = fb_ask if fb_ask > 0 else best_ask
+
+        price = self._compute_maker_price_from_data(
+            source_label="EDGEX",
+            direction=direction,
+            tick=tick,
+            level=level,
+            depth_price=depth_price,
+            best_bid=best_bid,
+            best_ask=best_ask,
+        )
+        return price
+
     def _compute_maker_price_from_data(
         self,
         *,
@@ -3194,6 +3874,8 @@ class HedgingCycleExecutor:
     ) -> Decimal:
         if self._virtual_price_source == "bn" and self._binance_price_client:
             return await self._calculate_binance_maker_price(direction)
+        if self._virtual_price_source == "edgex" and self._edgex_price_client:
+            return await self._calculate_edgex_maker_price(direction)
         return await self._calculate_aster_maker_price(
             direction,
             depth_level=depth_level,
@@ -3579,9 +4261,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--virtual-maker-price-source",
-        choices=["aster", "bn"],
+        choices=["aster", "bn", "edgex"],
         default="aster",
-        help="When --virtual-aster-maker is set, choose the market data source for virtual maker fills",
+        help=(
+            "When --virtual-aster-maker is set, choose the market data source for virtual maker fills. "
+            "Use 'edgex' to source prices from EdgeX (requires EDGEX_ACCOUNT_ID and EDGEX_STARK_PRIVATE_KEY)."
+        ),
     )
     parser.add_argument(
         "--virtual-maker-symbol",
