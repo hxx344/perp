@@ -283,7 +283,7 @@ python strategies/aster_lighter_cycle.py \
 - 运行前需在同一个 `.env` 文件中配置好 Aster 与 Lighter 的 API 凭证。
 - `--slippage` 用于控制 Lighter Taker 单相对于对应 Aster 成交价的百分比偏移，数值越大下单越激进。
 - `--cycles` 决定执行的循环次数，设置为 `0` 表示脚本会一直运行直到手动中断。
-- `--cycle-delay` 用于在每次循环后增加额外的暂停时间（秒）。脚本现在会强制保证两次循环启动之间至少间隔 60 秒，该参数会叠加在这个基础间隔之上。
+- `--cycle-delay` 用于在每次循环后增加额外的暂停时间（秒）。脚本现在会强制保证两次循环启动之间至少间隔 5 秒，该参数会叠加在这个基础间隔之上。
 - `--aster-maker-depth` 用于指定 Aster Maker 挂单参考的深度级别（1-500，默认 10）。
 - `--aster-leg1-depth` 可为第一条 Aster Maker 挂单单独设置深度，未提供时默认跟随 `--aster-maker-depth`。
 - `--aster-leg3-depth` 可为第三条 Aster 反向 Maker 挂单单独设置深度，未提供时默认跟随 `--aster-maker-depth`。

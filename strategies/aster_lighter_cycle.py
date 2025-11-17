@@ -42,6 +42,7 @@ from web3.types import TxParams, Wei
 from edgex_sdk import Client as EdgeXApiClient, GetOrderBookDepthParams
 
 from lighter.api.account_api import AccountApi
+from lighter.exceptions import ApiException
 from lighter.api_client import ApiClient
 from lighter.configuration import Configuration
 from lighter.signer_client import SignerClient, create_api_key
@@ -59,7 +60,7 @@ except ImportError:  # pragma: no cover - fallback when executed as a script
     from hedge_reporter import HedgeMetricsReporter
 
 DEFAULT_ASTER_MAKER_DEPTH_LEVEL = 10
-MIN_CYCLE_INTERVAL_SECONDS = 60.0
+MIN_CYCLE_INTERVAL_SECONDS = 5.0
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from exchanges.aster import AsterClient
@@ -2135,6 +2136,9 @@ class HedgingCycleExecutor:
         self._last_tracemalloc_snapshot = None
         self._lighter_l1_address = (os.getenv("L1_WALLET_ADDRESS") or "").strip()
         self._lighter_intent_address: Optional[str] = None
+        self._lighter_l1_retry_after: float = 0.0
+        self._lighter_l1_last_error: Optional[str] = None
+        self._lighter_l1_backoff_notified: bool = False
         self._leaderboard_address_warning_emitted = False
         self._cached_leaderboard_points: Optional[Tuple[Optional[Decimal], Optional[Decimal]]] = None
         self._leaderboard_points_cycle: int = 0
@@ -2597,6 +2601,21 @@ class HedgingCycleExecutor:
         if self._lighter_l1_address:
             return self._lighter_l1_address
 
+        now = time.time()
+        if self._lighter_l1_retry_after > 0 and now < self._lighter_l1_retry_after:
+            if not self._lighter_l1_backoff_notified:
+                remaining = max(self._lighter_l1_retry_after - now, 0.0)
+                reason = self._lighter_l1_last_error or "rate limit"
+                self.logger.log(
+                    (
+                        "Skipping Lighter L1 address lookup due to backoff: "
+                        f"{reason} (retry in {remaining:.0f}s)"
+                    ),
+                    "DEBUG",
+                )
+                self._lighter_l1_backoff_notified = True
+            return None
+
         lighter_client = self.lighter_client
         base_url = LIGHTER_MAINNET_BASE_URL
         account_index: Optional[int] = None
@@ -2627,7 +2646,56 @@ class HedgingCycleExecutor:
         response: Optional[object] = None
         try:
             response = await account_api.account(by="index", value=str(account_index))
+        except ApiException as exc:
+            message = str(exc).strip()
+            status = getattr(exc, "status", None)
+            lowered = message.lower()
+            is_rate_limit = status == 429 or "too many requests" in lowered or "ratelimit" in lowered
+            if is_rate_limit:
+                retry_after = 90.0
+                headers = getattr(exc, "headers", None)
+                header_value: Optional[str] = None
+                if headers:
+                    try:
+                        header_value = headers.get("Retry-After")  # type: ignore[attr-defined]
+                    except Exception:
+                        header_value = None
+                    if not header_value and isinstance(headers, dict):
+                        header_value = headers.get("retry-after")
+                if header_value:
+                    try:
+                        retry_after = float(header_value)
+                    except (TypeError, ValueError):
+                        try:
+                            retry_after = float(str(header_value).strip())
+                        except (TypeError, ValueError):
+                            retry_after = 90.0
+                retry_after = max(retry_after, 60.0)
+                self._lighter_l1_retry_after = time.time() + retry_after
+                self._lighter_l1_last_error = message or "rate limited"
+                self._lighter_l1_backoff_notified = False
+                self.logger.log(
+                    (
+                        f"Lighter account lookup rate limited (status={status}); "
+                        f"cooling down for {retry_after:.0f}s"
+                    ),
+                    "WARNING",
+                )
+            else:
+                self._lighter_l1_retry_after = time.time() + 15.0
+                self._lighter_l1_last_error = message or "lookup failed"
+                self._lighter_l1_backoff_notified = False
+                self.logger.log(
+                    (
+                        f"Failed to resolve Lighter L1 address for account index {account_index}: {message}"
+                    ),
+                    "WARNING",
+                )
+            return None
         except Exception as exc:
+            self._lighter_l1_retry_after = time.time() + 10.0
+            self._lighter_l1_last_error = str(exc).strip()
+            self._lighter_l1_backoff_notified = False
             self.logger.log(
                 f"Failed to resolve Lighter L1 address for account index {account_index}: {exc}",
                 "WARNING",
@@ -2651,9 +2719,15 @@ class HedgingCycleExecutor:
                 normalized = str(l1_candidate)
 
             self._lighter_l1_address = normalized
+            self._lighter_l1_retry_after = 0.0
+            self._lighter_l1_last_error = None
+            self._lighter_l1_backoff_notified = False
             os.environ["L1_WALLET_ADDRESS"] = normalized
             return self._lighter_l1_address
 
+        self._lighter_l1_retry_after = time.time() + 30.0
+        self._lighter_l1_last_error = "Lighter account response missing L1 address"
+        self._lighter_l1_backoff_notified = False
         return None
 
     async def ensure_l1_top_up_if_needed(self) -> None:
@@ -4348,7 +4422,7 @@ def _parse_args() -> argparse.Namespace:
         default=0.0,
         help=(
             "Additional delay in seconds between successive hedging cycles. "
-            "Actual cadence enforces at least 60 seconds between cycle starts unless --disable-min-cycle-interval is used"
+            "Actual cadence enforces at least 5 seconds between cycle starts unless --disable-min-cycle-interval is used"
         ),
     )
     parser.add_argument(

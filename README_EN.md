@@ -246,7 +246,7 @@ python strategies/aster_lighter_cycle.py --aster-ticker ETH-USDC --lighter-ticke
 Key options:
 
 - `--cycles`: How many complete hedging cycles to execute. Use `0` to keep the script running until you interrupt it manually.
-- `--cycle-delay`: Additional pause (seconds) applied after each cycle. The executor now enforces a minimum cadence of 60 seconds between cycle starts, so this value is added on top of that floor.
+- `--cycle-delay`: Additional pause (seconds) applied after each cycle. The executor now enforces a minimum cadence of 5 seconds between cycle starts, so this value is added on top of that floor.
 - `--aster-maker-depth`: Order book level (1–500, default 10) used to source Aster maker prices.
 - `--aster-leg1-depth`: Override the depth level for the Aster maker entry leg (defaults to `--aster-maker-depth`).
 - `--aster-leg3-depth`: Override the depth level for the Aster reverse maker leg (defaults to `--aster-maker-depth`).
