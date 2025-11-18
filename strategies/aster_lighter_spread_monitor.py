@@ -5,7 +5,7 @@ This module connects to the public WebSocket feeds for both Aster and Lighter,
 collects top-of-book quotes, computes cross-exchange spreads, and optionally
 pushes the resulting metrics to the hedge coordinator dashboard.
 
-Usage (local console output)::
+Usage (headless console run)::
 
     python strategies/aster_lighter_spread_monitor.py \
         --aster-ticker ETH \
@@ -18,6 +18,8 @@ To publish the live table to the coordinator dashboard as a dedicated agent::
         --lighter-symbol ETH-PERP \
         --coordinator-url http://localhost:8899 \
         --agent-id spread-monitor
+
+If you also want the legacy terminal table output, add ``--console-table``.
 """
 
 from __future__ import annotations
@@ -434,7 +436,7 @@ class SpreadMonitor:
         poll_interval: float = DEFAULT_POLL_INTERVAL,
         history_limit: int = DEFAULT_HISTORY_LIMIT,
         depth_levels: int = DEFAULT_DEPTH_LEVELS,
-        log_to_console: bool = True,
+        console_table: bool = False,
         lighter_base_url: str = DEFAULT_LIGHTER_BASE_URL,
         lighter_ws_url: str = DEFAULT_LIGHTER_WS_URL,
     ) -> None:
@@ -445,7 +447,7 @@ class SpreadMonitor:
         self.poll_interval = max(0.2, float(poll_interval))
         self.depth_levels = max(1, int(depth_levels))
         self.history: Deque[SpreadSnapshot] = deque(maxlen=max(10, int(history_limit)))
-        self.log_to_console = log_to_console
+        self.console_table = console_table
         self.lighter_base_url = lighter_base_url
         self.lighter_ws_url = lighter_ws_url
 
@@ -560,7 +562,7 @@ class SpreadMonitor:
         return snapshot
 
     def _print_snapshot(self, snapshot: SpreadSnapshot) -> None:
-        if not self.log_to_console:
+        if not self.console_table:
             return
 
         if not self._console_header_emitted:
@@ -651,7 +653,19 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--depth", type=int, default=DEFAULT_DEPTH_LEVELS, help="Order book depth levels to sample")
     parser.add_argument("--lighter-base-url", default=DEFAULT_LIGHTER_BASE_URL, help="Override Lighter REST base URL")
     parser.add_argument("--lighter-ws-url", default=DEFAULT_LIGHTER_WS_URL, help="Override Lighter WebSocket URL")
-    parser.add_argument("--no-console", action="store_true", help="Disable console table output")
+    parser.add_argument(
+        "--console-table",
+        dest="console_table",
+        action="store_true",
+        help="Enable tabular spread output in the console",
+    )
+    parser.add_argument(
+        "--no-console",
+        dest="console_table",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(console_table=False)
     parser.add_argument("--log-level", default="INFO", help="Python logging level (default INFO)")
     return parser.parse_args(argv)
 
@@ -666,7 +680,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         poll_interval=args.interval,
         history_limit=args.history,
         depth_levels=args.depth,
-        log_to_console=not args.no_console,
+        console_table=args.console_table,
         lighter_base_url=args.lighter_base_url,
         lighter_ws_url=args.lighter_ws_url,
     )

@@ -291,8 +291,9 @@ python strategies/aster_lighter_spread_monitor.py \
 
 When pointed at the coordinator the dashboard automatically adds an “Aster–Lighter
 Spread Monitor” panel with a live table and rolling history. Without the
-`--coordinator-url` flag the script still prints the same table to stdout using the
-configured refresh interval.
+`--coordinator-url` flag the script will run headless and only log high-level
+events. Add `--console-table` if you also want the tabular feed rendered in the
+terminal.
 
 ## GRVT–Lighter Hedging Cycle
 
