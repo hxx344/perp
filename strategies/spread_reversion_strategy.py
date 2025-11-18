@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Sequence, TYPE_CHECKING
 
 import aiohttp
+import requests
 
 if TYPE_CHECKING:  # pragma: no cover - optional live dependencies
     from strategies.aster_lighter_spread_monitor import SpreadMonitor, SpreadSnapshot
@@ -53,6 +54,153 @@ Direction = str  # simple alias for readability
 EVENT_HISTORY_LIMIT = 200
 PAYLOAD_EVENT_LIMIT = 60
 PAYLOAD_TRADE_LIMIT = 30
+
+
+class StrategyMetricsFormatter:
+    """Utility helpers to serialize simulator state for the coordinator."""
+
+    @staticmethod
+    def decimal_to_str(value: Optional[Decimal]) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            return format(value, "f")
+        except Exception:
+            return str(value)
+
+    @classmethod
+    def trade_to_dict(cls, trade: "TradeRecord") -> Dict[str, Any]:
+        return {
+            "direction": trade.direction,
+            "quantity": cls.decimal_to_str(trade.quantity),
+            "entry_timestamp": trade.entry_timestamp,
+            "exit_timestamp": trade.exit_timestamp,
+            "entry_spread": cls.decimal_to_str(trade.entry_spread),
+            "exit_spread": cls.decimal_to_str(trade.exit_spread),
+            "pnl": cls.decimal_to_str(trade.pnl),
+            "holding_ticks": trade.holding_ticks,
+            "max_z": cls.decimal_to_str(trade.max_z),
+            "min_z": cls.decimal_to_str(trade.min_z),
+        }
+
+    @classmethod
+    def event_to_dict(cls, event: "DecisionEvent") -> Dict[str, Any]:
+        return {
+            "timestamp": event.timestamp,
+            "action": event.action,
+            "direction": event.direction,
+            "spread": cls.decimal_to_str(event.spread),
+            "z_score": cls.decimal_to_str(event.z_score),
+            "quantity": cls.decimal_to_str(event.quantity),
+            "reason": event.reason,
+            "pnl": cls.decimal_to_str(event.pnl),
+            "forced": event.forced,
+        }
+
+    @classmethod
+    def config_to_payload(cls, config: "StrategyConfig", *, poll_interval: Optional[float]) -> Dict[str, Any]:
+        return {
+            "rolling_window": config.rolling_window,
+            "enter_z": cls.decimal_to_str(config.enter_z),
+            "exit_z": cls.decimal_to_str(config.exit_z),
+            "stop_z": cls.decimal_to_str(config.stop_z),
+            "min_abs_spread": cls.decimal_to_str(config.min_abs_spread),
+            "quantity": cls.decimal_to_str(config.quantity),
+            "max_holding_ticks": config.max_holding_ticks,
+            "aster_fee_rate": cls.decimal_to_str(config.aster_fee_rate),
+            "lighter_fee_rate": cls.decimal_to_str(config.lighter_fee_rate),
+            "poll_interval": poll_interval,
+        }
+
+    @classmethod
+    def summary_to_payload(cls, summary: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "trade_count": int(summary.get("trade_count", 0)),
+            "gross_profit": cls.decimal_to_str(summary.get("gross_profit")),
+            "gross_loss": cls.decimal_to_str(summary.get("gross_loss")),
+            "total_pnl": cls.decimal_to_str(summary.get("total_pnl")),
+        }
+
+    @classmethod
+    def position_to_payload(cls, snapshot: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if snapshot is None:
+            return None
+        return {
+            "direction": snapshot.get("direction"),
+            "quantity": cls.decimal_to_str(snapshot.get("quantity")),
+            "aster_entry_price": cls.decimal_to_str(snapshot.get("aster_entry_price")),
+            "lighter_entry_price": cls.decimal_to_str(snapshot.get("lighter_entry_price")),
+            "entry_spread": cls.decimal_to_str(snapshot.get("entry_spread")),
+            "entry_timestamp": snapshot.get("entry_timestamp"),
+            "ticks_held": snapshot.get("ticks_held"),
+            "entry_index": snapshot.get("entry_index"),
+            "max_z": cls.decimal_to_str(snapshot.get("max_z")),
+            "min_z": cls.decimal_to_str(snapshot.get("min_z")),
+        }
+
+    @classmethod
+    def signal_to_payload(
+        cls,
+        latest_signal: Dict[str, Optional[Decimal]],
+        *,
+        timestamp: Optional[float],
+    ) -> Dict[str, Any]:
+        return {
+            "spread": cls.decimal_to_str(latest_signal.get("spread")),
+            "z_score": cls.decimal_to_str(latest_signal.get("z_score")),
+            "timestamp": timestamp,
+        }
+
+    @classmethod
+    def point_to_payload(cls, point: "SpreadDataPoint") -> Dict[str, Any]:
+        return {
+            "timestamp": point.timestamp,
+            "aster_bid": cls.decimal_to_str(point.aster_bid),
+            "aster_ask": cls.decimal_to_str(point.aster_ask),
+            "lighter_bid": cls.decimal_to_str(point.lighter_bid),
+            "lighter_ask": cls.decimal_to_str(point.lighter_ask),
+            "aster_mid": cls.decimal_to_str(point.aster_mid),
+            "lighter_mid": cls.decimal_to_str(point.lighter_mid),
+            "spread": cls.decimal_to_str(point.spread),
+        }
+
+    @classmethod
+    def build_payload(
+        cls,
+        *,
+        agent_id: str,
+        instrument: str,
+        config: "StrategyConfig",
+        poll_interval: Optional[float],
+        summary: Dict[str, Any],
+        open_position: Optional[Dict[str, Any]],
+        latest_signal: Dict[str, Optional[Decimal]],
+        signal_timestamp: Optional[float],
+        events: Sequence[Dict[str, Any]],
+        trades: Sequence[Dict[str, Any]],
+        latest_point: Optional["SpreadDataPoint"],
+        updated_at: Optional[float] = None,
+        mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        metrics: Dict[str, Any] = {
+            "updated_at": updated_at or time.time(),
+            "config": cls.config_to_payload(config, poll_interval=poll_interval),
+            "summary": cls.summary_to_payload(summary),
+            "open_position": cls.position_to_payload(open_position),
+            "latest_signal": cls.signal_to_payload(latest_signal, timestamp=signal_timestamp),
+            "recent_events": list(events),
+            "recent_trades": list(trades),
+        }
+        if latest_point is not None:
+            metrics["latest_point"] = cls.point_to_payload(latest_point)
+        if mode:
+            metrics["mode"] = mode
+
+        return {
+            "agent_id": agent_id,
+            "instrument": instrument,
+            "strategy_metrics": metrics,
+        }
 
 
 @dataclass(frozen=True)
@@ -712,9 +860,9 @@ class LiveSpreadRunner:
                         new_trades = self._simulator.step(point)
                         events = self._simulator.consume_events()
                         for event in events:
-                            self._recent_events.append(self._event_to_dict(event))
+                            self._recent_events.append(StrategyMetricsFormatter.event_to_dict(event))
                         for trade in new_trades:
-                            trade_dict = self._trade_to_dict(trade)
+                            trade_dict = StrategyMetricsFormatter.trade_to_dict(trade)
                             self._recent_trades.append(trade_dict)
                             self._log_trade(trade)
                         await self._maybe_push_metrics(
@@ -730,12 +878,12 @@ class LiveSpreadRunner:
         if self._last_point is not None and self._simulator.has_open_position:
             forced_trade = self._simulator.force_close(self._last_point)
             if forced_trade is not None:
-                trade_dict = self._trade_to_dict(forced_trade)
+                trade_dict = StrategyMetricsFormatter.trade_to_dict(forced_trade)
                 self._recent_trades.append(trade_dict)
                 self._log_trade(forced_trade, forced=True)
             forced_events = self._simulator.consume_events()
             for event in forced_events:
-                self._recent_events.append(self._event_to_dict(event))
+                self._recent_events.append(StrategyMetricsFormatter.event_to_dict(event))
             await self._maybe_push_metrics(
                 new_events=bool(forced_events),
                 new_trades=forced_trade is not None,
@@ -801,119 +949,48 @@ class LiveSpreadRunner:
 
         events = list(self._recent_events)[-PAYLOAD_EVENT_LIMIT:]
         trades = list(self._recent_trades)[-PAYLOAD_TRADE_LIMIT:]
+        signal_timestamp = (
+            self._last_point.timestamp
+            if self._last_point is not None
+            else self._simulator.get_last_timestamp()
+        )
 
-        payload: Dict[str, Any] = {
-            "agent_id": self._coordinator_agent_id,
-            "instrument": f"{self.aster_ticker}/{self.lighter_symbol}",
-            "strategy_metrics": {
-                "updated_at": time.time(),
-                "config": self._config_to_payload(),
-                "summary": self._summary_to_payload(summary),
-                "open_position": self._position_to_payload(open_position),
-                "latest_signal": self._signal_to_payload(latest_signal),
-                "recent_events": events,
-                "recent_trades": trades,
-            },
-        }
+        return StrategyMetricsFormatter.build_payload(
+            agent_id=self._coordinator_agent_id,
+            instrument=f"{self.aster_ticker}/{self.lighter_symbol}",
+            config=self.config,
+            poll_interval=self.poll_interval,
+            summary=summary,
+            open_position=open_position,
+            latest_signal=latest_signal,
+            signal_timestamp=signal_timestamp,
+            events=events,
+            trades=trades,
+            latest_point=self._last_point,
+        )
 
-        if self._last_point is not None:
-            payload["strategy_metrics"]["latest_point"] = self._point_to_payload(self._last_point)
 
-        return payload
+def _post_metrics_to_coordinator(
+    *,
+    coordinator_url: str,
+    payload: Dict[str, Any],
+    agent_id: str,
+) -> None:
+    endpoint = f"{coordinator_url.rstrip('/')}/update"
+    try:
+        response = requests.post(endpoint, json=payload, timeout=10)
+    except Exception as exc:  # pragma: no cover - network path
+        print(f"[coordinator] Upload error: {exc}")
+        return
 
-    def _config_to_payload(self) -> Dict[str, Any]:
-        return {
-            "rolling_window": self.config.rolling_window,
-            "enter_z": self._decimal_to_str(self.config.enter_z),
-            "exit_z": self._decimal_to_str(self.config.exit_z),
-            "stop_z": self._decimal_to_str(self.config.stop_z),
-            "min_abs_spread": self._decimal_to_str(self.config.min_abs_spread),
-            "quantity": self._decimal_to_str(self.config.quantity),
-            "max_holding_ticks": self.config.max_holding_ticks,
-            "aster_fee_rate": self._decimal_to_str(self.config.aster_fee_rate),
-            "lighter_fee_rate": self._decimal_to_str(self.config.lighter_fee_rate),
-            "poll_interval": self.poll_interval,
-        }
-
-    def _summary_to_payload(self, summary: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "trade_count": int(summary.get("trade_count", 0)),
-            "gross_profit": self._decimal_to_str(summary.get("gross_profit")),
-            "gross_loss": self._decimal_to_str(summary.get("gross_loss")),
-            "total_pnl": self._decimal_to_str(summary.get("total_pnl")),
-        }
-
-    def _position_to_payload(self, snapshot: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        if snapshot is None:
-            return None
-        return {
-            "direction": snapshot.get("direction"),
-            "quantity": self._decimal_to_str(snapshot.get("quantity")),
-            "aster_entry_price": self._decimal_to_str(snapshot.get("aster_entry_price")),
-            "lighter_entry_price": self._decimal_to_str(snapshot.get("lighter_entry_price")),
-            "entry_spread": self._decimal_to_str(snapshot.get("entry_spread")),
-            "entry_timestamp": snapshot.get("entry_timestamp"),
-            "ticks_held": snapshot.get("ticks_held"),
-            "entry_index": snapshot.get("entry_index"),
-            "max_z": self._decimal_to_str(snapshot.get("max_z")),
-            "min_z": self._decimal_to_str(snapshot.get("min_z")),
-        }
-
-    def _signal_to_payload(self, latest_signal: Dict[str, Optional[Decimal]]) -> Dict[str, Any]:
-        timestamp = self._last_point.timestamp if self._last_point is not None else self._simulator.get_last_timestamp()
-        return {
-            "spread": self._decimal_to_str(latest_signal.get("spread")),
-            "z_score": self._decimal_to_str(latest_signal.get("z_score")),
-            "timestamp": timestamp,
-        }
-
-    def _point_to_payload(self, point: SpreadDataPoint) -> Dict[str, Any]:
-        return {
-            "timestamp": point.timestamp,
-            "aster_bid": self._decimal_to_str(point.aster_bid),
-            "aster_ask": self._decimal_to_str(point.aster_ask),
-            "lighter_bid": self._decimal_to_str(point.lighter_bid),
-            "lighter_ask": self._decimal_to_str(point.lighter_ask),
-            "aster_mid": self._decimal_to_str(point.aster_mid),
-            "lighter_mid": self._decimal_to_str(point.lighter_mid),
-            "spread": self._decimal_to_str(point.spread),
-        }
-
-    @staticmethod
-    def _decimal_to_str(value: Optional[Decimal]) -> Optional[str]:
-        if value is None:
-            return None
+    if response.status_code >= 400:
         try:
-            return format(value, "f")
+            body = response.text
         except Exception:
-            return str(value)
-
-    def _trade_to_dict(self, trade: TradeRecord) -> Dict[str, Any]:
-        return {
-            "direction": trade.direction,
-            "quantity": self._decimal_to_str(trade.quantity),
-            "entry_timestamp": trade.entry_timestamp,
-            "exit_timestamp": trade.exit_timestamp,
-            "entry_spread": self._decimal_to_str(trade.entry_spread),
-            "exit_spread": self._decimal_to_str(trade.exit_spread),
-            "pnl": self._decimal_to_str(trade.pnl),
-            "holding_ticks": trade.holding_ticks,
-            "max_z": self._decimal_to_str(trade.max_z),
-            "min_z": self._decimal_to_str(trade.min_z),
-        }
-
-    def _event_to_dict(self, event: DecisionEvent) -> Dict[str, Any]:
-        return {
-            "timestamp": event.timestamp,
-            "action": event.action,
-            "direction": event.direction,
-            "spread": self._decimal_to_str(event.spread),
-            "z_score": self._decimal_to_str(event.z_score),
-            "quantity": self._decimal_to_str(event.quantity),
-            "reason": event.reason,
-            "pnl": self._decimal_to_str(event.pnl),
-            "forced": event.forced,
-        }
+            body = "<no body>"
+        print(f"[coordinator] Failed to upload metrics ({response.status_code}): {body}")
+    else:
+        print(f"[coordinator] Metrics posted to {endpoint} as agent '{agent_id}'.")
 
 
 def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
@@ -1003,6 +1080,51 @@ def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
             f"spread {trade.entry_spread:.4f} -> {trade.exit_spread:.4f} | "
             f"PnL={trade.pnl:.6f}"
         )
+
+    coordinator_url = (parsed.coordinator_url or "").strip()
+    if coordinator_url:
+        coordinator_url = coordinator_url.rstrip("/")
+        default_agent = f"{parsed.aster_ticker}-{parsed.lighter_symbol}-spread"
+        agent_id = (parsed.coordinator_agent or default_agent).strip() or default_agent
+        summary = simulator.get_aggregate_metrics()
+        open_position = simulator.get_open_position_snapshot()
+        latest_signal = simulator.get_latest_signal()
+        last_point = points[-1] if points else None
+        signal_timestamp = (
+            last_point.timestamp if isinstance(last_point, SpreadDataPoint) else simulator.get_last_timestamp()
+        )
+
+        # Flush remaining events for reporting purposes.
+        events_raw = simulator.consume_events()
+        event_dicts = [
+            StrategyMetricsFormatter.event_to_dict(event)
+            for event in events_raw[-PAYLOAD_EVENT_LIMIT:]
+        ]
+        trade_dicts = [
+            StrategyMetricsFormatter.trade_to_dict(trade)
+            for trade in result.trades[-PAYLOAD_TRADE_LIMIT:]
+        ]
+
+        payload = StrategyMetricsFormatter.build_payload(
+            agent_id=agent_id,
+            instrument=f"{parsed.aster_ticker}/{parsed.lighter_symbol}",
+            config=config,
+            poll_interval=parsed.poll_interval,
+            summary=summary,
+            open_position=open_position,
+            latest_signal=latest_signal,
+            signal_timestamp=signal_timestamp,
+            events=event_dicts,
+            trades=trade_dicts,
+            latest_point=last_point,
+            mode="simulation",
+        )
+        _post_metrics_to_coordinator(
+            coordinator_url=coordinator_url,
+            payload=payload,
+            agent_id=agent_id,
+        )
+
     return result
 
 
