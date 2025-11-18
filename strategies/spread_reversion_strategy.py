@@ -554,7 +554,7 @@ class SpreadReversionSimulator:
             point=point,
             spread=spread,
             z_score=z_score,
-            direction=direction,
+            direction=self._entry_order_direction(direction),
             quantity=self.config.quantity,
             reason="enter_z_trigger",
         )
@@ -625,7 +625,7 @@ class SpreadReversionSimulator:
             point=point,
             spread=spread_exit,
             z_score=self._last_z_score,
-            direction=position.direction,
+            direction=self._exit_order_direction(position.direction),
             quantity=position.quantity,
             reason=reason or ("force_close" if force else None),
             pnl=pnl,
@@ -677,6 +677,30 @@ class SpreadReversionSimulator:
         gross_pnl = pnl_lighter + pnl_aster
         fees = self._compute_fees(position, exit_point)
         return gross_pnl - fees
+
+    @staticmethod
+    def _entry_order_direction(position_direction: Direction) -> Direction:
+        mapping = {
+            "short_aster_long_lighter": "sell_aster / buy_lighter",
+            "long_aster_short_lighter": "buy_aster / sell_lighter",
+            "lighter_long": "buy_lighter",
+            "lighter_short": "sell_lighter",
+        }
+        if position_direction not in mapping:
+            raise ValueError(f"Unknown position direction for entry event: {position_direction}")
+        return mapping[position_direction]
+
+    @staticmethod
+    def _exit_order_direction(position_direction: Direction) -> Direction:
+        mapping = {
+            "short_aster_long_lighter": "buy_aster / sell_lighter",
+            "long_aster_short_lighter": "sell_aster / buy_lighter",
+            "lighter_long": "sell_lighter",
+            "lighter_short": "buy_lighter",
+        }
+        if position_direction not in mapping:
+            raise ValueError(f"Unknown position direction for exit event: {position_direction}")
+        return mapping[position_direction]
 
     def _compute_fees(self, position: SpreadPosition, exit_point: SpreadDataPoint) -> Decimal:
         volume = position.quantity
