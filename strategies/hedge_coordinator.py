@@ -42,7 +42,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DASHBOARD_PATH = BASE_DIR / "hedge_dashboard.html"
 
 LOGGER = logging.getLogger("hedge.coordinator")
-MAX_SPREAD_HISTORY = 360
+MAX_SPREAD_HISTORY = 600
 
 
 @dataclass

@@ -298,6 +298,10 @@ percentage chart so you can spot periods of positive or negative edge at a
 glance. For raw WebSocket frames and handshakes, pass `--debug-websockets`
 (otherwise those logs stay muted).
 
+By default the monitor now retains 600 samples (roughly ten minutes at the
+standard one-second polling interval). Use `--history` to expand or shrink that
+window when running longer sessions.
+
 ## GRVT–Lighter Hedging Cycle
 
 To mirror the same workflow with GRVT on the maker side, run `strategies/grvt_lighter_cycle.py`:

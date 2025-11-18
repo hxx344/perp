@@ -47,7 +47,7 @@ from exchanges.aster import AsterMarketDataWebSocket
 from exchanges.lighter_custom_websocket import LighterCustomWebSocketManager
 from helpers.logger import TradingLogger
 
-DEFAULT_HISTORY_LIMIT = 120
+DEFAULT_HISTORY_LIMIT = 600
 DEFAULT_POLL_INTERVAL = 1.0
 DEFAULT_DEPTH_LEVELS = 10
 DEFAULT_LIGHTER_BASE_URL = "https://mainnet.zklighter.elliot.ai"
@@ -650,7 +650,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--coordinator-url", help="Optional hedge coordinator base URL for dashboard updates")
     parser.add_argument("--agent-id", default="spread-monitor", help="Identifier reported to the coordinator")
     parser.add_argument("--interval", type=float, default=DEFAULT_POLL_INTERVAL, help="Update interval in seconds")
-    parser.add_argument("--history", type=int, default=DEFAULT_HISTORY_LIMIT, help="Number of rows to retain in history")
+    parser.add_argument(
+        "--history",
+        type=int,
+        default=DEFAULT_HISTORY_LIMIT,
+        help="Number of rows to retain in history (default keeps ~10 minutes at 1s interval)",
+    )
     parser.add_argument("--depth", type=int, default=DEFAULT_DEPTH_LEVELS, help="Order book depth levels to sample")
     parser.add_argument("--lighter-base-url", default=DEFAULT_LIGHTER_BASE_URL, help="Override Lighter REST base URL")
     parser.add_argument("--lighter-ws-url", default=DEFAULT_LIGHTER_WS_URL, help="Override Lighter WebSocket URL")

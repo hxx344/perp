@@ -1118,7 +1118,7 @@
 
   const metrics = spreads[selectedSpreadAgent] ?? {};
   const historyRaw = Array.isArray(metrics.history) ? metrics.history : [];
-  const history = historyRaw.slice(-MAX_SPREAD_HISTORY_POINTS).reverse();
+  const history = historyRaw.slice(-MAX_SPREAD_HISTORY_POINTS);
 
         if (spreadInstrument) {
           const ticker = metrics?.aster?.ticker ?? '';
@@ -1154,9 +1154,9 @@
         const chartLabels = [];
         const chartSellAster = [];
         const chartSellLighter = [];
+        const tableRows = [];
 
         for (const row of history) {
-          const tr = document.createElement('tr');
           const timestamp = Number(row.timestamp);
           const timeLabel = row.iso_time
             ? new Date(row.iso_time).toLocaleTimeString()
@@ -1180,7 +1180,7 @@
           chartSellAster.push(computePercent(spreadSellAsterRaw ?? NaN, basisAsterDenom ?? NaN));
           chartSellLighter.push(computePercent(spreadSellLighterRaw ?? NaN, basisLighterDenom ?? NaN));
 
-          const cells = [
+          tableRows.push([
             escapeHtml(timeLabel),
             escapeHtml(formatDecimal(row.aster_bid, 4)),
             escapeHtml(formatDecimal(row.aster_ask, 4)),
@@ -1189,8 +1189,12 @@
             escapeHtml(formatDecimal(row.spread_aster_bid_minus_lighter_ask, 6)),
             escapeHtml(formatDecimal(row.spread_lighter_bid_minus_aster_ask, 6)),
             escapeHtml(formatDecimal(row.mid_price_diff, 6))
-          ];
-          tr.innerHTML = cells.map((value) => `<td>${value}</td>`).join('');
+          ]);
+        }
+
+        for (let index = tableRows.length - 1; index >= 0; index -= 1) {
+          const tr = document.createElement('tr');
+          tr.innerHTML = tableRows[index].map((value) => `<td>${value}</td>`).join('');
           spreadTableBody.appendChild(tr);
         }
 
