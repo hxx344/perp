@@ -56,11 +56,16 @@
       .spread-chart-wrapper {
         height: 280px;
         margin-bottom: 1.5rem;
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding-bottom: 0.5rem;
       }
 
       .spread-chart-wrapper canvas {
-        width: 100%;
         height: 100%;
+        width: auto;
+        min-width: 100%;
+        display: block;
       }
 
       .spread-meta {
@@ -446,8 +451,10 @@
     const spreadTableBody = document.getElementById('spread-table-body');
     const spreadInstrument = document.getElementById('spread-instrument');
     const spreadUpdated = document.getElementById('spread-updated');
-  const spreadChartWrapper = document.getElementById('spread-chart-wrapper');
-  const spreadChartCanvas = document.getElementById('spread-chart');
+    const spreadChartWrapper = document.getElementById('spread-chart-wrapper');
+    const spreadChartCanvas = document.getElementById('spread-chart');
+    const MAX_SPREAD_HISTORY_POINTS = 1800;
+    const CHART_MIN_POINT_SPACING = 26;
       let batchBusy = false;
       let lastDefaultPaused = false;
       let selectedSpreadAgent = null;
@@ -587,91 +594,160 @@
       }
 
       function renderSpreadCanvas(labels, seriesA, seriesB) {
-        if (!spreadChartCanvas) {
+        if (!spreadChartCanvas || !spreadChartWrapper) {
           return;
         }
 
         const bounds = getSeriesBounds(seriesA, seriesB);
         if (!bounds.hasValue) {
-          spreadChartWrapper?.classList.add('hidden');
+          spreadChartWrapper.classList.add('hidden');
           return;
         }
 
+        const wrapperWidth = spreadChartWrapper.clientWidth || 640;
+        const pointCount = Math.max(labels.length - 1, 1);
+        const layout = { top: 56, right: 28, bottom: 52, left: 88 };
+        const desiredWidth = Math.max(
+          wrapperWidth,
+          pointCount * CHART_MIN_POINT_SPACING + layout.left + layout.right
+        );
+
+        spreadChartCanvas.style.width = `${Math.round(desiredWidth)}px`;
+
         const setup = prepareCanvas(spreadChartCanvas);
         if (!setup) {
-          spreadChartWrapper?.classList.add('hidden');
+          spreadChartWrapper.classList.add('hidden');
           return;
         }
 
         const { ctx, width, height } = setup;
+        const innerWidth = Math.max(10, width - layout.left - layout.right);
+        const innerHeight = Math.max(10, height - layout.top - layout.bottom);
         const { min, max } = bounds;
         const range = max - min || 1;
 
         const mapX = (index) => {
           if (labels.length <= 1) {
-            return width / 2;
+            return layout.left + innerWidth / 2;
           }
-          return (index / (labels.length - 1)) * width;
+          return layout.left + (index / (labels.length - 1)) * innerWidth;
         };
 
         const mapY = (value) => {
           const ratio = (value - min) / range;
-          return height - ratio * height;
+          return layout.top + (1 - ratio) * innerHeight;
         };
 
         ctx.fillStyle = '#1b1d24';
         ctx.fillRect(0, 0, width, height);
 
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
         ctx.lineWidth = 1;
-        const gridLines = 4;
-        for (let i = 0; i <= gridLines; i += 1) {
-          const y = (height / gridLines) * i;
+        const horizontalLines = 5;
+        for (let i = 0; i <= horizontalLines; i += 1) {
+          const value = min + (range * i) / horizontalLines;
+          const y = mapY(value);
           ctx.beginPath();
-          ctx.moveTo(0, y);
-          ctx.lineTo(width, y);
+          ctx.moveTo(layout.left, y);
+          ctx.lineTo(width - layout.right, y);
           ctx.stroke();
         }
 
-        ctx.fillStyle = '#8a94a6';
         ctx.font = '12px "Segoe UI", system-ui';
+        ctx.fillStyle = '#8a94a6';
         ctx.textBaseline = 'middle';
-
-        const tickCount = 4;
-        for (let i = 0; i <= tickCount; i += 1) {
-          const value = min + (range * i) / tickCount;
+        ctx.textAlign = 'right';
+        const yTicks = 4;
+        for (let i = 0; i <= yTicks; i += 1) {
+          const value = min + (range * i) / yTicks;
           const y = mapY(value);
-          ctx.fillText(formatPercent(value, 2), 6, Math.min(Math.max(y, 12), height - 12));
+          ctx.fillText(formatPercent(value, 2), layout.left - 12, y);
         }
 
         if (min < 0 && max > 0) {
           const zeroY = mapY(0);
-          ctx.strokeStyle = 'rgba(199, 210, 232, 0.35)';
+          ctx.strokeStyle = 'rgba(199, 210, 232, 0.4)';
           ctx.lineWidth = 1.2;
           ctx.beginPath();
-          ctx.moveTo(0, zeroY);
-          ctx.lineTo(width, zeroY);
+          ctx.moveTo(layout.left, zeroY);
+          ctx.lineTo(width - layout.right, zeroY);
           ctx.stroke();
         }
 
         drawSeries(ctx, seriesA, mapX, mapY, 'rgba(99, 156, 255, 1)');
         drawSeries(ctx, seriesB, mapX, mapY, 'rgba(255, 160, 86, 1)');
 
-        ctx.textBaseline = 'top';
-        ctx.fillStyle = '#c7d2e8';
-        ctx.fillText('Aster bid – Lighter ask', 6, 6);
-        ctx.fillText('Lighter bid – Aster ask', 6, 24);
-
-        ctx.textBaseline = 'bottom';
-        ctx.fillStyle = '#8a94a6';
-        const labelCount = Math.min(4, labels.length - 1);
-        for (let i = 0; i <= labelCount; i += 1) {
-          const position = Math.max(labelCount, 1);
-          const index = Math.round((i / position) * (labels.length - 1));
-          const x = mapX(index);
-          const text = labels[index] ?? '';
-          ctx.fillText(text, Math.min(Math.max(x - 24, 4), width - 48), height - 4);
+        ctx.font = '13px "Segoe UI", system-ui';
+        const legendEntries = [
+          { label: 'Aster bid – Lighter ask', color: 'rgba(99, 156, 255, 1)' },
+          { label: 'Lighter bid – Aster ask', color: 'rgba(255, 160, 86, 1)' }
+        ];
+        let legendTextWidth = 0;
+        for (const entry of legendEntries) {
+          legendTextWidth = Math.max(legendTextWidth, ctx.measureText(entry.label).width);
         }
+        const legendPaddingX = 14;
+        const legendPaddingY = 10;
+        const legendItemHeight = 22;
+        const legendHeight = legendEntries.length * legendItemHeight + legendPaddingY * 2;
+        const legendWidth = legendTextWidth + legendPaddingX * 2 + 24;
+        let legendX = width - layout.right - legendWidth;
+        let legendY = layout.top - legendHeight - 12;
+        if (legendY < 8) {
+          legendY = layout.top + 8;
+        }
+
+        ctx.fillStyle = 'rgba(17, 19, 27, 0.9)';
+        ctx.fillRect(legendX, legendY, legendWidth, legendHeight);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+        ctx.strokeRect(legendX, legendY, legendWidth, legendHeight);
+
+        let legendCursorY = legendY + legendPaddingY + legendItemHeight / 2;
+        for (const entry of legendEntries) {
+          ctx.fillStyle = entry.color;
+          ctx.beginPath();
+          ctx.arc(legendX + legendPaddingX, legendCursorY, 5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#c7d2e8';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(entry.label, legendX + legendPaddingX + 14, legendCursorY);
+          legendCursorY += legendItemHeight;
+        }
+
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = '#8a94a6';
+        const minLabelGap = 96;
+        const labelIndexes = [];
+        let lastLabelX = -Infinity;
+        for (let i = 0; i < labels.length; i += 1) {
+          const x = mapX(i);
+          if (!Number.isFinite(x)) {
+            continue;
+          }
+          if (labelIndexes.length === 0 || x - lastLabelX >= minLabelGap || i === labels.length - 1) {
+            labelIndexes.push(i);
+            lastLabelX = x;
+          }
+        }
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        ctx.lineWidth = 1;
+        const bottomY = height - layout.bottom;
+        for (const index of labelIndexes) {
+          const x = mapX(index);
+          ctx.beginPath();
+          ctx.moveTo(x, layout.top);
+          ctx.lineTo(x, bottomY);
+          ctx.stroke();
+          ctx.fillText(labels[index] ?? '', x, bottomY + 8);
+        }
+
+        spreadChartWrapper.scrollLeft = Math.max(
+          0,
+          spreadChartWrapper.scrollWidth - spreadChartWrapper.clientWidth
+        );
       }
 
       function escapeHtml(value) {
@@ -1057,9 +1133,9 @@
           }
         }
 
-        const metrics = spreads[selectedSpreadAgent] ?? {};
-        const historyRaw = Array.isArray(metrics.history) ? metrics.history : [];
-        const history = historyRaw.slice(-60).reverse();
+  const metrics = spreads[selectedSpreadAgent] ?? {};
+  const historyRaw = Array.isArray(metrics.history) ? metrics.history : [];
+  const history = historyRaw.slice(-MAX_SPREAD_HISTORY_POINTS).reverse();
 
         if (spreadInstrument) {
           const ticker = metrics?.aster?.ticker ?? '';
