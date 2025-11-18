@@ -293,7 +293,8 @@ When pointed at the coordinator the dashboard automatically adds an “Aster–L
 Spread Monitor” panel with a live table and rolling history. Without the
 `--coordinator-url` flag the script will run headless and only log high-level
 events. Add `--console-table` if you also want the tabular feed rendered in the
-terminal.
+terminal. For raw WebSocket frames and handshakes, pass `--debug-websockets` (otherwise
+those logs stay muted).
 
 ## GRVT–Lighter Hedging Cycle
 

@@ -20,6 +20,7 @@ To publish the live table to the coordinator dashboard as a dedicated agent::
         --agent-id spread-monitor
 
 If you also want the legacy terminal table output, add ``--console-table``.
+Use ``--debug-websockets`` only when you need verbose handshake/frame logging.
 """
 
 from __future__ import annotations
@@ -666,12 +667,23 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.set_defaults(console_table=False)
+    parser.add_argument(
+        "--debug-websockets",
+        action="store_true",
+        help="Log websocket frames and handshake details (default suppresses noisy client logs)",
+    )
     parser.add_argument("--log-level", default="INFO", help="Python logging level (default INFO)")
     return parser.parse_args(argv)
 
 
 async def _async_main(args: argparse.Namespace) -> None:
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+    if args.debug_websockets:
+        logging.getLogger("websockets").setLevel(logging.DEBUG)
+        logging.getLogger("websockets.client").setLevel(logging.DEBUG)
+    else:
+        logging.getLogger("websockets").setLevel(logging.WARNING)
+        logging.getLogger("websockets.client").setLevel(logging.WARNING)
     monitor = SpreadMonitor(
         aster_ticker=args.aster_ticker,
         lighter_symbol=args.lighter_symbol,
