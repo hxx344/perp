@@ -77,6 +77,7 @@ class StrategyMetricsFormatter:
             "exit_timestamp": trade.exit_timestamp,
             "entry_spread": cls.decimal_to_str(trade.entry_spread),
             "exit_spread": cls.decimal_to_str(trade.exit_spread),
+            "notional": cls.decimal_to_str(trade.notional),
             "pnl": cls.decimal_to_str(trade.pnl),
             "holding_ticks": trade.holding_ticks,
             "max_z": cls.decimal_to_str(trade.max_z),
@@ -120,6 +121,8 @@ class StrategyMetricsFormatter:
             "gross_profit": cls.decimal_to_str(summary.get("gross_profit")),
             "gross_loss": cls.decimal_to_str(summary.get("gross_loss")),
             "total_pnl": cls.decimal_to_str(summary.get("total_pnl")),
+            "total_volume": cls.decimal_to_str(summary.get("total_volume")),
+            "pnl_over_volume": cls.decimal_to_str(summary.get("pnl_over_volume")),
         }
 
     @classmethod
@@ -308,6 +311,7 @@ class TradeRecord:
     exit_timestamp: float
     entry_spread: Decimal
     exit_spread: Decimal
+    notional: Decimal
     pnl: Decimal
     holding_ticks: int
     max_z: Decimal
@@ -320,6 +324,7 @@ class SimulationResult:
 
     trades: List[TradeRecord]
     total_pnl: Decimal
+    total_volume: Decimal
     gross_profit: Decimal
     gross_loss: Decimal
 
@@ -396,6 +401,7 @@ class SpreadReversionSimulator:
         self._trades: List[TradeRecord] = []
         self._gross_profit = Decimal("0")
         self._gross_loss = Decimal("0")
+        self._total_volume = Decimal("0")
         self._tick_index = 0
         self._event_log = deque(maxlen=self._event_history_limit)
         self._last_z_score = None
@@ -428,6 +434,7 @@ class SpreadReversionSimulator:
         return SimulationResult(
             trades=list(self._trades),
             total_pnl=total_pnl,
+            total_volume=self._total_volume,
             gross_profit=self._gross_profit,
             gross_loss=self._gross_loss,
         )
@@ -439,11 +446,18 @@ class SpreadReversionSimulator:
 
     def get_aggregate_metrics(self) -> Dict[str, Any]:
         total_pnl = self._gross_profit + self._gross_loss
+        pnl_over_volume: Optional[Decimal]
+        if self._total_volume != 0:
+            pnl_over_volume = total_pnl / self._total_volume
+        else:
+            pnl_over_volume = None
         return {
             "trade_count": len(self._trades),
             "gross_profit": self._gross_profit,
             "gross_loss": self._gross_loss,
             "total_pnl": total_pnl,
+            "total_volume": self._total_volume,
+            "pnl_over_volume": pnl_over_volume,
         }
 
     def get_open_position_snapshot(self) -> Optional[Dict[str, Any]]:
@@ -599,6 +613,7 @@ class SpreadReversionSimulator:
 
         spread_exit = point.spread
         pnl = self._compute_pnl(position, point)
+        trade_volume = self._compute_trade_volume(position, point)
 
         trade = TradeRecord(
             direction=position.direction,
@@ -607,12 +622,14 @@ class SpreadReversionSimulator:
             exit_timestamp=point.timestamp,
             entry_spread=position.entry_spread,
             exit_spread=spread_exit,
+            notional=trade_volume,
             pnl=pnl,
             holding_ticks=max(index - position.entry_index, 0),
             max_z=position.max_z,
             min_z=position.min_z,
         )
         self._trades.append(trade)
+        self._total_volume += trade_volume
 
         if pnl >= 0:
             self._gross_profit += pnl
@@ -677,6 +694,18 @@ class SpreadReversionSimulator:
         gross_pnl = pnl_lighter + pnl_aster
         fees = self._compute_fees(position, exit_point)
         return gross_pnl - fees
+
+    def _compute_trade_volume(self, position: SpreadPosition, exit_point: SpreadDataPoint) -> Decimal:
+        quantity = abs(position.quantity)
+        volume = Decimal("0")
+        if position.direction in ("short_aster_long_lighter", "long_aster_short_lighter"):
+            volume += (position.aster_entry_price + exit_point.aster_mid) * quantity
+            volume += (position.lighter_entry_price + exit_point.lighter_mid) * quantity
+        elif position.direction in ("lighter_long", "lighter_short"):
+            volume += (position.lighter_entry_price + exit_point.lighter_mid) * quantity
+        else:
+            raise ValueError(f"Unknown position direction for volume: {position.direction}")
+        return volume
 
     @staticmethod
     def _entry_order_direction(position_direction: Direction) -> Direction:
@@ -1124,6 +1153,12 @@ def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
     print(f"Gross profit   : {result.gross_profit:.6f}")
     print(f"Gross loss     : {result.gross_loss:.6f}")
     print(f"Net PnL        : {result.total_pnl:.6f}")
+    print(f"Total volume   : {result.total_volume:.6f}")
+    if result.total_volume != 0:
+        ratio_percent = (result.total_pnl / result.total_volume) * Decimal("100")
+        print(f"PnL / volume   : {ratio_percent:.2f}%")
+    else:
+        print("PnL / volume   : --")
     for idx, trade in enumerate(result.trades, start=1):
         print(
             f"#{idx:02d} | dir={trade.direction} | qty={trade.quantity} | "

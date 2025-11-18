@@ -78,6 +78,7 @@ def test_simulator_executes_spread_trades():
 
     assert result.trade_count >= 2
     assert result.total_pnl > 0
+    assert result.total_volume > 0
 
     directions = [trade.direction for trade in result.trades]
     assert "short_aster_long_lighter" in directions
@@ -89,6 +90,7 @@ def test_cli_returns_simulation_result(args, capsys):
     result = run_cli(args)
     captured = capsys.readouterr()
     assert "Spread Reversion Test Result" in captured.out
+    assert "Total volume" in captured.out
     assert result.trade_count >= 1
 
 
@@ -127,4 +129,5 @@ def test_lighter_only_strategy_generates_single_leg_trade():
 
     assert result.trade_count == 1
     assert result.total_pnl > 0
+    assert result.total_volume > 0
     assert result.trades[0].direction == "lighter_long"

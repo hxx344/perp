@@ -470,6 +470,16 @@
             <p class="summary-sub" id="strategy-trade-count">Trades —</p>
           </article>
           <article class="card">
+            <h2>Total Volume</h2>
+            <div class="value" id="strategy-total-volume">--</div>
+            <p class="summary-sub">Entry + exit notional</p>
+          </article>
+          <article class="card">
+            <h2>PnL / Volume</h2>
+            <div class="value" id="strategy-pnl-ratio">--</div>
+            <p class="summary-sub">Net profit versus traded value</p>
+          </article>
+          <article class="card">
             <h2>Open Position</h2>
             <div class="value" id="strategy-open-position">None</div>
             <p class="summary-sub" id="strategy-open-details">—</p>
@@ -572,6 +582,8 @@
     const strategyCard = document.getElementById('strategy-card');
     const strategyNetPnl = document.getElementById('strategy-net-pnl');
     const strategyTradeCount = document.getElementById('strategy-trade-count');
+  const strategyTotalVolume = document.getElementById('strategy-total-volume');
+  const strategyPnlRatio = document.getElementById('strategy-pnl-ratio');
     const strategyOpenPosition = document.getElementById('strategy-open-position');
     const strategyOpenDetails = document.getElementById('strategy-open-details');
     const strategyLastDecision = document.getElementById('strategy-last-decision');
@@ -1291,6 +1303,22 @@
 
         const tradeCountRaw = Number(summary.trade_count ?? metrics.trade_count ?? 0);
         strategyTradeCount.textContent = `Trades ${Number.isFinite(tradeCountRaw) ? tradeCountRaw : '--'}`;
+
+        if (strategyTotalVolume) {
+          const totalVolume = parseDecimal(summary.total_volume ?? metrics.total_volume);
+          strategyTotalVolume.textContent = Number.isFinite(totalVolume)
+            ? numberFormatter.format(totalVolume)
+            : '--';
+        }
+
+        if (strategyPnlRatio) {
+          const ratioRaw = parseDecimal(summary.pnl_over_volume ?? metrics.pnl_over_volume);
+          if (Number.isFinite(ratioRaw)) {
+            strategyPnlRatio.textContent = `${(ratioRaw * 100).toFixed(2)}%`;
+          } else {
+            strategyPnlRatio.textContent = '--';
+          }
+        }
 
         const openPosition = metrics.open_position;
         if (openPosition && openPosition.direction) {
