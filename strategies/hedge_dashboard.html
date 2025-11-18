@@ -42,6 +42,72 @@
         box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
       }
 
+      .spread-section {
+        margin-top: 2.5rem;
+      }
+
+      .spread-card {
+        background: #1b1d24;
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
+      }
+
+      .spread-meta {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-bottom: 1rem;
+        font-size: 0.85rem;
+        color: #7f8fa9;
+      }
+
+      .spread-table-wrapper {
+        overflow-x: auto;
+      }
+
+      table.spread-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.85rem;
+      }
+
+      table.spread-table thead {
+        background: #222635;
+      }
+
+      table.spread-table th,
+      table.spread-table td {
+        padding: 0.65rem 0.75rem;
+        text-align: right;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        white-space: nowrap;
+      }
+
+      table.spread-table th:first-child,
+      table.spread-table td:first-child {
+        text-align: left;
+      }
+
+      .spread-selector-label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.85rem;
+        color: #7f8fa9;
+      }
+
+      .spread-selector-label select {
+        background: #1f2533;
+        color: #f5f7fb;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        padding: 0.35rem 0.65rem;
+        font-size: 0.85rem;
+      }
+
       .card h2 {
         font-size: 0.9rem;
         text-transform: uppercase;
@@ -307,6 +373,47 @@
       <div class="agent-grid hidden" id="agent-grid"></div>
     </section>
 
+    <section class="spread-section">
+      <div class="section-header">
+        <div class="section-header-info">
+          <h2>Aster–Lighter Spread Monitor</h2>
+          <div class="badge-group">
+            <span class="badge badge-muted" id="spread-agent-count">0 monitors</span>
+          </div>
+        </div>
+        <div class="section-header-controls">
+          <label class="spread-selector-label hidden" id="spread-agent-label">
+            Monitor
+            <select id="spread-agent-select"></select>
+          </label>
+        </div>
+      </div>
+      <p class="empty" id="spread-empty">Waiting for spread data…</p>
+      <div class="spread-card hidden" id="spread-card">
+        <div class="spread-meta">
+          <span id="spread-instrument">Instrument —</span>
+          <span id="spread-updated">Updated —</span>
+        </div>
+        <div class="spread-table-wrapper">
+          <table class="spread-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Aster Bid</th>
+                <th>Aster Ask</th>
+                <th>Lighter Bid</th>
+                <th>Lighter Ask</th>
+                <th>AsterBid - LighterAsk</th>
+                <th>LighterBid - AsterAsk</th>
+                <th>Mid Δ</th>
+              </tr>
+            </thead>
+            <tbody id="spread-table-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <p class="updated" id="updated">Awaiting data…</p>
 
     <script>
@@ -318,8 +425,19 @@
     const pauseAllButton = document.getElementById('pause-all');
     const resumeAllButton = document.getElementById('resume-all');
     const runtimeElement = document.getElementById('runtime');
+    const spreadAgentCount = document.getElementById('spread-agent-count');
+    const spreadAgentLabel = document.getElementById('spread-agent-label');
+    const spreadAgentSelect = document.getElementById('spread-agent-select');
+    const spreadEmpty = document.getElementById('spread-empty');
+    const spreadCard = document.getElementById('spread-card');
+    const spreadTableBody = document.getElementById('spread-table-body');
+    const spreadInstrument = document.getElementById('spread-instrument');
+    const spreadUpdated = document.getElementById('spread-updated');
       let batchBusy = false;
       let lastDefaultPaused = false;
+      let selectedSpreadAgent = null;
+      let lastSpreadOptionsKey = '';
+      let lastMetricsSnapshot = null;
 
       const numberFormatter = new Intl.NumberFormat(undefined, {
         minimumFractionDigits: 2,
@@ -342,6 +460,14 @@
           .replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;')
           .replace(/'/g, '&#39;');
+      }
+
+      function formatDecimal(value, fractionDigits = 4) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return '--';
+        }
+        return numeric.toFixed(fractionDigits);
       }
 
       function formatDuration(seconds) {
@@ -662,6 +788,108 @@
           updateBatchButtons();
       }
 
+      function renderSpread(data) {
+        if (!spreadAgentCount || !spreadEmpty || !spreadCard) {
+          return;
+        }
+
+        const spreads = data?.spread_metrics ?? {};
+        const entries = Object.entries(spreads);
+        const monitorLabel = entries.length === 1 ? 'monitor' : 'monitors';
+        spreadAgentCount.textContent = `${entries.length} ${monitorLabel}`;
+
+        if (!entries.length) {
+          spreadCard.classList.add('hidden');
+          spreadEmpty.classList.remove('hidden');
+          spreadEmpty.textContent = 'Waiting for spread data…';
+          if (spreadAgentLabel) {
+            spreadAgentLabel.classList.add('hidden');
+          }
+          if (spreadTableBody) {
+            spreadTableBody.innerHTML = '';
+          }
+          return;
+        }
+
+        spreadEmpty.classList.add('hidden');
+        spreadCard.classList.remove('hidden');
+
+        if (!selectedSpreadAgent || !spreads[selectedSpreadAgent]) {
+          selectedSpreadAgent = entries[0][0];
+        }
+
+        if (spreadAgentSelect) {
+          const optionsKey = entries.map(([agent]) => agent).join('|');
+          if (optionsKey !== lastSpreadOptionsKey) {
+            spreadAgentSelect.innerHTML = '';
+            for (const [agent] of entries) {
+              const option = document.createElement('option');
+              option.value = agent;
+              option.textContent = agent;
+              spreadAgentSelect.appendChild(option);
+            }
+            lastSpreadOptionsKey = optionsKey;
+          }
+          spreadAgentSelect.value = selectedSpreadAgent;
+          if (spreadAgentLabel) {
+            spreadAgentLabel.classList.toggle('hidden', entries.length <= 1);
+          }
+        }
+
+        const metrics = spreads[selectedSpreadAgent] ?? {};
+        const historyRaw = Array.isArray(metrics.history) ? metrics.history : [];
+        const history = historyRaw.slice(-60).reverse();
+
+        if (spreadInstrument) {
+          const ticker = metrics?.aster?.ticker ?? '';
+          const symbol = metrics?.lighter?.symbol ?? '';
+          const instrumentText = metrics.instrument || `${ticker}${ticker && symbol ? ' / ' : ''}${symbol}`;
+          spreadInstrument.textContent = instrumentText ? `Instrument ${escapeHtml(instrumentText)}` : 'Instrument —';
+        }
+
+        if (spreadUpdated) {
+          const tsSource = Number(metrics.updated_at ?? (historyRaw.length ? historyRaw[historyRaw.length - 1]?.timestamp : Date.now() / 1000));
+          if (Number.isFinite(tsSource)) {
+            spreadUpdated.textContent = `Updated ${new Date(tsSource * 1000).toLocaleString()}`;
+          } else {
+            spreadUpdated.textContent = 'Updated —';
+          }
+        }
+
+        if (!spreadTableBody) {
+          return;
+        }
+
+        spreadTableBody.innerHTML = '';
+        if (!history.length) {
+          const emptyRow = document.createElement('tr');
+          emptyRow.innerHTML = '<td colspan="8">Awaiting history…</td>';
+          spreadTableBody.appendChild(emptyRow);
+          return;
+        }
+
+        for (const row of history) {
+          const tr = document.createElement('tr');
+          const timestamp = Number(row.timestamp);
+          const timeLabel = row.iso_time
+            ? new Date(row.iso_time).toLocaleTimeString()
+            : (Number.isFinite(timestamp) ? new Date(timestamp * 1000).toLocaleTimeString() : '--');
+
+          const cells = [
+            escapeHtml(timeLabel),
+            escapeHtml(formatDecimal(row.aster_bid, 4)),
+            escapeHtml(formatDecimal(row.aster_ask, 4)),
+            escapeHtml(formatDecimal(row.lighter_bid, 4)),
+            escapeHtml(formatDecimal(row.lighter_ask, 4)),
+            escapeHtml(formatDecimal(row.spread_aster_bid_minus_lighter_ask, 6)),
+            escapeHtml(formatDecimal(row.spread_lighter_bid_minus_aster_ask, 6)),
+            escapeHtml(formatDecimal(row.mid_price_diff, 6))
+          ];
+          tr.innerHTML = cells.map((value) => `<td>${value}</td>`).join('');
+          spreadTableBody.appendChild(tr);
+        }
+      }
+
       async function refreshMetrics() {
         try {
           const response = await fetch('/metrics', { cache: 'no-store' });
@@ -670,8 +898,10 @@
           }
 
           const data = await response.json();
+          lastMetricsSnapshot = data;
           renderAggregate(data);
           renderAgents(data);
+          renderSpread(data);
         } catch (error) {
           updatedElement.textContent = `Dashboard error: ${error}`;
           agentCount.textContent = '—';
@@ -679,6 +909,16 @@
           agentGrid.classList.add('hidden');
           agentEmpty.classList.remove('hidden');
           agentEmpty.textContent = 'Unable to load metrics at the moment.';
+          if (spreadAgentCount) {
+            spreadAgentCount.textContent = '0 monitors';
+          }
+          if (spreadCard) {
+            spreadCard.classList.add('hidden');
+          }
+          if (spreadEmpty) {
+            spreadEmpty.classList.remove('hidden');
+            spreadEmpty.textContent = 'Unable to load spread data at the moment.';
+          }
         }
       }
 
@@ -687,6 +927,14 @@
       }
       if (resumeAllButton) {
         resumeAllButton.addEventListener('click', () => sendBatchControl('resume', resumeAllButton));
+      }
+      if (spreadAgentSelect) {
+        spreadAgentSelect.addEventListener('change', (event) => {
+          selectedSpreadAgent = event.target.value;
+          if (lastMetricsSnapshot) {
+            renderSpread(lastMetricsSnapshot);
+          }
+        });
       }
 
       refreshMetrics();

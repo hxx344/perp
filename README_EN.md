@@ -274,6 +274,26 @@ python strategies/hedge_coordinator.py --host 0.0.0.0 --port 8899
 Then run the hedging bot with `--coordinator-url http://<host>:8899`. The dashboard (available at
 `/dashboard`) shows the latest Lighter position, cumulative cycle count, PnL, and traded volume.
 
+#### Live spread monitor
+
+For exchange-neutral monitoring you can launch the public spread tracker found in
+`strategies/aster_lighter_spread_monitor.py`. It connects to Aster and Lighter public
+WebSocket feeds, computes the cross-exchange bid/ask spreads, and can stream the
+results to the coordinator dashboard:
+
+```bash
+python strategies/aster_lighter_spread_monitor.py \
+   --aster-ticker ETH \
+   --lighter-symbol ETH-PERP \
+   --coordinator-url http://localhost:8899 \
+   --agent-id spread-monitor
+```
+
+When pointed at the coordinator the dashboard automatically adds an “Aster–Lighter
+Spread Monitor” panel with a live table and rolling history. Without the
+`--coordinator-url` flag the script still prints the same table to stdout using the
+configured refresh interval.
+
 ## GRVT–Lighter Hedging Cycle
 
 To mirror the same workflow with GRVT on the maker side, run `strategies/grvt_lighter_cycle.py`:

@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import base64
 import binascii
+import copy
 import logging
 import signal
 import time
@@ -41,6 +42,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DASHBOARD_PATH = BASE_DIR / "hedge_dashboard.html"
 
 LOGGER = logging.getLogger("hedge.coordinator")
+MAX_SPREAD_HISTORY = 360
 
 
 @dataclass
@@ -58,6 +60,7 @@ class HedgeState:
     depths: Dict[str, int] = field(default_factory=dict)
     last_update_ts: float = field(default_factory=time.time)
     runtime_seconds: float = 0.0
+    spread_metrics: Optional[Dict[str, Any]] = None
 
     def update_from_payload(self, payload: Dict[str, Any]) -> None:
         position_raw = payload.get("position")
@@ -72,6 +75,7 @@ class HedgeState:
         depths_raw = payload.get("depths")
         maker_depth_raw = payload.get("maker_depth")
         runtime_raw = payload.get("runtime_seconds") or payload.get("runtime")
+        spread_metrics_raw = payload.get("spread_metrics")
 
         if position_raw is not None:
             try:
@@ -141,6 +145,13 @@ class HedgeState:
             except (TypeError, ValueError):
                 LOGGER.warning("Invalid runtime payload: %s", runtime_raw)
 
+        if isinstance(spread_metrics_raw, dict):
+            normalized_spread = copy.deepcopy(spread_metrics_raw)
+            history = normalized_spread.get("history")
+            if isinstance(history, list) and len(history) > MAX_SPREAD_HISTORY:
+                normalized_spread["history"] = history[-MAX_SPREAD_HISTORY:]
+            self.spread_metrics = normalized_spread
+
         self.last_update_ts = time.time()
 
     def serialize(self) -> Dict[str, Any]:
@@ -158,6 +169,8 @@ class HedgeState:
         }
         if self.agent_id is not None:
             payload["agent_id"] = self.agent_id
+        if self.spread_metrics is not None:
+            payload["spread_metrics"] = copy.deepcopy(self.spread_metrics)
         return payload
 
     @classmethod
@@ -316,6 +329,14 @@ class HedgeCoordinator:
         snapshot["last_agent_id"] = self._last_agent_id
         controls_snapshot = self._controls_snapshot()
         snapshot.update(controls_snapshot)
+
+        spread_map = {
+            agent_id: copy.deepcopy(state.spread_metrics)
+            for agent_id, state in self._states.items()
+            if state.spread_metrics
+        }
+        if spread_map:
+            snapshot["spread_metrics"] = spread_map
         return snapshot
 
     async def update(self, payload: Dict[str, Any]) -> Dict[str, Any]:
