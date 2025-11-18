@@ -2030,6 +2030,7 @@ class HedgingCycleExecutor:
         self._lighter_quantity_max = config.lighter_quantity_max
         self._lighter_quantity_step = Decimal("0.001")
         self._current_cycle_lighter_quantity: Optional[Decimal] = None
+        self._current_cycle_quantity_source: str = "configured"
         self._preserve_initial_lighter_position = bool(
             getattr(config, "preserve_initial_position", False)
         )
@@ -3111,7 +3112,10 @@ class HedgingCycleExecutor:
             lighter_quantity_display = f"{self.config.lighter_quantity}"
 
         self.logger.log(
-            f"Configured leg quantities -> Aster: {self.config.aster_quantity}, Lighter: {lighter_quantity_display}",
+            (
+                "Configured leg quantities -> Aster entry will mirror Lighter per-cycle size "
+                f"({lighter_quantity_display}); baseline Aster config={self.config.aster_quantity}"
+            ),
             "INFO",
         )
         if self._preserve_initial_lighter_position and self._baseline_lighter_position is None:
@@ -3175,56 +3179,86 @@ class HedgingCycleExecutor:
 
         results: List[LegResult] = []
 
-        # Leg 1: Aster maker entry
-        # Reset per-cycle flags
-        self._cycle_had_timeout = False
-        self._last_leg1_price = None
-        self._current_cycle_lighter_quantity = None
-        if self._randomize_direction and self._direction_rng is not None:
-            entry_direction = self._direction_rng.choice(["buy", "sell"])
-            self._current_cycle_entry_direction = entry_direction
+        try:
+            # Leg 1: Aster maker entry
+            # Reset per-cycle flags
+            self._cycle_had_timeout = False
+            self._last_leg1_price = None
+            self._current_cycle_lighter_quantity = None
+            self._current_cycle_quantity_source = "configured"
+            if self._randomize_direction and self._direction_rng is not None:
+                entry_direction = self._direction_rng.choice(["buy", "sell"])
+                self._current_cycle_entry_direction = entry_direction
+                self.logger.log(
+                    f"Cycle entry direction selected: {entry_direction.upper()} (randomized mode)",
+                    "INFO",
+                )
+            else:
+                entry_direction = self.config.direction
+                self._current_cycle_entry_direction = entry_direction
+
+            cycle_quantity = self._prepare_cycle_quantity()
             self.logger.log(
-                f"Cycle entry direction selected: {entry_direction.upper()} (randomized mode)",
+                f"Cycle quantity initialised at {cycle_quantity} ({self._current_cycle_quantity_source})",
                 "INFO",
             )
+            leg1 = await self._execute_aster_maker(leg_name="LEG1", direction=entry_direction)
+            results.append(leg1)
+
+            # Leg 2: Lighter opposite taker
+            leg2_direction = "sell" if entry_direction == "buy" else "buy"
+            leg2 = await self._execute_lighter_taker(
+                leg_name="LEG2", direction=leg2_direction, reference_price=leg1.price
+            )
+            results.append(leg2)
+
+            # Leg 3: Aster reverse maker to flatten
+            reverse_direction = "sell" if entry_direction == "buy" else "buy"
+            leg3 = await self._execute_aster_reverse_maker(
+                leg_name="LEG3", direction=reverse_direction
+            )
+            results.append(leg3)
+
+            # Leg 4: Lighter reverse taker to flatten
+            leg4_direction = entry_direction
+            leg4 = await self._execute_lighter_taker(
+                leg_name="LEG4", direction=leg4_direction, reference_price=leg3.price
+            )
+            results.append(leg4)
+
+            self.logger.log("Hedging cycle completed successfully", "INFO")
+            return results
+        finally:
+            self._current_cycle_lighter_quantity = None
+            self._current_cycle_quantity_source = "configured"
+
+    def _prepare_cycle_quantity(self) -> Decimal:
+        if self._current_cycle_lighter_quantity is not None:
+            return self._current_cycle_lighter_quantity
+
+        quantity = self._select_lighter_order_quantity()
+        if (
+            self._lighter_quantity_min is not None
+            and self._lighter_quantity_max is not None
+        ):
+            self._current_cycle_quantity_source = "randomized"
         else:
-            entry_direction = self.config.direction
-            self._current_cycle_entry_direction = entry_direction
-        leg1 = await self._execute_aster_maker(leg_name="LEG1", direction=entry_direction)
-        results.append(leg1)
+            self._current_cycle_quantity_source = "configured"
 
-        # Leg 2: Lighter opposite taker
-        leg2_direction = "sell" if entry_direction == "buy" else "buy"
-        leg2 = await self._execute_lighter_taker(
-            leg_name="LEG2", direction=leg2_direction, reference_price=leg1.price
+        self._current_cycle_lighter_quantity = quantity
+        self.logger.log(
+            f"Cycle quantity prepared: {quantity} ({self._current_cycle_quantity_source})",
+            "DEBUG",
         )
-        results.append(leg2)
-
-        # Leg 3: Aster reverse maker to flatten
-        reverse_direction = "sell" if entry_direction == "buy" else "buy"
-        leg3 = await self._execute_aster_reverse_maker(
-            leg_name="LEG3", direction=reverse_direction
-        )
-        results.append(leg3)
-
-        # Leg 4: Lighter reverse taker to flatten
-        leg4_direction = entry_direction
-        leg4 = await self._execute_lighter_taker(
-            leg_name="LEG4", direction=leg4_direction, reference_price=leg3.price
-        )
-        results.append(leg4)
-
-        self._current_cycle_lighter_quantity = None
-
-        self.logger.log("Hedging cycle completed successfully", "INFO")
-        return results
+        return quantity
 
     async def _execute_aster_maker(self, leg_name: str, direction: str) -> LegResult:
+        cycle_quantity = self._prepare_cycle_quantity()
         if self.config.virtual_aster_maker:
             return await self._simulate_virtual_aster_leg(
                 leg_name=leg_name,
                 direction=direction,
-                quantity=self.config.aster_quantity,
+                quantity=cycle_quantity,
                 depth_level=self._aster_leg1_depth_level,
             )
 
@@ -3241,11 +3275,11 @@ class HedgingCycleExecutor:
             skip_retry_delay = False
 
             self.logger.log(
-                f"{leg_name} | Placing Aster maker open: qty={self.config.aster_quantity}, side={direction}",
+                f"{leg_name} | Placing Aster maker open: qty={cycle_quantity}, side={direction}",
                 "DEBUG",
             )
             order_result = await self.aster_client.place_open_order(
-                self.aster_config.contract_id, self.config.aster_quantity, direction
+                self.aster_config.contract_id, cycle_quantity, direction
             )
             if not order_result.order_id:
                 raise RuntimeError(f"{leg_name} | Aster order returned without an order id")
@@ -3287,11 +3321,12 @@ class HedgingCycleExecutor:
     async def _execute_aster_reverse_maker(
         self, leg_name: str, direction: str
     ) -> LegResult:
+        cycle_quantity = self._prepare_cycle_quantity()
         if self.config.virtual_aster_maker:
             return await self._simulate_virtual_aster_leg(
                 leg_name=leg_name,
                 direction=direction,
-                quantity=self.config.aster_quantity,
+                quantity=cycle_quantity,
                 depth_level=self._aster_leg3_depth_level,
             )
 
@@ -3301,10 +3336,10 @@ class HedgingCycleExecutor:
         reverse_quantity = await self.aster_client.get_account_positions()
         if reverse_quantity <= 0:
             self.logger.log(
-                f"{leg_name} | No open position detected on Aster; falling back to configured quantity {self.config.aster_quantity}",
+                f"{leg_name} | No open position detected on Aster; falling back to cycle quantity {cycle_quantity}",
                 "WARNING",
             )
-            reverse_quantity = self.config.aster_quantity
+            reverse_quantity = cycle_quantity
         else:
             self.logger.log(
                 f"{leg_name} | Using current Aster position {reverse_quantity} as close quantity",
@@ -3511,12 +3546,11 @@ class HedgingCycleExecutor:
         current_slippage = self.config.slippage_pct
         last_error: Optional[Exception] = None
         if self._current_cycle_lighter_quantity is None:
-            order_quantity = self._select_lighter_order_quantity()
-            self._current_cycle_lighter_quantity = order_quantity
-            quantity_source = "randomized"
+            order_quantity = self._prepare_cycle_quantity()
+            quantity_source = f"selected:{self._current_cycle_quantity_source}"
         else:
             order_quantity = self._current_cycle_lighter_quantity
-            quantity_source = "reused"
+            quantity_source = f"cycle:{self._current_cycle_quantity_source}"
 
         self.logger.log(
             f"{leg_name} | Using Lighter order quantity {order_quantity} ({quantity_source})",
