@@ -135,6 +135,30 @@ Python 版本要求（最佳选项是 Python 3.10 - 3.12）：
 
 需要在多台 VPS 上协同运行 Lighter 做市与 Binance 对冲时，请参考新的 [集群部署指南](docs/cluster_deployment.md)。该文档覆盖协调器服务、四节点 Agent 配置、示例命令以及运维建议。
 
+### Aster–Lighter 价差回归模拟器（测试模式）
+
+`strategies/spread_reversion_strategy.py` 提供了一个全新的价差回归策略实现，能够在**完全离线的测试模式**下模拟下单并计算盈亏。逻辑与我们讨论的“价差扩大时双边开仓、价差缩小时双边平仓”一致，适合在正式接入撮合前先评估阈值与仓位配置。
+
+- 策略要点：滚动统计 mid 价差，`|z| >= enter_z` 时建立对冲仓位，`|z| <= exit_z` 或发生反向穿越 / 时间超限时平仓。
+- 模拟输出：逐笔成交的方向、价差变化、持仓 tick 数以及单笔/累计 PnL。
+- 数据格式：CSV 含 `timestamp, aster_bid, aster_ask, lighter_bid, lighter_ask` 五列；若未提供文件，可使用内置的演示数据快速体验。
+
+运行示例（Windows PowerShell）：
+
+```powershell
+cd d:/project8/perp-dex-tools
+D:/project8/.venv/Scripts/python.exe strategies/spread_reversion_strategy.py --demo
+```
+
+若要载入实盘抓取的价差数据：
+
+```powershell
+cd d:/project8/perp-dex-tools
+D:/project8/.venv/Scripts/python.exe strategies/spread_reversion_strategy.py --data path/to/your_spread_history.csv --enter-z 2.5 --exit-z 0.6 --quantity 3
+```
+
+模拟结果会打印到终端，并可在 `tests/test_spread_reversion_strategy.py` 查阅更多使用示例及单元测试。
+
 ## 策略概述
 
 **重要提醒**：大家一定要先理解了这个脚本的逻辑和风险，这样你就能设置更适合你自己的参数，或者你也可能觉得这不是一个好策略，根本不想用这个策略来刷交易量。我在推特也说过，我不是为了分享而写这些脚本，而是我真的在用这个脚本，所以才写了，然后才顺便分享出来。
