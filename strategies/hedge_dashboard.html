@@ -283,6 +283,10 @@
         <h2>Total Account Value</h2>
         <div class="value" id="account-value">--</div>
       </article>
+      <article class="card">
+        <h2>Runtime</h2>
+        <div class="value" id="runtime">--</div>
+      </article>
     </section>
 
     <section class="agent-section">
@@ -306,13 +310,14 @@
     <p class="updated" id="updated">Awaiting data…</p>
 
     <script>
-      const agentGrid = document.getElementById('agent-grid');
-      const agentEmpty = document.getElementById('agent-empty');
-      const agentCount = document.getElementById('agent-count');
-  const updatedElement = document.getElementById('updated');
-  const defaultPauseIndicator = document.getElementById('default-pause-indicator');
-      const pauseAllButton = document.getElementById('pause-all');
-      const resumeAllButton = document.getElementById('resume-all');
+    const agentGrid = document.getElementById('agent-grid');
+    const agentEmpty = document.getElementById('agent-empty');
+    const agentCount = document.getElementById('agent-count');
+    const updatedElement = document.getElementById('updated');
+    const defaultPauseIndicator = document.getElementById('default-pause-indicator');
+    const pauseAllButton = document.getElementById('pause-all');
+    const resumeAllButton = document.getElementById('resume-all');
+    const runtimeElement = document.getElementById('runtime');
       let batchBusy = false;
       let lastDefaultPaused = false;
 
@@ -339,6 +344,43 @@
           .replace(/'/g, '&#39;');
       }
 
+      function formatDuration(seconds) {
+        if (!Number.isFinite(seconds) || seconds <= 0) {
+          return '0s';
+        }
+
+        let remaining = Math.round(seconds);
+        if (remaining <= 0) {
+          remaining = 1;
+        }
+
+        const units = [
+          { label: 'd', value: 86400 },
+          { label: 'h', value: 3600 },
+          { label: 'm', value: 60 },
+          { label: 's', value: 1 }
+        ];
+
+        const parts = [];
+        for (const unit of units) {
+          if (remaining < unit.value && parts.length === 0 && unit.label !== 's') {
+            continue;
+          }
+
+          const amount = Math.floor(remaining / unit.value);
+          if (amount > 0 || (unit.label === 's' && parts.length === 0)) {
+            parts.push(`${amount}${unit.label}`);
+          }
+          remaining %= unit.value;
+
+          if (parts.length >= 3) {
+            break;
+          }
+        }
+
+        return parts.join(' ');
+      }
+
       function renderAggregate(data) {
         const position = toNumber(data.position ?? data?.aggregate?.position);
         const pnl = toNumber(data.cumulative_pnl ?? data?.aggregate?.cumulative_pnl);
@@ -362,6 +404,10 @@
         document.getElementById('cycles').textContent = Number.isFinite(cyclesRaw) ? cyclesRaw : '--';
         document.getElementById('available-balance').textContent = numberFormatter.format(available);
         document.getElementById('account-value').textContent = numberFormatter.format(accountValue);
+        const runtimeSeconds = toNumber(data.runtime_seconds ?? data?.aggregate?.runtime_seconds);
+        if (runtimeElement) {
+          runtimeElement.textContent = formatDuration(runtimeSeconds);
+        }
 
         if (data.last_update_ts) {
           const updatedDate = new Date(Number(data.last_update_ts) * 1000);
@@ -503,6 +549,8 @@
             )
           );
           const instrumentText = metrics.instrument ? escapeHtml(metrics.instrument) : '—';
+          const runtimeSeconds = toNumber(metrics.runtime_seconds);
+          const runtimeDisplay = escapeHtml(formatDuration(runtimeSeconds));
           let depthDisplay = '—';
           if (metrics.depths && typeof metrics.depths === 'object') {
             const depthEntries = Object.entries(metrics.depths)
@@ -573,6 +621,7 @@
             <dl class="agent-metrics">
               <div><dt>Position</dt><dd>${position}</dd></div>
               <div><dt>Total Cycles</dt><dd>${cycles}</dd></div>
+              <div><dt>Runtime</dt><dd>${runtimeDisplay}</dd></div>
               <div><dt>Cumulative PnL</dt><dd>${pnl}</dd></div>
               <div><dt>Total Volume</dt><dd>${volume}</dd></div>
               <div><dt>Available</dt><dd>${available}</dd></div>

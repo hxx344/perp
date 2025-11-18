@@ -52,6 +52,7 @@ class HedgeMetricsReporter:
         total_account_value: Optional[Decimal] = None,
         instrument: Optional[str] = None,
         depths: Optional[Dict[str, Any]] = None,
+        runtime_seconds: Optional[float] = None,
     ) -> None:
         session = await self._ensure_session()
         url = f"{self._base_url}/update"
@@ -77,6 +78,12 @@ class HedgeMetricsReporter:
 
         if depths:
             payload["depths"] = depths
+
+        if runtime_seconds is not None:
+            try:
+                payload["runtime_seconds"] = float(runtime_seconds)
+            except (TypeError, ValueError):
+                pass
 
         try:
             async with session.post(url, json=payload, auth=self._basic_auth) as response:

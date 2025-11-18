@@ -57,6 +57,7 @@ class HedgeState:
     instrument: Optional[str] = None
     depths: Dict[str, int] = field(default_factory=dict)
     last_update_ts: float = field(default_factory=time.time)
+    runtime_seconds: float = 0.0
 
     def update_from_payload(self, payload: Dict[str, Any]) -> None:
         position_raw = payload.get("position")
@@ -70,6 +71,7 @@ class HedgeState:
         instrument_raw = payload.get("instrument") or payload.get("instrument_label")
         depths_raw = payload.get("depths")
         maker_depth_raw = payload.get("maker_depth")
+        runtime_raw = payload.get("runtime_seconds") or payload.get("runtime")
 
         if position_raw is not None:
             try:
@@ -131,6 +133,14 @@ class HedgeState:
         if updated_depths:
             self.depths = updated_depths
 
+        if runtime_raw is not None:
+            try:
+                runtime_value = float(runtime_raw)
+                if runtime_value >= 0:
+                    self.runtime_seconds = runtime_value
+            except (TypeError, ValueError):
+                LOGGER.warning("Invalid runtime payload: %s", runtime_raw)
+
         self.last_update_ts = time.time()
 
     def serialize(self) -> Dict[str, Any]:
@@ -144,6 +154,7 @@ class HedgeState:
             "instrument": self.instrument,
             "depths": self.depths,
             "last_update_ts": self.last_update_ts,
+            "runtime_seconds": self.runtime_seconds,
         }
         if self.agent_id is not None:
             payload["agent_id"] = self.agent_id
@@ -161,6 +172,8 @@ class HedgeState:
             aggregate.cumulative_volume += state.cumulative_volume
             aggregate.available_balance += state.available_balance
             aggregate.account_value += state.account_value
+            if state.runtime_seconds > aggregate.runtime_seconds:
+                aggregate.runtime_seconds = state.runtime_seconds
             if state.instrument:
                 instruments.add(state.instrument)
             if state.last_update_ts > aggregate.last_update_ts:
