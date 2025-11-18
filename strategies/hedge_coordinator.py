@@ -43,6 +43,8 @@ DASHBOARD_PATH = BASE_DIR / "hedge_dashboard.html"
 
 LOGGER = logging.getLogger("hedge.coordinator")
 MAX_SPREAD_HISTORY = 600
+MAX_STRATEGY_EVENTS = 400
+MAX_STRATEGY_TRADES = 200
 
 
 @dataclass
@@ -61,6 +63,7 @@ class HedgeState:
     last_update_ts: float = field(default_factory=time.time)
     runtime_seconds: float = 0.0
     spread_metrics: Optional[Dict[str, Any]] = None
+    strategy_metrics: Optional[Dict[str, Any]] = None
 
     def update_from_payload(self, payload: Dict[str, Any]) -> None:
         position_raw = payload.get("position")
@@ -76,6 +79,7 @@ class HedgeState:
         maker_depth_raw = payload.get("maker_depth")
         runtime_raw = payload.get("runtime_seconds") or payload.get("runtime")
         spread_metrics_raw = payload.get("spread_metrics")
+        strategy_metrics_raw = payload.get("strategy_metrics")
 
         if position_raw is not None:
             try:
@@ -152,6 +156,16 @@ class HedgeState:
                 normalized_spread["history"] = history[-MAX_SPREAD_HISTORY:]
             self.spread_metrics = normalized_spread
 
+        if isinstance(strategy_metrics_raw, dict):
+            normalized_strategy = copy.deepcopy(strategy_metrics_raw)
+            recent_events = normalized_strategy.get("recent_events")
+            if isinstance(recent_events, list) and len(recent_events) > MAX_STRATEGY_EVENTS:
+                normalized_strategy["recent_events"] = recent_events[-MAX_STRATEGY_EVENTS:]
+            recent_trades = normalized_strategy.get("recent_trades")
+            if isinstance(recent_trades, list) and len(recent_trades) > MAX_STRATEGY_TRADES:
+                normalized_strategy["recent_trades"] = recent_trades[-MAX_STRATEGY_TRADES:]
+            self.strategy_metrics = normalized_strategy
+
         self.last_update_ts = time.time()
 
     def serialize(self) -> Dict[str, Any]:
@@ -171,6 +185,8 @@ class HedgeState:
             payload["agent_id"] = self.agent_id
         if self.spread_metrics is not None:
             payload["spread_metrics"] = copy.deepcopy(self.spread_metrics)
+        if self.strategy_metrics is not None:
+            payload["strategy_metrics"] = copy.deepcopy(self.strategy_metrics)
         return payload
 
     @classmethod
@@ -337,6 +353,13 @@ class HedgeCoordinator:
         }
         if spread_map:
             snapshot["spread_metrics"] = spread_map
+        strategy_map = {
+            agent_id: copy.deepcopy(state.strategy_metrics)
+            for agent_id, state in self._states.items()
+            if state.strategy_metrics
+        }
+        if strategy_map:
+            snapshot["strategy_metrics"] = strategy_map
         return snapshot
 
     async def update(self, payload: Dict[str, Any]) -> Dict[str, Any]:

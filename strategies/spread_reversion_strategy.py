@@ -35,10 +35,13 @@ import csv
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
-from typing import List, Optional, Sequence, TYPE_CHECKING
+from typing import Any, Deque, Dict, List, Optional, Sequence, TYPE_CHECKING
+
+import aiohttp
 
 if TYPE_CHECKING:  # pragma: no cover - optional live dependencies
     from strategies.aster_lighter_spread_monitor import SpreadMonitor, SpreadSnapshot
@@ -46,6 +49,10 @@ if TYPE_CHECKING:  # pragma: no cover - optional live dependencies
 getcontext().prec = 28  # keep plenty of precision for Decimal operations
 
 Direction = str  # simple alias for readability
+
+EVENT_HISTORY_LIMIT = 200
+PAYLOAD_EVENT_LIMIT = 60
+PAYLOAD_TRADE_LIMIT = 30
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,21 @@ class SpreadDataPoint:
     @property
     def spread(self) -> Decimal:
         return self.aster_mid - self.lighter_mid
+
+
+@dataclass(frozen=True)
+class DecisionEvent:
+    """Discrete decision emitted by the simulator."""
+
+    timestamp: float
+    action: str
+    direction: Optional[Direction]
+    spread: Decimal
+    z_score: Optional[Decimal]
+    quantity: Optional[Decimal]
+    reason: Optional[str] = None
+    pnl: Optional[Decimal] = None
+    forced: bool = False
 
 
 @dataclass
@@ -207,9 +229,14 @@ class RollingStats:
 class SpreadReversionSimulator:
     """Drives the strategy over a sequence of data points."""
 
-    def __init__(self, config: StrategyConfig) -> None:
+    def __init__(self, config: StrategyConfig, *, event_history_limit: int = EVENT_HISTORY_LIMIT) -> None:
         config.validate()
         self.config = config
+        self._event_history_limit = max(1, int(event_history_limit))
+        self._event_log: Deque[DecisionEvent] = deque(maxlen=self._event_history_limit)
+        self._last_z_score: Optional[Decimal] = None
+        self._last_spread: Optional[Decimal] = None
+        self._last_timestamp: Optional[float] = None
         self.reset()
 
     def reset(self) -> None:
@@ -219,6 +246,10 @@ class SpreadReversionSimulator:
         self._gross_profit = Decimal("0")
         self._gross_loss = Decimal("0")
         self._tick_index = 0
+        self._event_log = deque(maxlen=self._event_history_limit)
+        self._last_z_score = None
+        self._last_spread = None
+        self._last_timestamp = None
 
     def process(self, points: Sequence[SpreadDataPoint]) -> SimulationResult:
         self.reset()
@@ -250,6 +281,52 @@ class SpreadReversionSimulator:
             gross_loss=self._gross_loss,
         )
 
+    def consume_events(self) -> List[DecisionEvent]:
+        events = list(self._event_log)
+        self._event_log.clear()
+        return events
+
+    def get_aggregate_metrics(self) -> Dict[str, Any]:
+        total_pnl = self._gross_profit + self._gross_loss
+        return {
+            "trade_count": len(self._trades),
+            "gross_profit": self._gross_profit,
+            "gross_loss": self._gross_loss,
+            "total_pnl": total_pnl,
+        }
+
+    def get_open_position_snapshot(self) -> Optional[Dict[str, Any]]:
+        position = self._position
+        if position is None:
+            return None
+        ticks_held = max(self._tick_index - position.entry_index, 0)
+        return {
+            "direction": position.direction,
+            "quantity": position.quantity,
+            "aster_entry_price": position.aster_entry_price,
+            "lighter_entry_price": position.lighter_entry_price,
+            "entry_spread": position.entry_spread,
+            "entry_timestamp": position.entry_timestamp,
+            "ticks_held": ticks_held,
+            "entry_index": position.entry_index,
+            "max_z": position.max_z,
+            "min_z": position.min_z,
+        }
+
+    def get_latest_signal(self) -> Dict[str, Optional[Decimal]]:
+        return {
+            "spread": self._last_spread,
+            "z_score": self._last_z_score,
+        }
+
+    def get_recent_trades(self, limit: int = 20) -> List[TradeRecord]:
+        if limit <= 0:
+            return []
+        return self._trades[-limit:]
+
+    def get_last_timestamp(self) -> Optional[float]:
+        return self._last_timestamp
+
     @property
     def has_open_position(self) -> bool:
         return self._position is not None
@@ -259,7 +336,7 @@ class SpreadReversionSimulator:
             return None
         index = max(self._tick_index - 1, self._position.entry_index)
         trades_before = len(self._trades)
-        self._close_position(point, index, force=True)
+        self._close_position(point, index, force=True, reason="force_close")
         if len(self._trades) > trades_before:
             return self._trades[-1]
         return None
@@ -267,13 +344,17 @@ class SpreadReversionSimulator:
     def _process_point(self, index: int, point: SpreadDataPoint) -> None:
         spread = point.spread
         self._stats.push(spread)
+        self._last_timestamp = point.timestamp
+        self._last_spread = spread
 
         mean = self._stats.mean
         std = self._stats.std
+        self._last_z_score = None
         if mean is None or std is None or std == 0:
             return
 
         z_score = (spread - mean) / std
+        self._last_z_score = z_score
 
         if self._position is None:
             self._maybe_open_position(index, point, spread, z_score)
@@ -314,6 +395,15 @@ class SpreadReversionSimulator:
             max_z=z_score,
             min_z=z_score,
         )
+        self._record_event(
+            action="enter",
+            point=point,
+            spread=spread,
+            z_score=z_score,
+            direction=direction,
+            quantity=self.config.quantity,
+            reason="enter_z_trigger",
+        )
 
     def _maybe_close_position(
         self,
@@ -339,13 +429,15 @@ class SpreadReversionSimulator:
             exit_reason = "time_stop"
 
         if exit_reason:
-            self._close_position(point, index, force=False)
+            self._close_position(point, index, force=False, reason=exit_reason)
 
     def _close_position(
         self,
         point: SpreadDataPoint,
         index: int,
+        *,
         force: bool,
+        reason: Optional[str] = None,
     ) -> None:
         position = self._position
         if position is None:
@@ -374,6 +466,44 @@ class SpreadReversionSimulator:
             self._gross_loss += pnl
 
         self._position = None
+        self._record_event(
+            action="exit",
+            point=point,
+            spread=spread_exit,
+            z_score=self._last_z_score,
+            direction=position.direction,
+            quantity=position.quantity,
+            reason=reason or ("force_close" if force else None),
+            pnl=pnl,
+            forced=force,
+        )
+
+    def _record_event(
+        self,
+        *,
+        action: str,
+        point: SpreadDataPoint,
+        spread: Decimal,
+        z_score: Optional[Decimal],
+        direction: Optional[Direction],
+        quantity: Optional[Decimal],
+        reason: Optional[str] = None,
+        pnl: Optional[Decimal] = None,
+        forced: bool = False,
+    ) -> None:
+        self._event_log.append(
+            DecisionEvent(
+                timestamp=point.timestamp,
+                action=action,
+                direction=direction,
+                spread=spread,
+                z_score=z_score,
+                quantity=quantity,
+                reason=reason,
+                pnl=pnl,
+                forced=forced,
+            )
+        )
 
     def _compute_pnl(self, position: SpreadPosition, exit_point: SpreadDataPoint) -> Decimal:
         if position.direction == "short_aster_long_lighter":
@@ -531,6 +661,9 @@ class LiveSpreadRunner:
         poll_interval: float,
         run_seconds: Optional[float] = None,
         debug_websockets: bool = False,
+        coordinator_url: Optional[str] = None,
+        coordinator_agent_id: Optional[str] = None,
+        coordinator_push_interval: Optional[float] = None,
     ) -> None:
         self.config = config
         self.aster_ticker = aster_ticker
@@ -545,9 +678,27 @@ class LiveSpreadRunner:
         )
         self._simulator = SpreadReversionSimulator(config)
         self._last_point: Optional[SpreadDataPoint] = None
+        self._coordinator_url = (coordinator_url or "").strip() or None
+        if self._coordinator_url is not None:
+            self._coordinator_url = self._coordinator_url.rstrip("/")
+        default_agent = f"{self.aster_ticker}-{self.lighter_symbol}-spread"
+        self._coordinator_agent_id = (coordinator_agent_id or default_agent).strip() or default_agent
+        self._coordinator_session: Optional[aiohttp.ClientSession] = None
+        self._coordinator_push_interval = (
+            max(self.poll_interval, 2.0)
+            if coordinator_push_interval is None
+            else max(0.5, float(coordinator_push_interval))
+        )
+        self._recent_events: Deque[Dict[str, Any]] = deque(maxlen=EVENT_HISTORY_LIMIT)
+        self._recent_trades: Deque[Dict[str, Any]] = deque(maxlen=PAYLOAD_TRADE_LIMIT * 3)
+        self._last_push_ts = 0.0
+        self._logger = logging.getLogger(__name__)
 
     async def run(self) -> SimulationResult:
         await self._monitor.initialize()
+        if self._coordinator_url is not None:
+            timeout = aiohttp.ClientTimeout(total=10)
+            self._coordinator_session = aiohttp.ClientSession(timeout=timeout)
         start_time = time.time()
         try:
             while True:
@@ -559,8 +710,17 @@ class LiveSpreadRunner:
                     if point is not None:
                         self._last_point = point
                         new_trades = self._simulator.step(point)
+                        events = self._simulator.consume_events()
+                        for event in events:
+                            self._recent_events.append(self._event_to_dict(event))
                         for trade in new_trades:
+                            trade_dict = self._trade_to_dict(trade)
+                            self._recent_trades.append(trade_dict)
                             self._log_trade(trade)
+                        await self._maybe_push_metrics(
+                            new_events=bool(events),
+                            new_trades=bool(new_trades),
+                        )
                 await asyncio.sleep(self.poll_interval)
         except KeyboardInterrupt:
             print("\nLive mode interrupted by user")
@@ -570,7 +730,26 @@ class LiveSpreadRunner:
         if self._last_point is not None and self._simulator.has_open_position:
             forced_trade = self._simulator.force_close(self._last_point)
             if forced_trade is not None:
+                trade_dict = self._trade_to_dict(forced_trade)
+                self._recent_trades.append(trade_dict)
                 self._log_trade(forced_trade, forced=True)
+            forced_events = self._simulator.consume_events()
+            for event in forced_events:
+                self._recent_events.append(self._event_to_dict(event))
+            await self._maybe_push_metrics(
+                new_events=bool(forced_events),
+                new_trades=forced_trade is not None,
+                force=True,
+            )
+        else:
+            await self._maybe_push_metrics(new_events=False, new_trades=False, force=True)
+
+        if self._coordinator_session is not None:
+            try:
+                await self._coordinator_session.close()
+            except Exception:
+                pass
+            self._coordinator_session = None
 
         result = self._simulator.build_result()
         self._print_summary(result)
@@ -589,6 +768,152 @@ class LiveSpreadRunner:
         print(f"Gross profit   : {result.gross_profit:.6f}")
         print(f"Gross loss     : {result.gross_loss:.6f}")
         print(f"Net PnL        : {result.total_pnl:.6f}")
+
+    async def _maybe_push_metrics(self, *, new_events: bool, new_trades: bool, force: bool = False) -> None:
+        if self._coordinator_url is None or self._coordinator_session is None:
+            return
+
+        now = time.time()
+        if not force and not new_events and not new_trades and (now - self._last_push_ts) < self._coordinator_push_interval:
+            return
+
+        payload = self._build_metrics_payload()
+        if payload is None:
+            return
+
+        endpoint = f"{self._coordinator_url}/update"
+        try:
+            async with self._coordinator_session.post(endpoint, json=payload) as response:
+                if response.status >= 400:
+                    text = await response.text()
+                    self._logger.warning("Coordinator update failed (%s): %s", response.status, text)
+                    return
+        except Exception as exc:
+            self._logger.warning("Coordinator update error: %s", exc)
+            return
+
+        self._last_push_ts = now
+
+    def _build_metrics_payload(self) -> Optional[Dict[str, Any]]:
+        summary = self._simulator.get_aggregate_metrics()
+        open_position = self._simulator.get_open_position_snapshot()
+        latest_signal = self._simulator.get_latest_signal()
+
+        events = list(self._recent_events)[-PAYLOAD_EVENT_LIMIT:]
+        trades = list(self._recent_trades)[-PAYLOAD_TRADE_LIMIT:]
+
+        payload: Dict[str, Any] = {
+            "agent_id": self._coordinator_agent_id,
+            "instrument": f"{self.aster_ticker}/{self.lighter_symbol}",
+            "strategy_metrics": {
+                "updated_at": time.time(),
+                "config": self._config_to_payload(),
+                "summary": self._summary_to_payload(summary),
+                "open_position": self._position_to_payload(open_position),
+                "latest_signal": self._signal_to_payload(latest_signal),
+                "recent_events": events,
+                "recent_trades": trades,
+            },
+        }
+
+        if self._last_point is not None:
+            payload["strategy_metrics"]["latest_point"] = self._point_to_payload(self._last_point)
+
+        return payload
+
+    def _config_to_payload(self) -> Dict[str, Any]:
+        return {
+            "rolling_window": self.config.rolling_window,
+            "enter_z": self._decimal_to_str(self.config.enter_z),
+            "exit_z": self._decimal_to_str(self.config.exit_z),
+            "stop_z": self._decimal_to_str(self.config.stop_z),
+            "min_abs_spread": self._decimal_to_str(self.config.min_abs_spread),
+            "quantity": self._decimal_to_str(self.config.quantity),
+            "max_holding_ticks": self.config.max_holding_ticks,
+            "aster_fee_rate": self._decimal_to_str(self.config.aster_fee_rate),
+            "lighter_fee_rate": self._decimal_to_str(self.config.lighter_fee_rate),
+            "poll_interval": self.poll_interval,
+        }
+
+    def _summary_to_payload(self, summary: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "trade_count": int(summary.get("trade_count", 0)),
+            "gross_profit": self._decimal_to_str(summary.get("gross_profit")),
+            "gross_loss": self._decimal_to_str(summary.get("gross_loss")),
+            "total_pnl": self._decimal_to_str(summary.get("total_pnl")),
+        }
+
+    def _position_to_payload(self, snapshot: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if snapshot is None:
+            return None
+        return {
+            "direction": snapshot.get("direction"),
+            "quantity": self._decimal_to_str(snapshot.get("quantity")),
+            "aster_entry_price": self._decimal_to_str(snapshot.get("aster_entry_price")),
+            "lighter_entry_price": self._decimal_to_str(snapshot.get("lighter_entry_price")),
+            "entry_spread": self._decimal_to_str(snapshot.get("entry_spread")),
+            "entry_timestamp": snapshot.get("entry_timestamp"),
+            "ticks_held": snapshot.get("ticks_held"),
+            "entry_index": snapshot.get("entry_index"),
+            "max_z": self._decimal_to_str(snapshot.get("max_z")),
+            "min_z": self._decimal_to_str(snapshot.get("min_z")),
+        }
+
+    def _signal_to_payload(self, latest_signal: Dict[str, Optional[Decimal]]) -> Dict[str, Any]:
+        timestamp = self._last_point.timestamp if self._last_point is not None else self._simulator.get_last_timestamp()
+        return {
+            "spread": self._decimal_to_str(latest_signal.get("spread")),
+            "z_score": self._decimal_to_str(latest_signal.get("z_score")),
+            "timestamp": timestamp,
+        }
+
+    def _point_to_payload(self, point: SpreadDataPoint) -> Dict[str, Any]:
+        return {
+            "timestamp": point.timestamp,
+            "aster_bid": self._decimal_to_str(point.aster_bid),
+            "aster_ask": self._decimal_to_str(point.aster_ask),
+            "lighter_bid": self._decimal_to_str(point.lighter_bid),
+            "lighter_ask": self._decimal_to_str(point.lighter_ask),
+            "aster_mid": self._decimal_to_str(point.aster_mid),
+            "lighter_mid": self._decimal_to_str(point.lighter_mid),
+            "spread": self._decimal_to_str(point.spread),
+        }
+
+    @staticmethod
+    def _decimal_to_str(value: Optional[Decimal]) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            return format(value, "f")
+        except Exception:
+            return str(value)
+
+    def _trade_to_dict(self, trade: TradeRecord) -> Dict[str, Any]:
+        return {
+            "direction": trade.direction,
+            "quantity": self._decimal_to_str(trade.quantity),
+            "entry_timestamp": trade.entry_timestamp,
+            "exit_timestamp": trade.exit_timestamp,
+            "entry_spread": self._decimal_to_str(trade.entry_spread),
+            "exit_spread": self._decimal_to_str(trade.exit_spread),
+            "pnl": self._decimal_to_str(trade.pnl),
+            "holding_ticks": trade.holding_ticks,
+            "max_z": self._decimal_to_str(trade.max_z),
+            "min_z": self._decimal_to_str(trade.min_z),
+        }
+
+    def _event_to_dict(self, event: DecisionEvent) -> Dict[str, Any]:
+        return {
+            "timestamp": event.timestamp,
+            "action": event.action,
+            "direction": event.direction,
+            "spread": self._decimal_to_str(event.spread),
+            "z_score": self._decimal_to_str(event.z_score),
+            "quantity": self._decimal_to_str(event.quantity),
+            "reason": event.reason,
+            "pnl": self._decimal_to_str(event.pnl),
+            "forced": event.forced,
+        }
 
 
 def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
@@ -614,6 +939,21 @@ def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
         action="store_true",
         help="Log websocket frames for troubleshooting",
     )
+    parser.add_argument(
+        "--coordinator-url",
+        type=str,
+        help="Optional coordinator endpoint to stream live metrics (e.g. http://localhost:8899)",
+    )
+    parser.add_argument(
+        "--coordinator-agent",
+        type=str,
+        help="Identifier used when reporting to the coordinator dashboard",
+    )
+    parser.add_argument(
+        "--coordinator-push-interval",
+        type=float,
+        help="Minimum seconds between coordinator updates (defaults to poll interval)",
+    )
 
     parsed = parser.parse_args(args=args)
 
@@ -638,6 +978,9 @@ def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
             poll_interval=parsed.poll_interval,
             run_seconds=parsed.run_seconds,
             debug_websockets=parsed.debug_websockets,
+            coordinator_url=parsed.coordinator_url,
+            coordinator_agent_id=parsed.coordinator_agent,
+            coordinator_push_interval=parsed.coordinator_push_interval,
         )
         return asyncio.run(runner.run())
 

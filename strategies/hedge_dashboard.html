@@ -46,6 +46,68 @@
         margin-top: 2.5rem;
       }
 
+      .strategy-section {
+        margin-top: 2.5rem;
+      }
+
+      .strategy-card {
+        background: #1b1d24;
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
+        margin-top: 1rem;
+      }
+
+      .strategy-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 1.25rem;
+      }
+
+      .summary-sub {
+        margin-top: 0.5rem;
+        font-size: 0.85rem;
+        color: #8a94a6;
+      }
+
+      .strategy-table-wrapper {
+        margin-top: 1.5rem;
+        overflow-x: auto;
+      }
+
+      .strategy-selector-label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.85rem;
+        color: #7f8fa9;
+      }
+
+      .strategy-selector-label select {
+        background: #1f2533;
+        color: #f5f7fb;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        padding: 0.35rem 0.65rem;
+        font-size: 0.85rem;
+      }
+
+      table.strategy-table td.action-enter {
+        color: #7ee787;
+      }
+
+      table.strategy-table td.action-exit {
+        color: #ffa94d;
+      }
+
+      table.strategy-table td.action-forced {
+        color: #ff8787;
+      }
+
+      table.strategy-table td.action-other {
+        color: #c7d2e8;
+      }
+
       .spread-card {
         background: #1b1d24;
         border-radius: 12px;
@@ -384,6 +446,60 @@
       <div class="agent-grid hidden" id="agent-grid"></div>
     </section>
 
+    <section class="strategy-section">
+      <div class="section-header">
+        <div class="section-header-info">
+          <h2>Spread Strategy Profit Monitor</h2>
+          <div class="badge-group">
+            <span class="badge badge-muted" id="strategy-agent-count">0 strategies</span>
+          </div>
+        </div>
+        <div class="section-header-controls">
+          <label class="strategy-selector-label hidden" id="strategy-agent-label">
+            Strategy
+            <select id="strategy-agent-select"></select>
+          </label>
+        </div>
+      </div>
+      <p class="empty" id="strategy-empty">Waiting for strategy metrics…</p>
+      <div class="strategy-card hidden" id="strategy-card">
+        <div class="strategy-summary-grid">
+          <article class="card">
+            <h2>Net PnL</h2>
+            <div class="value" id="strategy-net-pnl">--</div>
+            <p class="summary-sub" id="strategy-trade-count">Trades —</p>
+          </article>
+          <article class="card">
+            <h2>Open Position</h2>
+            <div class="value" id="strategy-open-position">None</div>
+            <p class="summary-sub" id="strategy-open-details">—</p>
+          </article>
+          <article class="card">
+            <h2>Last Decision</h2>
+            <div class="value" id="strategy-last-decision">—</div>
+            <p class="summary-sub" id="strategy-last-decision-time">—</p>
+          </article>
+        </div>
+        <div class="strategy-table-wrapper">
+          <table class="spread-table strategy-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Action</th>
+                <th>Direction</th>
+                <th>Spread</th>
+                <th>Z-Score</th>
+                <th>Quantity</th>
+                <th>PnL</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="strategy-events-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section class="spread-section">
       <div class="section-header">
         <div class="section-header-info">
@@ -449,11 +565,26 @@
     const spreadUpdated = document.getElementById('spread-updated');
   const spreadChartWrapper = document.getElementById('spread-chart-wrapper');
   const spreadChartCanvas = document.getElementById('spread-chart');
+    const strategyAgentCount = document.getElementById('strategy-agent-count');
+    const strategyAgentLabel = document.getElementById('strategy-agent-label');
+    const strategyAgentSelect = document.getElementById('strategy-agent-select');
+    const strategyEmpty = document.getElementById('strategy-empty');
+    const strategyCard = document.getElementById('strategy-card');
+    const strategyNetPnl = document.getElementById('strategy-net-pnl');
+    const strategyTradeCount = document.getElementById('strategy-trade-count');
+    const strategyOpenPosition = document.getElementById('strategy-open-position');
+    const strategyOpenDetails = document.getElementById('strategy-open-details');
+    const strategyLastDecision = document.getElementById('strategy-last-decision');
+    const strategyLastDecisionTime = document.getElementById('strategy-last-decision-time');
+    const strategyEventsBody = document.getElementById('strategy-events-body');
   const MAX_SPREAD_HISTORY_POINTS = 1800;
+    const MAX_STRATEGY_EVENTS = 120;
       let batchBusy = false;
       let lastDefaultPaused = false;
       let selectedSpreadAgent = null;
       let lastSpreadOptionsKey = '';
+      let selectedStrategyAgent = null;
+      let lastStrategyOptionsKey = '';
       let lastMetricsSnapshot = null;
 
       const numberFormatter = new Intl.NumberFormat(undefined, {
@@ -743,6 +874,16 @@
       }
 
       function formatDecimal(value, fractionDigits = 4) {
+        if (value === null || value === undefined) {
+          return '--';
+        }
+        if (typeof value === 'string') {
+          const trimmed = value.trim();
+          if (!trimmed || trimmed === '--' || trimmed.toLowerCase() === 'none') {
+            return '--';
+          }
+          value = trimmed.replace(/,/g, '');
+        }
         const numeric = Number(value);
         if (!Number.isFinite(numeric)) {
           return '--';
@@ -1068,6 +1209,193 @@
           updateBatchButtons();
       }
 
+      function describeStrategyAction(action) {
+        if (!action) {
+          return '—';
+        }
+        let text = String(action).trim();
+        if (text.includes('.')) {
+          text = text.split('.').pop() || text;
+        }
+        text = text.replace(/_/g, ' ');
+        return text.charAt(0).toUpperCase() + text.slice(1);
+      }
+
+      function describeStrategyDirection(direction) {
+        if (!direction) {
+          return '—';
+        }
+        let text = String(direction).trim();
+        if (text.includes('.')) {
+          text = text.split('.').pop() || text;
+        }
+        return text.replace(/_/g, ' ').toUpperCase();
+      }
+
+      function renderStrategy(data) {
+        if (!strategyAgentCount || !strategyCard) {
+          return;
+        }
+
+        const strategyMap = data?.strategy_metrics ?? {};
+        const entries = Object.entries(strategyMap);
+        const label = entries.length === 1 ? 'strategy' : 'strategies';
+        strategyAgentCount.textContent = `${entries.length} ${label}`;
+
+        if (!entries.length) {
+          strategyCard.classList.add('hidden');
+          strategyEmpty.classList.remove('hidden');
+          strategyEmpty.textContent = 'Waiting for strategy metrics…';
+          if (strategyAgentLabel) {
+            strategyAgentLabel.classList.add('hidden');
+          }
+          if (strategyAgentSelect) {
+            strategyAgentSelect.innerHTML = '';
+          }
+          selectedStrategyAgent = null;
+          lastStrategyOptionsKey = '';
+          return;
+        }
+
+        strategyEmpty.classList.add('hidden');
+        strategyCard.classList.remove('hidden');
+
+        if (!selectedStrategyAgent || !strategyMap[selectedStrategyAgent]) {
+          selectedStrategyAgent = entries[0][0];
+        }
+
+        if (strategyAgentSelect) {
+          const optionsKey = entries.map(([agent]) => agent).join('|');
+          if (optionsKey !== lastStrategyOptionsKey) {
+            strategyAgentSelect.innerHTML = '';
+            for (const [agent] of entries) {
+              const option = document.createElement('option');
+              option.value = agent;
+              option.textContent = agent;
+              strategyAgentSelect.appendChild(option);
+            }
+            lastStrategyOptionsKey = optionsKey;
+          }
+          strategyAgentSelect.value = selectedStrategyAgent;
+          if (strategyAgentLabel) {
+            strategyAgentLabel.classList.toggle('hidden', entries.length <= 1);
+          }
+        }
+
+        const metrics = strategyMap[selectedStrategyAgent] ?? {};
+        const summary = metrics.summary ?? {};
+        const totalPnl = parseDecimal(summary.total_pnl ?? metrics.total_pnl);
+        strategyNetPnl.textContent = Number.isFinite(totalPnl)
+          ? numberFormatter.format(totalPnl)
+          : '--';
+
+        const tradeCountRaw = Number(summary.trade_count ?? metrics.trade_count ?? 0);
+        strategyTradeCount.textContent = `Trades ${Number.isFinite(tradeCountRaw) ? tradeCountRaw : '--'}`;
+
+        const openPosition = metrics.open_position;
+        if (openPosition && openPosition.direction) {
+          const qtyValue = parseDecimal(openPosition.quantity);
+          const positionParts = [describeStrategyDirection(openPosition.direction)];
+          if (Number.isFinite(qtyValue)) {
+            positionParts.push(qtyValue.toFixed(4));
+          }
+          strategyOpenPosition.textContent = positionParts.join(' ');
+
+          const detailsParts = [];
+          const entryTs = Number(openPosition.entry_timestamp);
+          if (Number.isFinite(entryTs) && entryTs > 0) {
+            detailsParts.push(new Date(entryTs * 1000).toLocaleString());
+          }
+          const entrySpread = parseDecimal(openPosition.entry_spread);
+          if (Number.isFinite(entrySpread)) {
+            detailsParts.push(`Spread ${entrySpread.toFixed(6)}`);
+          }
+          const ticksHeld = Number(openPosition.ticks_held);
+          if (Number.isFinite(ticksHeld) && ticksHeld > 0) {
+            detailsParts.push(`${ticksHeld} ticks elapsed`);
+          }
+          strategyOpenDetails.textContent = detailsParts.length ? detailsParts.join(' · ') : '—';
+        } else {
+          strategyOpenPosition.textContent = 'None';
+          strategyOpenDetails.textContent = '—';
+        }
+
+        const eventsRaw = Array.isArray(metrics.recent_events) ? metrics.recent_events.slice(-MAX_STRATEGY_EVENTS) : [];
+        const lastEvent = eventsRaw.length ? eventsRaw[eventsRaw.length - 1] : null;
+        if (lastEvent) {
+          const actionText = describeStrategyAction(lastEvent.action);
+          const directionText = describeStrategyDirection(lastEvent.direction);
+          const forced = Boolean(lastEvent.forced);
+          const decisionParts = [actionText];
+          if (directionText !== '—') {
+            decisionParts.push(directionText);
+          }
+          if (forced) {
+            decisionParts.push('(forced)');
+          }
+          strategyLastDecision.textContent = decisionParts.join(' ');
+
+          const ts = Number(lastEvent.timestamp);
+          if (Number.isFinite(ts) && ts > 0) {
+            strategyLastDecisionTime.textContent = new Date(ts * 1000).toLocaleString();
+          } else {
+            strategyLastDecisionTime.textContent = '—';
+          }
+        } else {
+          strategyLastDecision.textContent = '—';
+          strategyLastDecisionTime.textContent = '—';
+        }
+
+        if (!strategyEventsBody) {
+          return;
+        }
+
+        strategyEventsBody.innerHTML = '';
+        if (!eventsRaw.length) {
+          const emptyRow = document.createElement('tr');
+          emptyRow.innerHTML = '<td colspan="8">Awaiting decision events…</td>';
+          strategyEventsBody.appendChild(emptyRow);
+          return;
+        }
+
+        for (let index = eventsRaw.length - 1; index >= 0; index -= 1) {
+          const event = eventsRaw[index];
+          const ts = Number(event.timestamp);
+          const timeText = Number.isFinite(ts) && ts > 0
+            ? new Date(ts * 1000).toLocaleTimeString()
+            : '—';
+          const actionText = describeStrategyAction(event.action);
+          const directionText = describeStrategyDirection(event.direction);
+          const spreadText = formatDecimal(event.spread, 6);
+          const zScoreText = formatDecimal(event.z_score, 4);
+          const quantityText = formatDecimal(event.quantity, 4);
+          const pnlText = formatDecimal(event.pnl, 6);
+          const reasonText = event.reason ? escapeHtml(event.reason) : (event.forced ? 'Forced exit' : '—');
+
+          let actionClass = 'action-other';
+          if (event.forced) {
+            actionClass = 'action-forced';
+          } else if (String(event.action).toLowerCase() === 'enter') {
+            actionClass = 'action-enter';
+          } else if (String(event.action).toLowerCase() === 'exit') {
+            actionClass = 'action-exit';
+          }
+
+          const row = document.createElement('tr');
+          row.innerHTML = `
+            <td>${escapeHtml(timeText)}</td>
+            <td class="${actionClass}">${escapeHtml(actionText)}</td>
+            <td>${escapeHtml(directionText)}</td>
+            <td>${escapeHtml(spreadText)}</td>
+            <td>${escapeHtml(zScoreText)}</td>
+            <td>${escapeHtml(quantityText)}</td>
+            <td>${escapeHtml(pnlText)}</td>
+            <td>${reasonText}</td>
+          `;
+          strategyEventsBody.appendChild(row);
+        }
+      }
+
       function renderSpread(data) {
         if (!spreadAgentCount || !spreadEmpty || !spreadCard) {
           return;
@@ -1223,6 +1551,7 @@
           renderAggregate(data);
           renderAgents(data);
           renderSpread(data);
+          renderStrategy(data);
         } catch (error) {
           updatedElement.textContent = `Dashboard error: ${error}`;
           agentCount.textContent = '—';
@@ -1240,6 +1569,16 @@
             spreadEmpty.classList.remove('hidden');
             spreadEmpty.textContent = 'Unable to load spread data at the moment.';
           }
+          if (strategyAgentCount) {
+            strategyAgentCount.textContent = '0 strategies';
+          }
+          if (strategyCard) {
+            strategyCard.classList.add('hidden');
+          }
+          if (strategyEmpty) {
+            strategyEmpty.classList.remove('hidden');
+            strategyEmpty.textContent = 'Unable to load strategy data at the moment.';
+          }
         }
       }
 
@@ -1254,6 +1593,14 @@
           selectedSpreadAgent = event.target.value;
           if (lastMetricsSnapshot) {
             renderSpread(lastMetricsSnapshot);
+          }
+        });
+      }
+      if (strategyAgentSelect) {
+        strategyAgentSelect.addEventListener('change', (event) => {
+          selectedStrategyAgent = event.target.value;
+          if (lastMetricsSnapshot) {
+            renderStrategy(lastMetricsSnapshot);
           }
         });
       }
