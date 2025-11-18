@@ -8,7 +8,7 @@ import json
 import time
 import hmac
 import hashlib
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Dict, Any, List, Optional, Tuple, Callable
 from urllib.parse import urlencode
 import aiohttp
@@ -1214,11 +1214,21 @@ class AsterClient(BaseExchangeClient):
                             self.config.tick_size = Decimal(filter_info['tickSize'].strip('0'))
                             break
 
-                    # Get minimum quantity
+                    # Get minimum quantity and step size
                     min_quantity = Decimal(0)
+                    quantity_step = Decimal(0)
                     for filter_info in symbol_info.get('filters', []):
                         if filter_info.get('filterType') == 'LOT_SIZE':
-                            min_quantity = Decimal(filter_info.get('minQty', 0))
+                            try:
+                                min_quantity = Decimal(str(filter_info.get('minQty', 0)))
+                            except (InvalidOperation, TypeError, ValueError):
+                                min_quantity = Decimal(0)
+
+                            try:
+                                step_candidate = Decimal(str(filter_info.get('stepSize', 0)))
+                                quantity_step = step_candidate.normalize() if step_candidate > 0 else Decimal(0)
+                            except (InvalidOperation, TypeError, ValueError):
+                                quantity_step = Decimal(0)
                             break
 
                     if self.config.quantity < min_quantity:
@@ -1234,6 +1244,10 @@ class AsterClient(BaseExchangeClient):
                     if self.config.tick_size == 0:
                         self.logger.log("Failed to get tick size for ticker", "ERROR")
                         raise ValueError("Failed to get tick size for ticker")
+
+                    if quantity_step > 0:
+                        setattr(self.config, "quantity_step", quantity_step)
+                    setattr(self.config, "min_quantity", min_quantity)
 
                     await self._ensure_market_data_stream(self.config.contract_id)
                     return self.config.contract_id, self.config.tick_size

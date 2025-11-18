@@ -2029,6 +2029,8 @@ class HedgingCycleExecutor:
         self._lighter_quantity_min = config.lighter_quantity_min
         self._lighter_quantity_max = config.lighter_quantity_max
         self._lighter_quantity_step = Decimal("0.001")
+        self._aster_quantity_step = Decimal("0")
+        self._aster_min_quantity: Optional[Decimal] = None
         self._current_cycle_lighter_quantity: Optional[Decimal] = None
         self._current_cycle_quantity_source: str = "configured"
         self._preserve_initial_lighter_position = bool(
@@ -3027,6 +3029,42 @@ class HedgingCycleExecutor:
         self.aster_config.contract_id = aster_contract_id
         self.aster_config.tick_size = aster_tick
 
+        aster_quantity_step_candidate = getattr(self.aster_config, "quantity_step", None)
+        if aster_quantity_step_candidate is not None:
+            try:
+                candidate_decimal = (
+                    aster_quantity_step_candidate
+                    if isinstance(aster_quantity_step_candidate, Decimal)
+                    else Decimal(str(aster_quantity_step_candidate))
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                candidate_decimal = None
+            if isinstance(candidate_decimal, Decimal) and candidate_decimal > 0:
+                self._aster_quantity_step = candidate_decimal.normalize()
+
+        aster_min_quantity_candidate = getattr(self.aster_config, "min_quantity", None)
+        if aster_min_quantity_candidate is not None:
+            try:
+                min_decimal = (
+                    aster_min_quantity_candidate
+                    if isinstance(aster_min_quantity_candidate, Decimal)
+                    else Decimal(str(aster_min_quantity_candidate))
+                )
+            except (InvalidOperation, TypeError, ValueError):
+                min_decimal = None
+            if min_decimal is not None and min_decimal > 0:
+                self._aster_min_quantity = min_decimal
+
+        if self._aster_quantity_step > 0:
+            quantized_aster_qty = self._quantize_quantity(self.config.aster_quantity, self._aster_quantity_step)
+            if quantized_aster_qty is not None and quantized_aster_qty > 0:
+                self.config.aster_quantity = quantized_aster_qty
+
+        if self._aster_min_quantity is not None and self._aster_min_quantity > 0 and self._aster_quantity_step > 0:
+            quantized_min = self._quantize_quantity(self._aster_min_quantity, self._aster_quantity_step)
+            if quantized_min is not None and quantized_min > 0:
+                self._aster_min_quantity = quantized_min
+
         self.logger.log(
             (
                 f"Contracts resolved | Aster: id={aster_contract_id}, tick={_format_decimal(aster_tick, 8)}; "
@@ -3245,12 +3283,68 @@ class HedgingCycleExecutor:
         else:
             self._current_cycle_quantity_source = "configured"
 
+        min_candidates: List[Decimal] = []
+        if self._lighter_quantity_min is not None and self._lighter_quantity_min > 0:
+            min_candidates.append(self._lighter_quantity_min)
+        if self._aster_min_quantity is not None and self._aster_min_quantity > 0:
+            min_candidates.append(self._aster_min_quantity)
+
+        if min_candidates:
+            min_required = max(min_candidates)
+            if quantity < min_required:
+                self.logger.log(
+                    (
+                        f"Cycle quantity {quantity} below combined minimum {min_required}; "
+                        "lifting to satisfy exchange constraints"
+                    ),
+                    "DEBUG",
+                )
+                quantity = min_required
+
+        quantity = self._apply_cycle_quantity_steps(quantity)
+
+        if min_candidates:
+            min_required = max(min_candidates)
+            if quantity < min_required:
+                quantity = self._apply_cycle_quantity_steps(min_required)
+
+        if (
+            self._lighter_quantity_max is not None
+            and self._lighter_quantity_max > 0
+            and quantity > self._lighter_quantity_max
+        ):
+            self.logger.log(
+                (
+                    f"Cycle quantity {quantity} exceeds Lighter maximum {self._lighter_quantity_max}; "
+                    "clamping to upper bound"
+                ),
+                "DEBUG",
+            )
+            quantity = self._lighter_quantity_max
+            quantity = self._apply_cycle_quantity_steps(quantity)
+            if min_candidates:
+                min_required = max(min_candidates)
+                if quantity < min_required:
+                    quantity = self._apply_cycle_quantity_steps(min_required)
+
         self._current_cycle_lighter_quantity = quantity
         self.logger.log(
-            f"Cycle quantity prepared: {quantity} ({self._current_cycle_quantity_source})",
+            (
+                f"Cycle quantity prepared: {quantity} ({self._current_cycle_quantity_source}); "
+                f"steps -> lighter {self._lighter_quantity_step}, aster {self._aster_quantity_step or 'unset'}"
+            ),
             "DEBUG",
         )
         return quantity
+
+    def _apply_cycle_quantity_steps(self, quantity: Decimal) -> Decimal:
+        result = quantity
+        for step in (self._lighter_quantity_step, self._aster_quantity_step):
+            if isinstance(step, Decimal) and step > 0:
+                quantized = self._quantize_quantity(result, step)
+                if quantized is not None and quantized > 0:
+                    result = quantized
+        return result
 
     async def _execute_aster_maker(self, leg_name: str, direction: str) -> LegResult:
         cycle_quantity = self._prepare_cycle_quantity()
