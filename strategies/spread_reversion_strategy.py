@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import csv
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
@@ -488,11 +489,18 @@ def _snapshot_to_point(snapshot: "SpreadSnapshot") -> Optional[SpreadDataPoint]:
     )
 
 
+def _configure_websocket_logging(debug_websockets: bool) -> None:
+    level = logging.DEBUG if debug_websockets else logging.WARNING
+    for name in ("websockets", "websockets.client", "websockets.server"):
+        logging.getLogger(name).setLevel(level)
+
+
 def _create_spread_monitor(
     *,
     aster_ticker: str,
     lighter_symbol: str,
     poll_interval: float,
+    debug_websockets: bool,
 ) -> "SpreadMonitor":
     try:
         from strategies.aster_lighter_spread_monitor import SpreadMonitor
@@ -500,6 +508,8 @@ def _create_spread_monitor(
         raise ModuleNotFoundError(
             "Live mode requires the 'lighter' SDK. Install project extras or disable --live."
         ) from exc
+
+    _configure_websocket_logging(debug_websockets)
 
     return SpreadMonitor(
         aster_ticker=aster_ticker,
@@ -520,6 +530,7 @@ class LiveSpreadRunner:
         lighter_symbol: str,
         poll_interval: float,
         run_seconds: Optional[float] = None,
+        debug_websockets: bool = False,
     ) -> None:
         self.config = config
         self.aster_ticker = aster_ticker
@@ -530,6 +541,7 @@ class LiveSpreadRunner:
             aster_ticker=aster_ticker,
             lighter_symbol=lighter_symbol,
             poll_interval=self.poll_interval,
+            debug_websockets=debug_websockets,
         )
         self._simulator = SpreadReversionSimulator(config)
         self._last_point: Optional[SpreadDataPoint] = None
@@ -597,6 +609,11 @@ def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
     parser.add_argument("--run-seconds", type=float, help="Optional duration for live mode before auto-stop")
     parser.add_argument("--aster-fee", type=float, default=0.0004, help="Aster fee rate (e.g. 0.0004 for 4 bps)")
     parser.add_argument("--lighter-fee", type=float, default=0.0, help="Lighter fee rate")
+    parser.add_argument(
+        "--debug-websockets",
+        action="store_true",
+        help="Log websocket frames for troubleshooting",
+    )
 
     parsed = parser.parse_args(args=args)
 
@@ -620,6 +637,7 @@ def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
             lighter_symbol=parsed.lighter_symbol,
             poll_interval=parsed.poll_interval,
             run_seconds=parsed.run_seconds,
+            debug_websockets=parsed.debug_websockets,
         )
         return asyncio.run(runner.run())
 
