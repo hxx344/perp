@@ -2142,7 +2142,7 @@ class HedgingCycleExecutor:
         self._leaderboard_address_warning_emitted = False
         self._cached_leaderboard_points: Optional[Tuple[Optional[Decimal], Optional[Decimal]]] = None
         self._leaderboard_points_cycle: int = 0
-    self._run_started_at: float = time.time()
+        self._run_started_at: float = time.time()
 
     def _normalize_depth_value(self, raw_value: Optional[int], label: str, fallback: int) -> int:
         candidate = fallback if raw_value is None else raw_value
