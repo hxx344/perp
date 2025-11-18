@@ -110,6 +110,7 @@ class StrategyMetricsFormatter:
             "aster_fee_rate": cls.decimal_to_str(config.aster_fee_rate),
             "lighter_fee_rate": cls.decimal_to_str(config.lighter_fee_rate),
             "poll_interval": poll_interval,
+            "lighter_only": config.lighter_only,
         }
 
     @classmethod
@@ -195,6 +196,7 @@ class StrategyMetricsFormatter:
             metrics["latest_point"] = cls.point_to_payload(latest_point)
         if mode:
             metrics["mode"] = mode
+        metrics["structure"] = "lighter_only" if config.lighter_only else "multi_venue"
 
         return {
             "agent_id": agent_id,
@@ -254,6 +256,7 @@ class StrategyConfig:
     max_holding_ticks: int = 900
     aster_fee_rate: Decimal = Decimal("0.0004")
     lighter_fee_rate: Decimal = Decimal("0")
+    lighter_only: bool = False
 
     def validate(self) -> None:
         if self.rolling_window < 10:
@@ -527,10 +530,13 @@ class SpreadReversionSimulator:
             return
 
         direction: Direction
-        if spread >= 0:
-            direction = "short_aster_long_lighter"
+        if self.config.lighter_only:
+            direction = "lighter_long" if spread >= 0 else "lighter_short"
         else:
-            direction = "long_aster_short_lighter"
+            if spread >= 0:
+                direction = "short_aster_long_lighter"
+            else:
+                direction = "long_aster_short_lighter"
 
         self._position = SpreadPosition(
             direction=direction,
@@ -660,6 +666,12 @@ class SpreadReversionSimulator:
         elif position.direction == "long_aster_short_lighter":
             pnl_lighter = (position.lighter_entry_price - exit_point.lighter_mid) * position.quantity
             pnl_aster = (exit_point.aster_mid - position.aster_entry_price) * position.quantity
+        elif position.direction == "lighter_long":
+            pnl_lighter = (exit_point.lighter_mid - position.lighter_entry_price) * position.quantity
+            pnl_aster = Decimal("0")
+        elif position.direction == "lighter_short":
+            pnl_lighter = (position.lighter_entry_price - exit_point.lighter_mid) * position.quantity
+            pnl_aster = Decimal("0")
         else:
             raise ValueError(f"Unknown position direction: {position.direction}")
         gross_pnl = pnl_lighter + pnl_aster
@@ -669,12 +681,20 @@ class SpreadReversionSimulator:
     def _compute_fees(self, position: SpreadPosition, exit_point: SpreadDataPoint) -> Decimal:
         volume = position.quantity
         fees = Decimal("0")
-        if self.config.aster_fee_rate > 0:
-            fees += position.aster_entry_price * volume * self.config.aster_fee_rate
-            fees += exit_point.aster_mid * volume * self.config.aster_fee_rate
-        if self.config.lighter_fee_rate > 0:
-            fees += position.lighter_entry_price * volume * self.config.lighter_fee_rate
-            fees += exit_point.lighter_mid * volume * self.config.lighter_fee_rate
+        direction = position.direction
+        if direction in ("short_aster_long_lighter", "long_aster_short_lighter"):
+            if self.config.aster_fee_rate > 0:
+                fees += position.aster_entry_price * volume * self.config.aster_fee_rate
+                fees += exit_point.aster_mid * volume * self.config.aster_fee_rate
+            if self.config.lighter_fee_rate > 0:
+                fees += position.lighter_entry_price * volume * self.config.lighter_fee_rate
+                fees += exit_point.lighter_mid * volume * self.config.lighter_fee_rate
+        elif direction in ("lighter_long", "lighter_short"):
+            if self.config.lighter_fee_rate > 0:
+                fees += position.lighter_entry_price * volume * self.config.lighter_fee_rate
+                fees += exit_point.lighter_mid * volume * self.config.lighter_fee_rate
+        else:
+            raise ValueError(f"Unknown position direction for fees: {direction}")
         return fees
 
 
@@ -1012,6 +1032,11 @@ def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
     parser.add_argument("--aster-fee", type=float, default=0.0004, help="Aster fee rate (e.g. 0.0004 for 4 bps)")
     parser.add_argument("--lighter-fee", type=float, default=0.0, help="Lighter fee rate")
     parser.add_argument(
+        "--lighter-only",
+        action="store_true",
+        help="Simulate single-venue execution on Lighter (no Aster leg)",
+    )
+    parser.add_argument(
         "--debug-websockets",
         action="store_true",
         help="Log websocket frames for troubleshooting",
@@ -1045,6 +1070,7 @@ def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
         max_holding_ticks=parsed.max_holding,
         aster_fee_rate=Decimal(str(parsed.aster_fee)),
         lighter_fee_rate=Decimal(str(parsed.lighter_fee)),
+        lighter_only=parsed.lighter_only,
     )
 
     if parsed.live:

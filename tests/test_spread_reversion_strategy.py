@@ -90,3 +90,41 @@ def test_cli_returns_simulation_result(args, capsys):
     captured = capsys.readouterr()
     assert "Spread Reversion Test Result" in captured.out
     assert result.trade_count >= 1
+
+
+def test_lighter_only_strategy_generates_single_leg_trade():
+    config = StrategyConfig(
+        rolling_window=10,
+        enter_z=Decimal("0.5"),
+        exit_z=Decimal("0.1"),
+        stop_z=Decimal("4"),
+        quantity=Decimal("1"),
+        max_holding_ticks=10,
+        min_abs_spread=Decimal("0.1"),
+        aster_fee_rate=Decimal("0"),
+        lighter_fee_rate=Decimal("0"),
+        lighter_only=True,
+    )
+
+    points: list[SpreadDataPoint] = []
+    base_aster = Decimal("100")
+    base_lighter = Decimal("100")
+    for idx in range(10):
+        aster_mid = base_aster + Decimal(idx) * Decimal("0.1")
+        lighter_mid = base_lighter + Decimal(idx) * Decimal("0.1") - Decimal("0.1")
+        points.append(_point(idx, aster_mid, lighter_mid))
+
+    points.extend(
+        [
+            _point(10, Decimal("103"), Decimal("100")),  # large positive spread triggers entry
+            _point(11, Decimal("101.2"), Decimal("101.1")),
+            _point(12, Decimal("101"), Decimal("101")),
+        ]
+    )
+
+    simulator = SpreadReversionSimulator(config)
+    result = simulator.process(points)
+
+    assert result.trade_count == 1
+    assert result.total_pnl > 0
+    assert result.trades[0].direction == "lighter_long"
