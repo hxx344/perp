@@ -1,10 +1,9 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Hedge Metrics Dashboard</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" integrity="sha384-Yr2gCs9ZgKPxVt3eU60lYI0P6NQhQxltTTE1sH46Ne+IQbseUBh4s95enZRmxE9h" crossorigin="anonymous"></script>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hedge Metrics Dashboard</title>
     <style>
       :root {
         color-scheme: dark;
@@ -449,7 +448,6 @@
     const spreadUpdated = document.getElementById('spread-updated');
   const spreadChartWrapper = document.getElementById('spread-chart-wrapper');
   const spreadChartCanvas = document.getElementById('spread-chart');
-  let spreadChartInstance = null;
       let batchBusy = false;
       let lastDefaultPaused = false;
       let selectedSpreadAgent = null;
@@ -497,6 +495,183 @@
           return '—';
         }
         return `${value.toFixed(digits)}%`;
+      }
+
+      function getSeriesBounds(...seriesList) {
+        let min = Infinity;
+        let max = -Infinity;
+        let hasValue = false;
+
+        for (const series of seriesList) {
+          for (const value of series) {
+            if (!Number.isFinite(value)) {
+              continue;
+            }
+            hasValue = true;
+            if (value < min) {
+              min = value;
+            }
+            if (value > max) {
+              max = value;
+            }
+          }
+        }
+
+        if (!hasValue) {
+          return { hasValue: false, min: 0, max: 0 };
+        }
+
+        if (min === max) {
+          const epsilon = Math.abs(min) > 0 ? Math.abs(min) * 0.05 : 0.05;
+          min -= epsilon;
+          max += epsilon;
+        }
+
+        const padding = (max - min) * 0.08;
+        return {
+          hasValue: true,
+          min: min - padding,
+          max: max + padding,
+        };
+      }
+
+      function prepareCanvas(canvas) {
+        if (!canvas) {
+          return null;
+        }
+
+        const rect = canvas.getBoundingClientRect();
+        const width = rect.width || canvas.parentElement?.clientWidth || 600;
+        const height = rect.height || 260;
+        const dpr = window.devicePixelRatio || 1;
+
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          return null;
+        }
+
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+
+        return { ctx, width, height };
+      }
+
+      function drawSeries(ctx, values, mapX, mapY, color) {
+        ctx.beginPath();
+        let started = false;
+        for (let index = 0; index < values.length; index += 1) {
+          const value = values[index];
+          if (!Number.isFinite(value)) {
+            started = false;
+            continue;
+          }
+
+          const x = mapX(index);
+          const y = mapY(value);
+          if (!started) {
+            ctx.moveTo(x, y);
+            started = true;
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      function renderSpreadCanvas(labels, seriesA, seriesB) {
+        if (!spreadChartCanvas) {
+          return;
+        }
+
+        const bounds = getSeriesBounds(seriesA, seriesB);
+        if (!bounds.hasValue) {
+          spreadChartWrapper?.classList.add('hidden');
+          return;
+        }
+
+        const setup = prepareCanvas(spreadChartCanvas);
+        if (!setup) {
+          spreadChartWrapper?.classList.add('hidden');
+          return;
+        }
+
+        const { ctx, width, height } = setup;
+        const { min, max } = bounds;
+        const range = max - min || 1;
+
+        const mapX = (index) => {
+          if (labels.length <= 1) {
+            return width / 2;
+          }
+          return (index / (labels.length - 1)) * width;
+        };
+
+        const mapY = (value) => {
+          const ratio = (value - min) / range;
+          return height - ratio * height;
+        };
+
+        ctx.fillStyle = '#1b1d24';
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        ctx.lineWidth = 1;
+        const gridLines = 4;
+        for (let i = 0; i <= gridLines; i += 1) {
+          const y = (height / gridLines) * i;
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(width, y);
+          ctx.stroke();
+        }
+
+        ctx.fillStyle = '#8a94a6';
+        ctx.font = '12px "Segoe UI", system-ui';
+        ctx.textBaseline = 'middle';
+
+        const tickCount = 4;
+        for (let i = 0; i <= tickCount; i += 1) {
+          const value = min + (range * i) / tickCount;
+          const y = mapY(value);
+          ctx.fillText(formatPercent(value, 2), 6, Math.min(Math.max(y, 12), height - 12));
+        }
+
+        if (min < 0 && max > 0) {
+          const zeroY = mapY(0);
+          ctx.strokeStyle = 'rgba(199, 210, 232, 0.35)';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.moveTo(0, zeroY);
+          ctx.lineTo(width, zeroY);
+          ctx.stroke();
+        }
+
+        drawSeries(ctx, seriesA, mapX, mapY, 'rgba(99, 156, 255, 1)');
+        drawSeries(ctx, seriesB, mapX, mapY, 'rgba(255, 160, 86, 1)');
+
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = '#c7d2e8';
+        ctx.fillText('Aster bid – Lighter ask', 6, 6);
+        ctx.fillText('Lighter bid – Aster ask', 6, 24);
+
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = '#8a94a6';
+        const labelCount = Math.min(4, labels.length - 1);
+        for (let i = 0; i <= labelCount; i += 1) {
+          const position = Math.max(labelCount, 1);
+          const index = Math.round((i / position) * (labels.length - 1));
+          const x = mapX(index);
+          const text = labels[index] ?? '';
+          ctx.fillText(text, Math.min(Math.max(x - 24, 4), width - 48), height - 4);
+        }
       }
 
       function escapeHtml(value) {
@@ -914,11 +1089,6 @@
           if (spreadChartWrapper) {
             spreadChartWrapper.classList.add('hidden');
           }
-          if (spreadChartInstance) {
-            spreadChartInstance.data.labels = [];
-            spreadChartInstance.data.datasets.forEach((dataset) => { dataset.data = []; });
-            spreadChartInstance.update();
-          }
           return;
         }
 
@@ -937,12 +1107,19 @@
           const asterAsk = parseDecimal(row.aster_ask);
           const lighterBid = parseDecimal(row.lighter_bid);
           const lighterAsk = parseDecimal(row.lighter_ask);
-          const spreadSellAster = parseDecimal(row.spread_aster_bid_minus_lighter_ask);
-          const spreadSellLighter = parseDecimal(row.spread_lighter_bid_minus_aster_ask);
+          const spreadSellAsterRaw = Number.isFinite(asterBid) && Number.isFinite(lighterAsk)
+            ? asterBid - lighterAsk
+            : parseDecimal(row.spread_aster_bid_minus_lighter_ask);
+          const spreadSellLighterRaw = Number.isFinite(lighterBid) && Number.isFinite(asterAsk)
+            ? lighterBid - asterAsk
+            : parseDecimal(row.spread_lighter_bid_minus_aster_ask);
+
+          const basisAsterDenom = Number.isFinite(lighterAsk) ? Math.abs(lighterAsk) : Number.isFinite(asterBid) ? Math.abs(asterBid) : null;
+          const basisLighterDenom = Number.isFinite(asterAsk) ? Math.abs(asterAsk) : Number.isFinite(lighterBid) ? Math.abs(lighterBid) : null;
 
           chartLabels.push(timeLabel);
-          chartSellAster.push(computePercent(spreadSellAster ?? NaN, lighterAsk ?? NaN));
-          chartSellLighter.push(computePercent(spreadSellLighter ?? NaN, asterAsk ?? NaN));
+          chartSellAster.push(computePercent(spreadSellAsterRaw ?? NaN, basisAsterDenom ?? NaN));
+          chartSellLighter.push(computePercent(spreadSellLighterRaw ?? NaN, basisLighterDenom ?? NaN));
 
           const cells = [
             escapeHtml(timeLabel),
@@ -961,92 +1138,13 @@
         const hasChartPoints = chartSellAster.some((value) => Number.isFinite(value)) ||
           chartSellLighter.some((value) => Number.isFinite(value));
 
-        if (spreadChartWrapper && spreadChartCanvas && window.Chart && hasChartPoints) {
-          spreadChartWrapper.classList.remove('hidden');
-
-          const datasets = [
-            {
-              label: 'Aster bid – Lighter ask (%)',
-              data: chartSellAster,
-              borderColor: 'rgba(99, 156, 255, 1)',
-              backgroundColor: 'rgba(99, 156, 255, 0.15)',
-              spanGaps: true,
-              tension: 0.25,
-              pointRadius: 0,
-            },
-            {
-              label: 'Lighter bid – Aster ask (%)',
-              data: chartSellLighter,
-              borderColor: 'rgba(255, 160, 86, 1)',
-              backgroundColor: 'rgba(255, 160, 86, 0.15)',
-              spanGaps: true,
-              tension: 0.25,
-              pointRadius: 0,
-            },
-          ];
-
-          const chartData = {
-            labels: chartLabels,
-            datasets,
-          };
-
-          const chartOptions = {
-            responsive: true,
-            maintainAspectRatio: false,
-            interaction: { mode: 'index', intersect: false },
-            plugins: {
-              legend: {
-                labels: {
-                  color: '#c7d2e8',
-                },
-              },
-              tooltip: {
-                callbacks: {
-                  label(context) {
-                    const value = context.parsed.y;
-                    return `${context.dataset.label}: ${formatPercent(value)}`;
-                  },
-                },
-              },
-            },
-            scales: {
-              x: {
-                ticks: {
-                  color: '#8a94a6',
-                },
-                grid: {
-                  color: 'rgba(255, 255, 255, 0.05)',
-                },
-              },
-              y: {
-                ticks: {
-                  color: '#8a94a6',
-                  callback(value) {
-                    return formatPercent(value, 2);
-                  },
-                },
-                grid: {
-                  color: 'rgba(255, 255, 255, 0.05)',
-                },
-              },
-            },
-          };
-
-          if (!spreadChartInstance) {
-            spreadChartInstance = new Chart(spreadChartCanvas, {
-              type: 'line',
-              data: chartData,
-              options: chartOptions,
-            });
+        if (spreadChartWrapper) {
+          if (hasChartPoints) {
+            spreadChartWrapper.classList.remove('hidden');
+            renderSpreadCanvas(chartLabels, chartSellAster, chartSellLighter);
           } else {
-            spreadChartInstance.data.labels = chartLabels;
-            spreadChartInstance.data.datasets.forEach((dataset, index) => {
-              dataset.data = datasets[index]?.data ?? [];
-            });
-            spreadChartInstance.update();
+            spreadChartWrapper.classList.add('hidden');
           }
-        } else if (spreadChartWrapper) {
-          spreadChartWrapper.classList.add('hidden');
         }
       }
 
