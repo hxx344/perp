@@ -194,6 +194,37 @@
         font-weight: 600;
       }
 
+      #runtime.runtime-multiple {
+        font-size: 1.15rem;
+        font-weight: 500;
+        line-height: 1.4;
+      }
+
+      #runtime .runtime-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 0.75rem;
+      }
+
+      #runtime .runtime-row + .runtime-row {
+        margin-top: 0.35rem;
+      }
+
+      #runtime .runtime-row-label {
+        font-weight: 600;
+        color: #c7d2e8;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        font-size: 0.9rem;
+      }
+
+      #runtime .runtime-row-value {
+        font-variant-numeric: tabular-nums;
+        color: #f2f4f8;
+        font-size: 1rem;
+      }
+
       .updated {
         margin-top: 2rem;
         color: #7f8fa9;
@@ -965,7 +996,33 @@
         document.getElementById('account-value').textContent = numberFormatter.format(accountValue);
         const runtimeSeconds = toNumber(data.runtime_seconds ?? data?.aggregate?.runtime_seconds);
         if (runtimeElement) {
-          runtimeElement.textContent = formatDuration(runtimeSeconds);
+          const agentEntries = Object.entries(data?.agents ?? {});
+          if (!agentEntries.length) {
+            runtimeElement.classList.remove('runtime-multiple');
+            runtimeElement.textContent = formatDuration(runtimeSeconds);
+          } else {
+            runtimeElement.classList.add('runtime-multiple');
+            runtimeElement.innerHTML = '';
+            agentEntries
+              .slice()
+              .sort((a, b) => a[0].localeCompare(b[0], undefined, { sensitivity: 'base' }))
+              .forEach(([agentId, agentMetrics]) => {
+                const row = document.createElement('div');
+                row.className = 'runtime-row';
+
+                const label = document.createElement('span');
+                label.className = 'runtime-row-label';
+                label.textContent = agentId;
+
+                const value = document.createElement('span');
+                value.className = 'runtime-row-value';
+                const agentSeconds = toNumber(agentMetrics?.runtime_seconds ?? agentMetrics?.runtime ?? 0);
+                value.textContent = formatDuration(agentSeconds);
+
+                row.append(label, value);
+                runtimeElement.appendChild(row);
+              });
+          }
         }
 
         if (data.last_update_ts) {
