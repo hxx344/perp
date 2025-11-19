@@ -85,6 +85,27 @@ def test_simulator_executes_spread_trades():
     assert "long_aster_short_lighter" in directions
 
 
+def test_min_expected_profit_threshold_blocks_entries():
+    config = StrategyConfig(
+        rolling_window=40,
+        enter_z=Decimal("2.2"),
+        exit_z=Decimal("0.6"),
+        stop_z=Decimal("4.0"),
+        quantity=Decimal("2"),
+        max_holding_ticks=60,
+        min_abs_spread=Decimal("0.5"),
+        aster_fee_rate=Decimal("0"),
+        lighter_fee_rate=Decimal("0"),
+        min_expected_profit=Decimal("10"),
+    )
+
+    simulator = SpreadReversionSimulator(config)
+    result = simulator.process(_build_dataset())
+
+    assert result.trade_count == 0
+    assert result.total_pnl == Decimal("0")
+
+
 @pytest.mark.parametrize("args", [["--demo"], ["--demo", "--enter-z", "1.5", "--exit-z", "0.4"]])
 def test_cli_returns_simulation_result(args, capsys):
     result = run_cli(args)

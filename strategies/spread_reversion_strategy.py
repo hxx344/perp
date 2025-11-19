@@ -112,6 +112,7 @@ class StrategyMetricsFormatter:
             "lighter_fee_rate": cls.decimal_to_str(config.lighter_fee_rate),
             "poll_interval": poll_interval,
             "lighter_only": config.lighter_only,
+            "min_expected_profit": cls.decimal_to_str(config.min_expected_profit),
         }
 
     @classmethod
@@ -260,6 +261,7 @@ class StrategyConfig:
     aster_fee_rate: Decimal = Decimal("0.0004")
     lighter_fee_rate: Decimal = Decimal("0")
     lighter_only: bool = False
+    min_expected_profit: Decimal = Decimal("0")
 
     def validate(self) -> None:
         if self.rolling_window < 10:
@@ -278,6 +280,8 @@ class StrategyConfig:
             raise ValueError("aster_fee_rate must be >= 0")
         if self.lighter_fee_rate < 0:
             raise ValueError("lighter_fee_rate must be >= 0")
+        if self.min_expected_profit < 0:
+            raise ValueError("min_expected_profit must be >= 0")
 
 
 @dataclass
@@ -552,6 +556,10 @@ class SpreadReversionSimulator:
             else:
                 direction = "long_aster_short_lighter"
 
+        expected_profit = self._estimate_expected_profit(point, spread, direction)
+        if expected_profit < self.config.min_expected_profit:
+            return
+
         self._position = SpreadPosition(
             direction=direction,
             quantity=self.config.quantity,
@@ -748,6 +756,36 @@ class SpreadReversionSimulator:
                 fees += exit_point.lighter_mid * volume * self.config.lighter_fee_rate
         else:
             raise ValueError(f"Unknown position direction for fees: {direction}")
+        return fees
+
+    def _estimate_expected_profit(
+        self,
+        point: SpreadDataPoint,
+        spread: Decimal,
+        direction: Direction,
+    ) -> Decimal:
+        quantity = abs(self.config.quantity)
+        gross_edge = abs(spread) * quantity
+        fee_penalty = self._estimate_round_trip_fees(point, direction, quantity)
+        return gross_edge - fee_penalty
+
+    def _estimate_round_trip_fees(
+        self,
+        point: SpreadDataPoint,
+        direction: Direction,
+        quantity: Decimal,
+    ) -> Decimal:
+        fees = Decimal("0")
+        if direction in ("short_aster_long_lighter", "long_aster_short_lighter"):
+            if self.config.aster_fee_rate > 0:
+                fees += point.aster_mid * quantity * self.config.aster_fee_rate * Decimal("2")
+            if self.config.lighter_fee_rate > 0:
+                fees += point.lighter_mid * quantity * self.config.lighter_fee_rate * Decimal("2")
+        elif direction in ("lighter_long", "lighter_short"):
+            if self.config.lighter_fee_rate > 0:
+                fees += point.lighter_mid * quantity * self.config.lighter_fee_rate * Decimal("2")
+        else:
+            raise ValueError(f"Unknown position direction for fee estimation: {direction}")
         return fees
 
 
@@ -1075,6 +1113,12 @@ def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
     parser.add_argument("--stop-z", type=float, default=3.5, help="Emergency z-score stop distance")
     parser.add_argument("--window", type=int, default=90, help="Rolling window length for statistics")
     parser.add_argument("--min-abs-spread", type=float, default=0.0, help="Minimum absolute spread to consider")
+    parser.add_argument(
+        "--min-expected-profit",
+        type=float,
+        default=0.0,
+        help="Minimum expected round-trip profit (in quote currency) before opening a trade",
+    )
     parser.add_argument("--max-holding", type=int, default=900, help="Maximum ticks to hold a position")
     parser.add_argument("--demo", action="store_true", help="Ignore --data and run synthetic demo dataset")
     parser.add_argument("--live", action="store_true", help="Run against live exchange data streams")
@@ -1124,6 +1168,7 @@ def run_cli(args: Optional[Sequence[str]] = None) -> SimulationResult:
         aster_fee_rate=Decimal(str(parsed.aster_fee)),
         lighter_fee_rate=Decimal(str(parsed.lighter_fee)),
         lighter_only=parsed.lighter_only,
+        min_expected_profit=Decimal(str(parsed.min_expected_profit)),
     )
 
     if parsed.live:
