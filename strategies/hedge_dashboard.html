@@ -101,6 +101,31 @@
         color: #8a94a6;
       }
 
+      .risk-pill {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0.35rem 0.85rem;
+        border-radius: 999px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        background: rgba(255, 255, 255, 0.08);
+        color: #f5f7fb;
+        transition: background 0.25s ease, color 0.25s ease, box-shadow 0.25s ease;
+        box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+      }
+
+      .risk-pill-summary {
+        font-size: 1.35rem;
+        min-width: 6rem;
+      }
+
+      .risk-pill-inline {
+        font-size: 0.85rem;
+        padding: 0.15rem 0.6rem;
+        min-width: 0;
+      }
+
       .grvt-account-grid {
         display: grid;
         grid-template-columns: minmax(0, 1fr);
@@ -650,7 +675,7 @@
           </article>
           <article class="card grvt-summary-card">
             <h3>Risk Level</h3>
-            <div class="value" id="grvt-risk-level">--</div>
+            <div class="value risk-pill risk-pill-summary" id="grvt-risk-level">--</div>
             <p class="grvt-risk-detail" id="grvt-risk-detail">Awaiting data…</p>
           </article>
           <article class="card grvt-summary-card">
@@ -827,6 +852,36 @@
   const MAX_SPREAD_HISTORY_POINTS = 1800;
     const MAX_STRATEGY_EVENTS = 120;
   const MAX_GRVT_POSITIONS = 12;
+  const RISK_GRADIENTS = [
+    {
+      max: 0.1,
+      label: 'low',
+      gradient: 'linear-gradient(135deg, #34e89e, #0f9d58)',
+      color: '#041b11',
+      shadow: '0 8px 18px rgba(15, 157, 88, 0.35)'
+    },
+    {
+      max: 0.25,
+      label: 'guarded',
+      gradient: 'linear-gradient(135deg, #f9f871, #f7b267)',
+      color: '#2b1d02',
+      shadow: '0 8px 18px rgba(247, 178, 103, 0.35)'
+    },
+    {
+      max: 0.5,
+      label: 'elevated',
+      gradient: 'linear-gradient(135deg, #f79d65, #f05a28)',
+      color: '#2a0a02',
+      shadow: '0 8px 18px rgba(240, 90, 40, 0.35)'
+    },
+    {
+      max: Infinity,
+      label: 'critical',
+      gradient: 'linear-gradient(135deg, #ff4e50, #c81d25)',
+      color: '#ffeef2',
+      shadow: '0 8px 18px rgba(200, 29, 37, 0.4)'
+    }
+  ];
       let batchBusy = false;
       let lastDefaultPaused = false;
       let selectedSpreadAgent = null;
@@ -1193,6 +1248,39 @@
         return Math.abs(totalValue) / balanceValue;
       }
 
+      function resolveRiskBand(ratio) {
+        if (!Number.isFinite(ratio) || ratio < 0) {
+          return null;
+        }
+        for (const band of RISK_GRADIENTS) {
+          if (ratio <= band.max) {
+            return band;
+          }
+        }
+        return RISK_GRADIENTS[RISK_GRADIENTS.length - 1];
+      }
+
+      function applyRiskTone(element, ratio, variant = 'summary') {
+        if (!element) {
+          return;
+        }
+        element.classList.add('risk-pill');
+        element.classList.toggle('risk-pill-inline', variant === 'inline');
+        element.classList.toggle('risk-pill-summary', variant === 'summary');
+        if (!Number.isFinite(ratio) || ratio < 0) {
+          element.style.removeProperty('background');
+          element.style.removeProperty('color');
+          element.style.removeProperty('box-shadow');
+          element.dataset.riskLevel = 'unknown';
+          return;
+        }
+        const band = resolveRiskBand(ratio) ?? RISK_GRADIENTS[RISK_GRADIENTS.length - 1];
+        element.style.background = band.gradient;
+        element.style.color = band.color;
+        element.style.boxShadow = band.shadow;
+        element.dataset.riskLevel = band.label;
+      }
+
       function buildAccountSortKey(agentId, account, summary) {
         const safeAgent = (agentId ?? '').toString().toLowerCase();
         const accountIdentifiers = [
@@ -1236,6 +1324,7 @@
           }
           if (grvtRiskLevel) {
             grvtRiskLevel.textContent = '--';
+            applyRiskTone(grvtRiskLevel, null, 'summary');
           }
           if (grvtRiskDetail) {
             grvtRiskDetail.textContent = 'Awaiting data…';
@@ -1445,8 +1534,10 @@
         }
 
         if (grvtRiskLevel && grvtRiskDetail) {
-          if (worstLoss && Number.isFinite(worstLoss.ratio)) {
-            grvtRiskLevel.textContent = formatPercent(worstLoss.ratio * 100, 2);
+          const worstRatio = worstLoss && Number.isFinite(worstLoss.ratio) ? worstLoss.ratio : null;
+          if (worstRatio !== null) {
+            grvtRiskLevel.textContent = formatPercent(worstRatio * 100, 2);
+            applyRiskTone(grvtRiskLevel, worstRatio, 'summary');
             const accountLabelText = worstLoss.accountName
               ? `${worstLoss.accountName} (${worstLoss.agentId})`
               : worstLoss.agentId;
@@ -1458,6 +1549,7 @@
             grvtRiskDetail.textContent = `${accountLabelText} loss ${lossText} / ${baseLabel} ${balanceText}`;
           } else {
             grvtRiskLevel.textContent = '—';
+            applyRiskTone(grvtRiskLevel, null, 'summary');
             grvtRiskDetail.textContent = 'No losses or missing balance data';
           }
         }
@@ -1523,9 +1615,20 @@
             <div><dt>Equity</dt><dd>${escapeHtml(Number.isFinite(equityValue) ? numberFormatter.format(equityValue) : '--')}</dd></div>
             <div><dt>Wallet</dt><dd>${escapeHtml(Number.isFinite(walletValue) ? numberFormatter.format(walletValue) : '--')}</dd></div>
             <div><dt>Total</dt><dd>${escapeHtml(Number.isFinite(entry.totalValue) ? numberFormatter.format(entry.totalValue) : '--')}</dd></div>
-            <div><dt>Risk</dt><dd>${escapeHtml(Number.isFinite(riskPercent) ? formatPercent(riskPercent, 2) : '—')}</dd></div>
+            <div data-metric="risk"><dt>Risk</dt><dd><span class="risk-pill risk-pill-inline">—</span></dd></div>
           `;
           card.appendChild(metrics);
+
+          const riskBadge = metrics.querySelector('[data-metric="risk"] .risk-pill');
+          if (riskBadge) {
+            if (Number.isFinite(riskPercent)) {
+              riskBadge.textContent = formatPercent(riskPercent, 2);
+            } else {
+              riskBadge.textContent = '—';
+            }
+            const entryRiskRatio = Number.isFinite(entry.riskRatio) ? entry.riskRatio : null;
+            applyRiskTone(riskBadge, entryRiskRatio, 'inline');
+          }
 
           const positions = Array.isArray(account?.positions) ? account.positions.slice(0, MAX_GRVT_POSITIONS) : [];
           if (positions.length) {
