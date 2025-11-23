@@ -97,7 +97,7 @@
 
       .grvt-account-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        grid-template-columns: minmax(0, 1fr);
         gap: 1.1rem;
       }
 
@@ -1204,32 +1204,77 @@
 
           const summary = snapshot.summary ?? {};
           const accounts = Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
-          const accountCountValue = Number(summary.account_count ?? accounts.length ?? 0);
-          if (Number.isFinite(accountCountValue)) {
-            aggregateAccountCount += accountCountValue;
-          }
-
-          const totalValue = parseDecimal(summary.total_pnl);
-          if (Number.isFinite(totalValue)) {
-            aggregateTotalPnl += totalValue;
-            hasTotal = true;
-          }
-
-          const ethValue = parseDecimal(summary.eth_pnl);
-          if (Number.isFinite(ethValue)) {
-            aggregateEthPnl += ethValue;
-            hasEth = true;
-          }
-
-          const btcValue = parseDecimal(summary.btc_pnl);
-          if (Number.isFinite(btcValue)) {
-            aggregateBtcPnl += btcValue;
-            hasBtc = true;
-          }
-
           const snapshotTs = Number(summary.updated_at ?? snapshot.updated_at);
           if (Number.isFinite(snapshotTs) && snapshotTs > latestUpdate) {
             latestUpdate = snapshotTs;
+          }
+
+          const accountCountFallback = Number(summary.account_count ?? 0);
+          if (accounts.length) {
+            aggregateAccountCount += accounts.length;
+          } else if (Number.isFinite(accountCountFallback) && accountCountFallback > 0) {
+            aggregateAccountCount += accountCountFallback;
+          }
+
+          let sourceHasTotal = false;
+          let sourceHasEth = false;
+          let sourceHasBtc = false;
+
+          if (accounts.length) {
+            for (const account of accounts) {
+              const accountTotal = parseDecimal(account.total_pnl);
+              if (Number.isFinite(accountTotal)) {
+                aggregateTotalPnl += accountTotal;
+                hasTotal = true;
+                sourceHasTotal = true;
+              }
+
+              const accountEth = parseDecimal(account.eth_pnl);
+              if (Number.isFinite(accountEth)) {
+                aggregateEthPnl += accountEth;
+                hasEth = true;
+                sourceHasEth = true;
+              }
+
+              const accountBtc = parseDecimal(account.btc_pnl);
+              if (Number.isFinite(accountBtc)) {
+                aggregateBtcPnl += accountBtc;
+                hasBtc = true;
+                sourceHasBtc = true;
+              }
+
+              const accountTs = Number(account.updated_at ?? snapshotTs);
+              flattenedAccounts.push({
+                agentId,
+                account,
+                summary,
+                updatedTs: accountTs
+              });
+            }
+          }
+
+          if (!sourceHasTotal) {
+            const totalValue = parseDecimal(summary.total_pnl);
+            if (Number.isFinite(totalValue)) {
+              aggregateTotalPnl += totalValue;
+              hasTotal = true;
+            }
+          }
+
+          if (!sourceHasEth) {
+            const ethValue = parseDecimal(summary.eth_pnl);
+            if (Number.isFinite(ethValue)) {
+              aggregateEthPnl += ethValue;
+              hasEth = true;
+            }
+          }
+
+          if (!sourceHasBtc) {
+            const btcValue = parseDecimal(summary.btc_pnl);
+            if (Number.isFinite(btcValue)) {
+              aggregateBtcPnl += btcValue;
+              hasBtc = true;
+            }
           }
 
           if (!accounts.length) {
@@ -1238,17 +1283,6 @@
               account: null,
               summary,
               updatedTs: snapshotTs
-            });
-            continue;
-          }
-
-          for (const account of accounts) {
-            const accountTs = Number(account.updated_at ?? snapshotTs);
-            flattenedAccounts.push({
-              agentId,
-              account,
-              summary,
-              updatedTs: accountTs
             });
           }
         }
