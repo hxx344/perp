@@ -1523,8 +1523,6 @@
             <div><dt>Equity</dt><dd>${escapeHtml(Number.isFinite(equityValue) ? numberFormatter.format(equityValue) : '--')}</dd></div>
             <div><dt>Wallet</dt><dd>${escapeHtml(Number.isFinite(walletValue) ? numberFormatter.format(walletValue) : '--')}</dd></div>
             <div><dt>Total</dt><dd>${escapeHtml(Number.isFinite(entry.totalValue) ? numberFormatter.format(entry.totalValue) : '--')}</dd></div>
-            <div><dt>ETH</dt><dd>${escapeHtml(Number.isFinite(entry.ethValue) ? numberFormatter.format(entry.ethValue) : '--')}</dd></div>
-            <div><dt>BTC</dt><dd>${escapeHtml(Number.isFinite(entry.btcValue) ? numberFormatter.format(entry.btcValue) : '--')}</dd></div>
             <div><dt>Risk</dt><dd>${escapeHtml(Number.isFinite(riskPercent) ? formatPercent(riskPercent, 2) : '—')}</dd></div>
           `;
           card.appendChild(metrics);
