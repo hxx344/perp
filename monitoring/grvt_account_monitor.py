@@ -415,6 +415,13 @@ class GrvtAccountMonitor:
         if balance_available is None and balance_total is not None:
             balance_available = balance_total
 
+        equity_total: Optional[Decimal] = None
+        equity_available: Optional[Decimal] = None
+        if balance_total is not None:
+            equity_total = balance_total + account_total
+        if balance_available is not None:
+            equity_available = balance_available + account_total
+
         summary = {
             "account_count": 1,
             "total_pnl": decimal_to_str(account_total),
@@ -422,6 +429,8 @@ class GrvtAccountMonitor:
             "btc_pnl": decimal_to_str(account_btc),
             "balance": decimal_to_str(balance_total),
             "available_balance": decimal_to_str(balance_available),
+            "equity": decimal_to_str(equity_total),
+            "available_equity": decimal_to_str(equity_available),
             "updated_at": timestamp,
         }
 
@@ -439,6 +448,8 @@ class GrvtAccountMonitor:
                         "btc_pnl": decimal_to_str(account_btc),
                         "balance": decimal_to_str(balance_total),
                         "available_balance": decimal_to_str(balance_available),
+                        "equity": decimal_to_str(equity_total),
+                        "available_equity": decimal_to_str(equity_available),
                         "positions": position_rows,
                         "updated_at": timestamp,
                     }
