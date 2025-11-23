@@ -180,21 +180,17 @@
         color: #8a94a6;
       }
 
-      .grvt-selector-label {
-        display: flex;
+      .grvt-source-badge {
+        display: inline-flex;
         align-items: center;
-        gap: 0.5rem;
-        font-size: 0.85rem;
-        color: #7f8fa9;
-      }
-
-      .grvt-selector-label select {
-        background: #1f2533;
-        color: #f5f7fb;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 6px;
-        padding: 0.35rem 0.65rem;
-        font-size: 0.85rem;
+        padding: 0.1rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.7rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        background: #1f2a38;
+        color: #a4d5ff;
+        margin-left: 0.5rem;
       }
 
       .strategy-summary-grid {
@@ -624,12 +620,7 @@
             <span class="badge badge-muted" id="grvt-account-count">0 accounts</span>
           </div>
         </div>
-        <div class="section-header-controls">
-          <label class="grvt-selector-label hidden" id="grvt-agent-label">
-            Source
-            <select id="grvt-agent-select"></select>
-          </label>
-        </div>
+        <div class="section-header-controls"></div>
       </div>
       <p class="empty" id="grvt-empty">Waiting for GRVT monitor…</p>
       <div class="grvt-card hidden" id="grvt-card">
@@ -780,8 +771,6 @@
     const resumeAllButton = document.getElementById('resume-all');
     const runtimeElement = document.getElementById('runtime');
   const grvtAccountCount = document.getElementById('grvt-account-count');
-  const grvtAgentLabel = document.getElementById('grvt-agent-label');
-  const grvtAgentSelect = document.getElementById('grvt-agent-select');
   const grvtEmpty = document.getElementById('grvt-empty');
   const grvtCard = document.getElementById('grvt-card');
   const grvtTotalPnl = document.getElementById('grvt-total-pnl');
@@ -820,8 +809,6 @@
   const MAX_GRVT_POSITIONS = 12;
       let batchBusy = false;
       let lastDefaultPaused = false;
-    let selectedGrvtAgent = null;
-    let lastGrvtOptionsKey = '';
       let selectedSpreadAgent = null;
       let lastSpreadOptionsKey = '';
       let selectedStrategyAgent = null;
@@ -1188,9 +1175,6 @@
           grvtCard.classList.add('hidden');
           grvtEmpty.classList.remove('hidden');
           grvtAccountCount.textContent = '0 accounts';
-          if (grvtAgentLabel) {
-            grvtAgentLabel.classList.add('hidden');
-          }
           if (grvtAccountGrid) {
             grvtAccountGrid.innerHTML = '';
           }
@@ -1203,47 +1187,81 @@
         grvtEmpty.classList.add('hidden');
         grvtCard.classList.remove('hidden');
 
-        if (!selectedGrvtAgent || !grvtMap[selectedGrvtAgent]) {
-          selectedGrvtAgent = entries[0][0];
-        }
+        let aggregateAccountCount = 0;
+        let aggregateTotalPnl = 0;
+        let aggregateEthPnl = 0;
+        let aggregateBtcPnl = 0;
+        let latestUpdate = 0;
+        let hasTotal = false;
+        let hasEth = false;
+        let hasBtc = false;
+        const flattenedAccounts = [];
 
-        if (grvtAgentSelect) {
-          const optionsKey = entries.map(([agent]) => agent).join('|');
-          if (optionsKey !== lastGrvtOptionsKey) {
-            grvtAgentSelect.innerHTML = '';
-            for (const [agent] of entries) {
-              const option = document.createElement('option');
-              option.value = agent;
-              option.textContent = agent;
-              grvtAgentSelect.appendChild(option);
-            }
-            lastGrvtOptionsKey = optionsKey;
+        for (const [agentId, snapshot] of entries) {
+          if (!snapshot) {
+            continue;
           }
-          grvtAgentSelect.value = selectedGrvtAgent;
-          if (grvtAgentLabel) {
-            grvtAgentLabel.classList.toggle('hidden', entries.length <= 1);
+
+          const summary = snapshot.summary ?? {};
+          const accounts = Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
+          const accountCountValue = Number(summary.account_count ?? accounts.length ?? 0);
+          if (Number.isFinite(accountCountValue)) {
+            aggregateAccountCount += accountCountValue;
+          }
+
+          const totalValue = parseDecimal(summary.total_pnl);
+          if (Number.isFinite(totalValue)) {
+            aggregateTotalPnl += totalValue;
+            hasTotal = true;
+          }
+
+          const ethValue = parseDecimal(summary.eth_pnl);
+          if (Number.isFinite(ethValue)) {
+            aggregateEthPnl += ethValue;
+            hasEth = true;
+          }
+
+          const btcValue = parseDecimal(summary.btc_pnl);
+          if (Number.isFinite(btcValue)) {
+            aggregateBtcPnl += btcValue;
+            hasBtc = true;
+          }
+
+          const snapshotTs = Number(summary.updated_at ?? snapshot.updated_at);
+          if (Number.isFinite(snapshotTs) && snapshotTs > latestUpdate) {
+            latestUpdate = snapshotTs;
+          }
+
+          if (!accounts.length) {
+            flattenedAccounts.push({
+              agentId,
+              account: null,
+              summary,
+              updatedTs: snapshotTs
+            });
+            continue;
+          }
+
+          for (const account of accounts) {
+            const accountTs = Number(account.updated_at ?? snapshotTs);
+            flattenedAccounts.push({
+              agentId,
+              account,
+              summary,
+              updatedTs: accountTs
+            });
           }
         }
 
-        const snapshot = grvtMap[selectedGrvtAgent] ?? {};
-        const summary = snapshot.summary ?? {};
-        const accounts = Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
-        const accountCountRaw = Number(summary.account_count ?? accounts.length ?? 0);
-        if (Number.isFinite(accountCountRaw)) {
-          grvtAccountCount.textContent = `${accountCountRaw} ${accountCountRaw === 1 ? 'account' : 'accounts'}`;
-        } else {
-          grvtAccountCount.textContent = 'Accounts —';
-        }
+        const sourcesLabel = entries.length === 1 ? 'source' : 'sources';
+        const accountLabel = aggregateAccountCount === 1 ? 'account' : 'accounts';
+        grvtAccountCount.textContent = `${aggregateAccountCount} ${accountLabel} across ${entries.length} ${sourcesLabel}`;
 
-        const totalPnl = parseDecimal(summary.total_pnl);
-        grvtTotalPnl.textContent = Number.isFinite(totalPnl) ? numberFormatter.format(totalPnl) : '--';
-        const ethPnl = parseDecimal(summary.eth_pnl);
-        grvtEthPnl.textContent = Number.isFinite(ethPnl) ? numberFormatter.format(ethPnl) : '--';
-        const btcPnl = parseDecimal(summary.btc_pnl);
-        grvtBtcPnl.textContent = Number.isFinite(btcPnl) ? numberFormatter.format(btcPnl) : '--';
+        grvtTotalPnl.textContent = hasTotal ? numberFormatter.format(aggregateTotalPnl) : '--';
+        grvtEthPnl.textContent = hasEth ? numberFormatter.format(aggregateEthPnl) : '--';
+        grvtBtcPnl.textContent = hasBtc ? numberFormatter.format(aggregateBtcPnl) : '--';
 
-        const updatedTs = Number(summary.updated_at ?? snapshot.updated_at);
-        const updatedText = formatTimestamp(updatedTs);
+        const updatedText = formatTimestamp(latestUpdate);
         grvtSummaryTime.textContent = updatedText ?? '--';
         grvtSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
 
@@ -1252,9 +1270,11 @@
         }
 
         grvtAccountGrid.innerHTML = '';
-        if (!accounts.length) {
+
+        if (!flattenedAccounts.length) {
           if (grvtAccountsEmpty) {
             grvtAccountsEmpty.classList.remove('hidden');
+            grvtAccountsEmpty.textContent = 'Waiting for account data…';
           }
           return;
         }
@@ -1263,18 +1283,31 @@
           grvtAccountsEmpty.classList.add('hidden');
         }
 
-        for (const account of accounts) {
-          const accountName = account.name ? String(account.name) : 'Account';
-          const accountTotal = parseDecimal(account.total_pnl);
-          const accountEth = parseDecimal(account.eth_pnl);
-          const accountBtc = parseDecimal(account.btc_pnl);
-          const accountUpdated = formatTimestamp(Number(account.updated_at ?? updatedTs));
+        flattenedAccounts.sort((a, b) => {
+          const aTs = Number(a.updatedTs) || 0;
+          const bTs = Number(b.updatedTs) || 0;
+          return bTs - aTs;
+        });
+
+        for (const entry of flattenedAccounts) {
+          const agentId = entry.agentId ?? 'Source';
+          const account = entry.account;
+          const summary = entry.summary ?? {};
+          const fallbackName = account && account.name ? String(account.name) : 'Account';
+          const displayName = account && account.name ? String(account.name) : `${agentId} ${fallbackName}`;
+          const totalValue = parseDecimal(account && account.total_pnl !== undefined ? account.total_pnl : summary.total_pnl);
+          const ethValue = parseDecimal(account && account.eth_pnl !== undefined ? account.eth_pnl : summary.eth_pnl);
+          const btcValue = parseDecimal(account && account.btc_pnl !== undefined ? account.btc_pnl : summary.btc_pnl);
+          const accountUpdated = formatTimestamp(entry.updatedTs);
 
           const card = document.createElement('article');
           card.className = 'grvt-account-card';
           card.innerHTML = `
             <header>
-              <span class="grvt-account-name">${escapeHtml(accountName)}</span>
+              <div>
+                <span class="grvt-account-name">${escapeHtml(displayName)}</span>
+                <span class="badge badge-info grvt-source-badge">${escapeHtml(agentId)}</span>
+              </div>
               <span class="grvt-account-updated">${escapeHtml(accountUpdated ?? '—')}</span>
             </header>
           `;
@@ -1282,13 +1315,13 @@
           const metrics = document.createElement('dl');
           metrics.className = 'grvt-account-metrics';
           metrics.innerHTML = `
-            <div><dt>Total</dt><dd>${escapeHtml(Number.isFinite(accountTotal) ? numberFormatter.format(accountTotal) : '--')}</dd></div>
-            <div><dt>ETH</dt><dd>${escapeHtml(Number.isFinite(accountEth) ? numberFormatter.format(accountEth) : '--')}</dd></div>
-            <div><dt>BTC</dt><dd>${escapeHtml(Number.isFinite(accountBtc) ? numberFormatter.format(accountBtc) : '--')}</dd></div>
+            <div><dt>Total</dt><dd>${escapeHtml(Number.isFinite(totalValue) ? numberFormatter.format(totalValue) : '--')}</dd></div>
+            <div><dt>ETH</dt><dd>${escapeHtml(Number.isFinite(ethValue) ? numberFormatter.format(ethValue) : '--')}</dd></div>
+            <div><dt>BTC</dt><dd>${escapeHtml(Number.isFinite(btcValue) ? numberFormatter.format(btcValue) : '--')}</dd></div>
           `;
           card.appendChild(metrics);
 
-          const positions = Array.isArray(account.positions) ? account.positions.slice(0, MAX_GRVT_POSITIONS) : [];
+          const positions = Array.isArray(account?.positions) ? account.positions.slice(0, MAX_GRVT_POSITIONS) : [];
           if (positions.length) {
             const table = document.createElement('table');
             table.className = 'grvt-positions-table';
@@ -1327,7 +1360,7 @@
           } else {
             const empty = document.createElement('p');
             empty.className = 'grvt-positions-empty';
-            empty.textContent = 'No open positions';
+            empty.textContent = account ? 'No open positions' : 'Awaiting account snapshot';
             card.appendChild(empty);
           }
 
@@ -2054,15 +2087,6 @@
           }
         });
       }
-      if (grvtAgentSelect) {
-        grvtAgentSelect.addEventListener('change', (event) => {
-          selectedGrvtAgent = event.target.value;
-          if (lastMetricsSnapshot) {
-            renderGrvt(lastMetricsSnapshot);
-          }
-        });
-      }
-
       refreshMetrics();
       setInterval(refreshMetrics, 2000);
     </script>
