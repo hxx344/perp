@@ -16,6 +16,7 @@ import sys
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
@@ -26,6 +27,40 @@ LOGGER = logging.getLogger("monitor.grvt_accounts")
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_ACCOUNT_POSITIONS = 12
+def load_env_files(paths: Sequence[str]) -> None:
+    if not paths:
+        return
+    for raw_path in paths:
+        if not raw_path:
+            continue
+        env_path = Path(raw_path).expanduser()
+        if not env_path.exists():
+            LOGGER.debug("Env file %s not found; skipping", env_path)
+            continue
+        loaded_count = 0
+        try:
+            with env_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    if "=" not in stripped:
+                        continue
+                    key, value = stripped.split("=", 1)
+                    key = key.strip()
+                    if not key:
+                        continue
+                    value = value.strip()
+                    if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
+                        value = value[1:-1]
+                    if key not in os.environ:
+                        os.environ[key] = value
+                        loaded_count += 1
+        except Exception as exc:
+            LOGGER.warning("Failed to load env file %s: %s", env_path, exc)
+            continue
+        LOGGER.info("Loaded %s variables from %s", loaded_count, env_path)
+
 
 
 @dataclass(frozen=True)
@@ -408,12 +443,20 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--max-positions", type=int, default=MAX_ACCOUNT_POSITIONS, help="Maximum positions to include per account in the payload")
     parser.add_argument("--once", action="store_true", help="Collect and push a single snapshot, then exit")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
+    parser.add_argument(
+        "--env-file",
+        action="append",
+        help="Env file to preload (defaults to .env if present). Repeat to load multiple files.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+
+    env_files = args.env_file if args.env_file is not None else [".env"]
+    load_env_files(env_files)
 
     try:
         credentials = [load_account(label) for label in args.account]
