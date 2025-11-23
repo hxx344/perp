@@ -64,6 +64,7 @@ class HedgeState:
     runtime_seconds: float = 0.0
     spread_metrics: Optional[Dict[str, Any]] = None
     strategy_metrics: Optional[Dict[str, Any]] = None
+    grvt_accounts: Optional[Dict[str, Any]] = None
 
     def update_from_payload(self, payload: Dict[str, Any]) -> None:
         position_raw = payload.get("position")
@@ -80,6 +81,7 @@ class HedgeState:
         runtime_raw = payload.get("runtime_seconds") or payload.get("runtime")
         spread_metrics_raw = payload.get("spread_metrics")
         strategy_metrics_raw = payload.get("strategy_metrics")
+        grvt_accounts_raw = payload.get("grvt_accounts")
 
         if position_raw is not None:
             try:
@@ -166,6 +168,13 @@ class HedgeState:
                 normalized_strategy["recent_trades"] = recent_trades[-MAX_STRATEGY_TRADES:]
             self.strategy_metrics = normalized_strategy
 
+        if isinstance(grvt_accounts_raw, dict):
+            normalized_grvt = copy.deepcopy(grvt_accounts_raw)
+            accounts_block = normalized_grvt.get("accounts")
+            if isinstance(accounts_block, list) and len(accounts_block) > 50:
+                normalized_grvt["accounts"] = accounts_block[:50]
+            self.grvt_accounts = normalized_grvt
+
         self.last_update_ts = time.time()
 
     def serialize(self) -> Dict[str, Any]:
@@ -187,6 +196,8 @@ class HedgeState:
             payload["spread_metrics"] = copy.deepcopy(self.spread_metrics)
         if self.strategy_metrics is not None:
             payload["strategy_metrics"] = copy.deepcopy(self.strategy_metrics)
+        if self.grvt_accounts is not None:
+            payload["grvt_accounts"] = copy.deepcopy(self.grvt_accounts)
         return payload
 
     @classmethod
@@ -360,6 +371,13 @@ class HedgeCoordinator:
         }
         if strategy_map:
             snapshot["strategy_metrics"] = strategy_map
+        grvt_map = {
+            agent_id: copy.deepcopy(state.grvt_accounts)
+            for agent_id, state in self._states.items()
+            if state.grvt_accounts
+        }
+        if grvt_map:
+            snapshot["grvt_accounts"] = grvt_map
         return snapshot
 
     async def update(self, payload: Dict[str, Any]) -> Dict[str, Any]:

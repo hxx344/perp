@@ -58,6 +58,145 @@
         margin-top: 1rem;
       }
 
+      .grvt-section {
+        margin-top: 2.5rem;
+      }
+
+      .grvt-card {
+        background: #1b1d24;
+        border-radius: 12px;
+        padding: 1.5rem;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
+      }
+
+      .grvt-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1.25rem;
+        margin-bottom: 1.75rem;
+      }
+
+      .grvt-summary-card h3 {
+        margin: 0 0 0.35rem;
+        font-size: 0.9rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #7f8fa9;
+      }
+
+      .grvt-summary-card .value {
+        font-size: 1.75rem;
+        font-weight: 600;
+      }
+
+      .grvt-summary-updated {
+        margin-top: 0.4rem;
+        font-size: 0.85rem;
+        color: #8a94a6;
+      }
+
+      .grvt-account-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 1.1rem;
+      }
+
+      .grvt-account-card {
+        background: #1f2533;
+        border-radius: 12px;
+        padding: 1.25rem;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .grvt-account-card header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 0.9rem;
+      }
+
+      .grvt-account-name {
+        font-weight: 600;
+        font-size: 1.05rem;
+      }
+
+      .grvt-account-updated {
+        font-size: 0.75rem;
+        color: #8a94a6;
+      }
+
+      .grvt-account-metrics {
+        display: grid;
+        gap: 0.45rem;
+        margin: 0 0 0.75rem;
+      }
+
+      .grvt-account-metrics div {
+        display: flex;
+        justify-content: space-between;
+        font-variant-numeric: tabular-nums;
+        font-size: 0.9rem;
+      }
+
+      .grvt-account-metrics dt {
+        margin: 0;
+        text-transform: uppercase;
+        font-size: 0.75rem;
+        color: #7f8fa9;
+        letter-spacing: 0.05em;
+      }
+
+      .grvt-account-metrics dd {
+        margin: 0;
+        font-weight: 600;
+      }
+
+      .grvt-positions-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.8rem;
+      }
+
+      .grvt-positions-table thead {
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .grvt-positions-table th,
+      .grvt-positions-table td {
+        padding: 0.4rem 0.45rem;
+        text-align: right;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        white-space: nowrap;
+      }
+
+      .grvt-positions-table th:first-child,
+      .grvt-positions-table td:first-child {
+        text-align: left;
+      }
+
+      .grvt-positions-empty {
+        margin: 0;
+        font-size: 0.8rem;
+        color: #8a94a6;
+      }
+
+      .grvt-selector-label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.85rem;
+        color: #7f8fa9;
+      }
+
+      .grvt-selector-label select {
+        background: #1f2533;
+        color: #f5f7fb;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 6px;
+        padding: 0.35rem 0.65rem;
+        font-size: 0.85rem;
+      }
+
       .strategy-summary-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -477,6 +616,50 @@
       <div class="agent-grid hidden" id="agent-grid"></div>
     </section>
 
+    <section class="grvt-section">
+      <div class="section-header">
+        <div class="section-header-info">
+          <h2>GRVT Multi-Account Monitor</h2>
+          <div class="badge-group">
+            <span class="badge badge-muted" id="grvt-account-count">0 accounts</span>
+          </div>
+        </div>
+        <div class="section-header-controls">
+          <label class="grvt-selector-label hidden" id="grvt-agent-label">
+            Source
+            <select id="grvt-agent-select"></select>
+          </label>
+        </div>
+      </div>
+      <p class="empty" id="grvt-empty">Waiting for GRVT monitor…</p>
+      <div class="grvt-card hidden" id="grvt-card">
+        <div class="grvt-summary-grid">
+          <article class="card grvt-summary-card">
+            <h3>Total PnL</h3>
+            <div class="value" id="grvt-total-pnl">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>ETH PnL</h3>
+            <div class="value" id="grvt-eth-pnl">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>BTC PnL</h3>
+            <div class="value" id="grvt-btc-pnl">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Last Update</h3>
+            <div class="value" id="grvt-summary-time">--</div>
+            <p class="grvt-summary-updated" id="grvt-summary-updated">Updated —</p>
+          </article>
+        </div>
+        <div>
+          <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">Per Account Net PnL</h3>
+          <div class="grvt-account-grid" id="grvt-account-grid"></div>
+          <p class="empty hidden" id="grvt-accounts-empty">No account data yet…</p>
+        </div>
+      </div>
+    </section>
+
     <section class="strategy-section">
       <div class="section-header">
         <div class="section-header-info">
@@ -596,6 +779,18 @@
     const pauseAllButton = document.getElementById('pause-all');
     const resumeAllButton = document.getElementById('resume-all');
     const runtimeElement = document.getElementById('runtime');
+  const grvtAccountCount = document.getElementById('grvt-account-count');
+  const grvtAgentLabel = document.getElementById('grvt-agent-label');
+  const grvtAgentSelect = document.getElementById('grvt-agent-select');
+  const grvtEmpty = document.getElementById('grvt-empty');
+  const grvtCard = document.getElementById('grvt-card');
+  const grvtTotalPnl = document.getElementById('grvt-total-pnl');
+  const grvtEthPnl = document.getElementById('grvt-eth-pnl');
+  const grvtBtcPnl = document.getElementById('grvt-btc-pnl');
+  const grvtSummaryTime = document.getElementById('grvt-summary-time');
+  const grvtSummaryUpdated = document.getElementById('grvt-summary-updated');
+  const grvtAccountGrid = document.getElementById('grvt-account-grid');
+  const grvtAccountsEmpty = document.getElementById('grvt-accounts-empty');
     const spreadAgentCount = document.getElementById('spread-agent-count');
     const spreadAgentLabel = document.getElementById('spread-agent-label');
     const spreadAgentSelect = document.getElementById('spread-agent-select');
@@ -622,8 +817,11 @@
     const strategyEventsBody = document.getElementById('strategy-events-body');
   const MAX_SPREAD_HISTORY_POINTS = 1800;
     const MAX_STRATEGY_EVENTS = 120;
+  const MAX_GRVT_POSITIONS = 12;
       let batchBusy = false;
       let lastDefaultPaused = false;
+    let selectedGrvtAgent = null;
+    let lastGrvtOptionsKey = '';
       let selectedSpreadAgent = null;
       let lastSpreadOptionsKey = '';
       let selectedStrategyAgent = null;
@@ -969,6 +1167,172 @@
         }
 
         return parts.join(' ');
+      }
+
+      function formatTimestamp(seconds) {
+        if (!Number.isFinite(seconds) || seconds <= 0) {
+          return null;
+        }
+        return new Date(seconds * 1000).toLocaleString();
+      }
+
+      function renderGrvt(data) {
+        if (!grvtAccountCount || !grvtEmpty || !grvtCard) {
+          return;
+        }
+
+        const grvtMap = data?.grvt_accounts ?? {};
+        const entries = Object.entries(grvtMap);
+
+        if (!entries.length) {
+          grvtCard.classList.add('hidden');
+          grvtEmpty.classList.remove('hidden');
+          grvtAccountCount.textContent = '0 accounts';
+          if (grvtAgentLabel) {
+            grvtAgentLabel.classList.add('hidden');
+          }
+          if (grvtAccountGrid) {
+            grvtAccountGrid.innerHTML = '';
+          }
+          if (grvtAccountsEmpty) {
+            grvtAccountsEmpty.classList.add('hidden');
+          }
+          return;
+        }
+
+        grvtEmpty.classList.add('hidden');
+        grvtCard.classList.remove('hidden');
+
+        if (!selectedGrvtAgent || !grvtMap[selectedGrvtAgent]) {
+          selectedGrvtAgent = entries[0][0];
+        }
+
+        if (grvtAgentSelect) {
+          const optionsKey = entries.map(([agent]) => agent).join('|');
+          if (optionsKey !== lastGrvtOptionsKey) {
+            grvtAgentSelect.innerHTML = '';
+            for (const [agent] of entries) {
+              const option = document.createElement('option');
+              option.value = agent;
+              option.textContent = agent;
+              grvtAgentSelect.appendChild(option);
+            }
+            lastGrvtOptionsKey = optionsKey;
+          }
+          grvtAgentSelect.value = selectedGrvtAgent;
+          if (grvtAgentLabel) {
+            grvtAgentLabel.classList.toggle('hidden', entries.length <= 1);
+          }
+        }
+
+        const snapshot = grvtMap[selectedGrvtAgent] ?? {};
+        const summary = snapshot.summary ?? {};
+        const accounts = Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
+        const accountCountRaw = Number(summary.account_count ?? accounts.length ?? 0);
+        if (Number.isFinite(accountCountRaw)) {
+          grvtAccountCount.textContent = `${accountCountRaw} ${accountCountRaw === 1 ? 'account' : 'accounts'}`;
+        } else {
+          grvtAccountCount.textContent = 'Accounts —';
+        }
+
+        const totalPnl = parseDecimal(summary.total_pnl);
+        grvtTotalPnl.textContent = Number.isFinite(totalPnl) ? numberFormatter.format(totalPnl) : '--';
+        const ethPnl = parseDecimal(summary.eth_pnl);
+        grvtEthPnl.textContent = Number.isFinite(ethPnl) ? numberFormatter.format(ethPnl) : '--';
+        const btcPnl = parseDecimal(summary.btc_pnl);
+        grvtBtcPnl.textContent = Number.isFinite(btcPnl) ? numberFormatter.format(btcPnl) : '--';
+
+        const updatedTs = Number(summary.updated_at ?? snapshot.updated_at);
+        const updatedText = formatTimestamp(updatedTs);
+        grvtSummaryTime.textContent = updatedText ?? '--';
+        grvtSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
+
+        if (!grvtAccountGrid) {
+          return;
+        }
+
+        grvtAccountGrid.innerHTML = '';
+        if (!accounts.length) {
+          if (grvtAccountsEmpty) {
+            grvtAccountsEmpty.classList.remove('hidden');
+          }
+          return;
+        }
+
+        if (grvtAccountsEmpty) {
+          grvtAccountsEmpty.classList.add('hidden');
+        }
+
+        for (const account of accounts) {
+          const accountName = account.name ? String(account.name) : 'Account';
+          const accountTotal = parseDecimal(account.total_pnl);
+          const accountEth = parseDecimal(account.eth_pnl);
+          const accountBtc = parseDecimal(account.btc_pnl);
+          const accountUpdated = formatTimestamp(Number(account.updated_at ?? updatedTs));
+
+          const card = document.createElement('article');
+          card.className = 'grvt-account-card';
+          card.innerHTML = `
+            <header>
+              <span class="grvt-account-name">${escapeHtml(accountName)}</span>
+              <span class="grvt-account-updated">${escapeHtml(accountUpdated ?? '—')}</span>
+            </header>
+          `;
+
+          const metrics = document.createElement('dl');
+          metrics.className = 'grvt-account-metrics';
+          metrics.innerHTML = `
+            <div><dt>Total</dt><dd>${escapeHtml(Number.isFinite(accountTotal) ? numberFormatter.format(accountTotal) : '--')}</dd></div>
+            <div><dt>ETH</dt><dd>${escapeHtml(Number.isFinite(accountEth) ? numberFormatter.format(accountEth) : '--')}</dd></div>
+            <div><dt>BTC</dt><dd>${escapeHtml(Number.isFinite(accountBtc) ? numberFormatter.format(accountBtc) : '--')}</dd></div>
+          `;
+          card.appendChild(metrics);
+
+          const positions = Array.isArray(account.positions) ? account.positions.slice(0, MAX_GRVT_POSITIONS) : [];
+          if (positions.length) {
+            const table = document.createElement('table');
+            table.className = 'grvt-positions-table';
+            table.innerHTML = `
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Side</th>
+                  <th>Size</th>
+                  <th>Entry</th>
+                  <th>Mark</th>
+                  <th>PnL</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            `;
+            const body = table.querySelector('tbody');
+            for (const position of positions) {
+              const side = position.side ? String(position.side).toUpperCase() : '—';
+              const sizeText = formatDecimal(position.net_size, 4);
+              const entryText = formatDecimal(position.entry_price, 4);
+              const markText = formatDecimal(position.mark_price, 4);
+              const pnlText = formatDecimal(position.pnl, 6);
+              const row = document.createElement('tr');
+              row.innerHTML = `
+                <td>${escapeHtml(position.symbol ?? '--')}</td>
+                <td>${escapeHtml(side)}</td>
+                <td>${escapeHtml(sizeText)}</td>
+                <td>${escapeHtml(entryText)}</td>
+                <td>${escapeHtml(markText)}</td>
+                <td>${escapeHtml(pnlText)}</td>
+              `;
+              body.appendChild(row);
+            }
+            card.appendChild(table);
+          } else {
+            const empty = document.createElement('p');
+            empty.className = 'grvt-positions-empty';
+            empty.textContent = 'No open positions';
+            card.appendChild(empty);
+          }
+
+          grvtAccountGrid.appendChild(card);
+        }
       }
 
       function renderAggregate(data) {
@@ -1635,6 +1999,7 @@
           lastMetricsSnapshot = data;
           renderAggregate(data);
           renderAgents(data);
+          renderGrvt(data);
           renderSpread(data);
           renderStrategy(data);
         } catch (error) {
@@ -1686,6 +2051,14 @@
           selectedStrategyAgent = event.target.value;
           if (lastMetricsSnapshot) {
             renderStrategy(lastMetricsSnapshot);
+          }
+        });
+      }
+      if (grvtAgentSelect) {
+        grvtAgentSelect.addEventListener('change', (event) => {
+          selectedGrvtAgent = event.target.value;
+          if (lastMetricsSnapshot) {
+            renderGrvt(lastMetricsSnapshot);
           }
         });
       }
