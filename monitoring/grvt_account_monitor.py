@@ -27,6 +27,37 @@ LOGGER = logging.getLogger("monitor.grvt_accounts")
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_ACCOUNT_POSITIONS = 12
+BALANCE_TOTAL_PATHS: Tuple[Tuple[str, ...], ...] = (
+    ("total", "USDT"),
+    ("total", "usdt"),
+    ("total", "USD"),
+    ("total", "usd"),
+    ("total",),
+    ("info", "accountBalance"),
+    ("info", "account_balance"),
+    ("info", "walletBalance"),
+    ("info", "wallet_balance"),
+    ("info", "equity"),
+    ("balance",),
+    ("equity",),
+    ("USDT",),
+    ("usdt",),
+)
+BALANCE_AVAILABLE_PATHS: Tuple[Tuple[str, ...], ...] = (
+    ("free", "USDT"),
+    ("free", "usdt"),
+    ("free", "USD"),
+    ("free", "usd"),
+    ("available", "USDT"),
+    ("available", "usdt"),
+    ("available", "USD"),
+    ("available", "usd"),
+    ("available_balance",),
+    ("info", "availableBalance"),
+    ("info", "available_balance"),
+    ("info", "availableMargin"),
+    ("info", "available_margin"),
+)
 def load_env_files(paths: Sequence[str]) -> None:
     if not paths:
         return
@@ -351,11 +382,46 @@ class GrvtAccountMonitor:
 
         position_rows = position_rows[: self._max_positions]
 
+        balance_total: Optional[Decimal] = None
+        balance_available: Optional[Decimal] = None
+        try:
+            balance_payload = self._session.client.fetch_balance() or {}
+        except Exception as exc:  # pragma: no cover - network path
+            LOGGER.warning("Failed to fetch balance for %s: %s", self._session.label, exc)
+            balance_payload = {}
+
+        if isinstance(balance_payload, dict):
+            total_raw = extract_from_paths(balance_payload, *BALANCE_TOTAL_PATHS)
+            balance_total = decimal_from(total_raw)
+            if balance_total is None:
+                totals_block = balance_payload.get("total")
+                if isinstance(totals_block, dict):
+                    for key in ("USDT", "USD", "usdt", "usd"):
+                        balance_total = decimal_from(totals_block.get(key))
+                        if balance_total is not None:
+                            break
+            available_raw = extract_from_paths(balance_payload, *BALANCE_AVAILABLE_PATHS)
+            balance_available = decimal_from(available_raw)
+            if balance_available is None:
+                free_block = balance_payload.get("free")
+                if isinstance(free_block, dict):
+                    for key in ("USDT", "USD", "usdt", "usd"):
+                        balance_available = decimal_from(free_block.get(key))
+                        if balance_available is not None:
+                            break
+
+        if balance_total is None and balance_available is not None:
+            balance_total = balance_available
+        if balance_available is None and balance_total is not None:
+            balance_available = balance_total
+
         summary = {
             "account_count": 1,
             "total_pnl": decimal_to_str(account_total),
             "eth_pnl": decimal_to_str(account_eth),
             "btc_pnl": decimal_to_str(account_btc),
+            "balance": decimal_to_str(balance_total),
+            "available_balance": decimal_to_str(balance_available),
             "updated_at": timestamp,
         }
 
@@ -371,6 +437,8 @@ class GrvtAccountMonitor:
                         "total_pnl": decimal_to_str(account_total),
                         "eth_pnl": decimal_to_str(account_eth),
                         "btc_pnl": decimal_to_str(account_btc),
+                        "balance": decimal_to_str(balance_total),
+                        "available_balance": decimal_to_str(balance_available),
                         "positions": position_rows,
                         "updated_at": timestamp,
                     }

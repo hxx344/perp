@@ -95,6 +95,12 @@
         color: #8a94a6;
       }
 
+      .grvt-risk-detail {
+        margin-top: 0.35rem;
+        font-size: 0.85rem;
+        color: #8a94a6;
+      }
+
       .grvt-account-grid {
         display: grid;
         grid-template-columns: minmax(0, 1fr);
@@ -638,6 +644,15 @@
             <div class="value" id="grvt-btc-pnl">--</div>
           </article>
           <article class="card grvt-summary-card">
+            <h3>Total Balance</h3>
+            <div class="value" id="grvt-total-balance">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Risk Level</h3>
+            <div class="value" id="grvt-risk-level">--</div>
+            <p class="grvt-risk-detail" id="grvt-risk-detail">Awaiting data…</p>
+          </article>
+          <article class="card grvt-summary-card">
             <h3>Last Update</h3>
             <div class="value" id="grvt-summary-time">--</div>
             <p class="grvt-summary-updated" id="grvt-summary-updated">Updated —</p>
@@ -776,6 +791,9 @@
   const grvtTotalPnl = document.getElementById('grvt-total-pnl');
   const grvtEthPnl = document.getElementById('grvt-eth-pnl');
   const grvtBtcPnl = document.getElementById('grvt-btc-pnl');
+  const grvtTotalBalance = document.getElementById('grvt-total-balance');
+  const grvtRiskLevel = document.getElementById('grvt-risk-level');
+  const grvtRiskDetail = document.getElementById('grvt-risk-detail');
   const grvtSummaryTime = document.getElementById('grvt-summary-time');
   const grvtSummaryUpdated = document.getElementById('grvt-summary-updated');
   const grvtAccountGrid = document.getElementById('grvt-account-grid');
@@ -1163,6 +1181,16 @@
         return new Date(seconds * 1000).toLocaleString();
       }
 
+      function computeRiskRatio(totalValue, balanceValue) {
+        if (!Number.isFinite(totalValue) || totalValue >= 0) {
+          return null;
+        }
+        if (!Number.isFinite(balanceValue) || balanceValue <= 0) {
+          return null;
+        }
+        return Math.abs(totalValue) / balanceValue;
+      }
+
       function renderGrvt(data) {
         if (!grvtAccountCount || !grvtEmpty || !grvtCard) {
           return;
@@ -1175,6 +1203,15 @@
           grvtCard.classList.add('hidden');
           grvtEmpty.classList.remove('hidden');
           grvtAccountCount.textContent = '0 accounts';
+          if (grvtTotalBalance) {
+            grvtTotalBalance.textContent = '--';
+          }
+          if (grvtRiskLevel) {
+            grvtRiskLevel.textContent = '--';
+          }
+          if (grvtRiskDetail) {
+            grvtRiskDetail.textContent = 'Awaiting data…';
+          }
           if (grvtAccountGrid) {
             grvtAccountGrid.innerHTML = '';
           }
@@ -1243,12 +1280,25 @@
                 sourceHasBtc = true;
               }
 
+              const balanceValue = parseDecimal(
+                account.balance ??
+                account.available_balance ??
+                summary.balance ??
+                summary.available_balance ??
+                snapshot.balance ??
+                snapshot.available_balance
+              );
               const accountTs = Number(account.updated_at ?? snapshotTs);
               flattenedAccounts.push({
                 agentId,
                 account,
                 summary,
-                updatedTs: accountTs
+                updatedTs: accountTs,
+                totalValue: accountTotal,
+                ethValue: accountEth,
+                btcValue: accountBtc,
+                balanceValue,
+                riskRatio: computeRiskRatio(accountTotal, balanceValue),
               });
             }
           }
@@ -1278,12 +1328,46 @@
           }
 
           if (!accounts.length) {
+            const placeholderTotal = parseDecimal(summary.total_pnl);
+            const placeholderEth = parseDecimal(summary.eth_pnl);
+            const placeholderBtc = parseDecimal(summary.btc_pnl);
+            const fallbackBalance = parseDecimal(
+              summary.balance ??
+              summary.available_balance ??
+              snapshot.balance ??
+              snapshot.available_balance
+            );
             flattenedAccounts.push({
               agentId,
               account: null,
               summary,
-              updatedTs: snapshotTs
+              updatedTs: snapshotTs,
+              totalValue: placeholderTotal,
+              ethValue: placeholderEth,
+              btcValue: placeholderBtc,
+              balanceValue: fallbackBalance,
+              riskRatio: computeRiskRatio(placeholderTotal, fallbackBalance),
             });
+          }
+        }
+
+        let aggregateBalance = 0;
+        let hasBalance = false;
+        let worstLoss = null;
+
+        for (const entry of flattenedAccounts) {
+          if (Number.isFinite(entry.balanceValue)) {
+            aggregateBalance += entry.balanceValue;
+            hasBalance = true;
+          }
+          if (Number.isFinite(entry.riskRatio) && (!worstLoss || entry.riskRatio > worstLoss.ratio)) {
+            worstLoss = {
+              ratio: entry.riskRatio,
+              lossValue: entry.totalValue != null ? Math.abs(entry.totalValue) : 0,
+              balanceValue: entry.balanceValue,
+              accountName: entry.account?.name ? String(entry.account.name) : null,
+              agentId: entry.agentId ?? 'Source',
+            };
           }
         }
 
@@ -1294,6 +1378,26 @@
         grvtTotalPnl.textContent = hasTotal ? numberFormatter.format(aggregateTotalPnl) : '--';
         grvtEthPnl.textContent = hasEth ? numberFormatter.format(aggregateEthPnl) : '--';
         grvtBtcPnl.textContent = hasBtc ? numberFormatter.format(aggregateBtcPnl) : '--';
+        if (grvtTotalBalance) {
+          grvtTotalBalance.textContent = hasBalance ? numberFormatter.format(aggregateBalance) : '--';
+        }
+
+        if (grvtRiskLevel && grvtRiskDetail) {
+          if (worstLoss && Number.isFinite(worstLoss.ratio)) {
+            grvtRiskLevel.textContent = formatPercent(worstLoss.ratio * 100, 2);
+            const accountLabelText = worstLoss.accountName
+              ? `${worstLoss.accountName} (${worstLoss.agentId})`
+              : worstLoss.agentId;
+            const lossText = numberFormatter.format(worstLoss.lossValue ?? 0);
+            const balanceText = Number.isFinite(worstLoss.balanceValue)
+              ? numberFormatter.format(worstLoss.balanceValue)
+              : '--';
+            grvtRiskDetail.textContent = `${accountLabelText} loss ${lossText} / balance ${balanceText}`;
+          } else {
+            grvtRiskLevel.textContent = '—';
+            grvtRiskDetail.textContent = 'No losses or missing balance data';
+          }
+        }
 
         const updatedText = formatTimestamp(latestUpdate);
         grvtSummaryTime.textContent = updatedText ?? '--';
@@ -1326,13 +1430,11 @@
         for (const entry of flattenedAccounts) {
           const agentId = entry.agentId ?? 'Source';
           const account = entry.account;
-          const summary = entry.summary ?? {};
           const fallbackName = account && account.name ? String(account.name) : 'Account';
           const displayName = account && account.name ? String(account.name) : `${agentId} ${fallbackName}`;
-          const totalValue = parseDecimal(account && account.total_pnl !== undefined ? account.total_pnl : summary.total_pnl);
-          const ethValue = parseDecimal(account && account.eth_pnl !== undefined ? account.eth_pnl : summary.eth_pnl);
-          const btcValue = parseDecimal(account && account.btc_pnl !== undefined ? account.btc_pnl : summary.btc_pnl);
           const accountUpdated = formatTimestamp(entry.updatedTs);
+          const balanceValue = entry.balanceValue;
+          const riskPercent = Number.isFinite(entry.riskRatio) ? entry.riskRatio * 100 : null;
 
           const card = document.createElement('article');
           card.className = 'grvt-account-card';
@@ -1349,9 +1451,11 @@
           const metrics = document.createElement('dl');
           metrics.className = 'grvt-account-metrics';
           metrics.innerHTML = `
-            <div><dt>Total</dt><dd>${escapeHtml(Number.isFinite(totalValue) ? numberFormatter.format(totalValue) : '--')}</dd></div>
-            <div><dt>ETH</dt><dd>${escapeHtml(Number.isFinite(ethValue) ? numberFormatter.format(ethValue) : '--')}</dd></div>
-            <div><dt>BTC</dt><dd>${escapeHtml(Number.isFinite(btcValue) ? numberFormatter.format(btcValue) : '--')}</dd></div>
+            <div><dt>Balance</dt><dd>${escapeHtml(Number.isFinite(balanceValue) ? numberFormatter.format(balanceValue) : '--')}</dd></div>
+            <div><dt>Total</dt><dd>${escapeHtml(Number.isFinite(entry.totalValue) ? numberFormatter.format(entry.totalValue) : '--')}</dd></div>
+            <div><dt>ETH</dt><dd>${escapeHtml(Number.isFinite(entry.ethValue) ? numberFormatter.format(entry.ethValue) : '--')}</dd></div>
+            <div><dt>BTC</dt><dd>${escapeHtml(Number.isFinite(entry.btcValue) ? numberFormatter.format(entry.btcValue) : '--')}</dd></div>
+            <div><dt>Risk</dt><dd>${escapeHtml(Number.isFinite(riskPercent) ? formatPercent(riskPercent, 2) : '—')}</dd></div>
           `;
           card.appendChild(metrics);
 
