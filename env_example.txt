@@ -23,13 +23,13 @@ PARADEX_L2_PRIVATE_KEY=your_generated_l2_private_key_here
 PARADEX_ENVIRONMENT=prod # or testnet
 
 # GRVT Configuration
-# Get these from your GRVT account settings
-# monitoring/grvt_account_monitor.py 会默认尝试从 .env 读取这些变量；
-# 如需指定其他文件，可使用 --env-file /path/to/custom.env。
+# 每个 VPS 一个账户：填好下列变量后直接运行 monitoring/grvt_account_monitor.py。
+# 脚本会默认尝试从 .env 读取这些变量；如需指定其他文件，可使用 --env-file /path/to/custom.env。
 GRVT_TRADING_ACCOUNT_ID=your_trading_account_id_here
 GRVT_PRIVATE_KEY=your_private_key_here
 GRVT_API_KEY=your_api_key_here
 GRVT_ENVIRONMENT=prod # or testnet/staging/dev 
+GRVT_ACCOUNT_LABEL=vps-shanghai # optional, dashboard display name
 
 # Aster Configuration
 ASTER_API_KEY=your_aster_api_key

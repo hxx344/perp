@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""GRVT multi-account position monitor.
+"""GRVT account monitor.
 
-This utility polls the GRVT REST API for multiple trading accounts, aggregates
-PnL/position information, and forwards a compact summary to the hedge
-coordinator so it can be displayed on the dashboard.
+Each VPS runs this helper for *its* GRVT account. The script polls positions,
+summarises PnL, and forwards everything to the hedge coordinator so the
+dashboard can show per-VPS health without juggling multiple account flags.
 """
 
 from __future__ import annotations
@@ -260,30 +260,30 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
     return pnl_value, payload
 
 
-def load_account(label: str) -> AccountCredentials:
-    label_clean = label.strip()
-    env_prefix = "GRVT" if not label_clean or label_clean.lower() == "default" else f"GRVT_{label_clean.upper()}"
+def load_single_account(*, label: str) -> AccountCredentials:
+    label_clean = label.strip() or "default"
+
     def _env(key: str) -> Optional[str]:
-        return os.getenv(f"{env_prefix}_{key}")
+        return os.getenv(f"GRVT_{key}")
 
     trading_account_id = _env("TRADING_ACCOUNT_ID")
     private_key = _env("PRIVATE_KEY")
     api_key = _env("API_KEY")
     if trading_account_id is None or private_key is None or api_key is None:
         raise ValueError(
-            f"Account '{label}' missing required env vars. Expected {env_prefix}_TRADING_ACCOUNT_ID / PRIVATE_KEY / API_KEY."
+            "Missing GRVT_TRADING_ACCOUNT_ID / GRVT_PRIVATE_KEY / GRVT_API_KEY. "
+            "Set them in your environment or .env file."
         )
 
     env_name = (_env("ENVIRONMENT") or _env("ENV") or "prod").strip().lower()
 
-    credentials = AccountCredentials(
-        label=label_clean or "default",
+    return AccountCredentials(
+        label=label_clean,
         trading_account_id=trading_account_id.strip(),
         private_key=private_key.strip(),
         api_key=api_key.strip(),
         environment=env_name,
     )
-    return credentials
 
 
 def build_session(creds: AccountCredentials) -> AccountSession:
@@ -311,14 +311,14 @@ class GrvtAccountMonitor:
     def __init__(
         self,
         *,
-        sessions: Sequence[AccountSession],
+        session: AccountSession,
         coordinator_url: str,
         agent_id: str,
         poll_interval: float,
         request_timeout: float,
         max_positions: int,
     ) -> None:
-        self._sessions = list(sessions)
+        self._session = session
         self._coordinator_url = coordinator_url.rstrip("/")
         self._agent_id = agent_id
         self._poll_interval = max(poll_interval, 2.0)
@@ -326,66 +326,55 @@ class GrvtAccountMonitor:
         self._max_positions = max(1, max_positions)
         self._http = requests.Session()
 
-    def _collect(self) -> Dict[str, Any]:
-        accounts_payload: List[Dict[str, Any]] = []
-        total_pnl = Decimal("0")
-        total_eth = Decimal("0")
-        total_btc = Decimal("0")
+    def _collect(self) -> Optional[Dict[str, Any]]:
         timestamp = time.time()
+        try:
+            positions = self._session.client.fetch_positions() or []
+        except Exception as exc:  # pragma: no cover - network path
+            LOGGER.exception("Failed to fetch positions for %s: %s", self._session.label, exc)
+            return None
 
-        for session in self._sessions:
-            try:
-                positions = session.client.fetch_positions() or []
-            except Exception as exc:  # pragma: no cover - network path
-                LOGGER.exception("Failed to fetch positions for %s: %s", session.label, exc)
-                continue
+        account_total = Decimal("0")
+        account_eth = Decimal("0")
+        account_btc = Decimal("0")
+        position_rows: List[Dict[str, Any]] = []
 
-            account_total = Decimal("0")
-            account_eth = Decimal("0")
-            account_btc = Decimal("0")
-            position_rows: List[Dict[str, Any]] = []
+        for raw_position in positions:
+            pnl_value, position_payload = compute_position_pnl(raw_position)
+            account_total += pnl_value
+            base = base_asset(position_payload.get("symbol", ""))
+            if base == "ETH":
+                account_eth += pnl_value
+            elif base == "BTC":
+                account_btc += pnl_value
+            position_rows.append(position_payload)
 
-            for raw_position in positions:
-                pnl_value, position_payload = compute_position_pnl(raw_position)
-                account_total += pnl_value
-                base = base_asset(position_payload.get("symbol", ""))
-                if base == "ETH":
-                    account_eth += pnl_value
-                elif base == "BTC":
-                    account_btc += pnl_value
-                position_rows.append(position_payload)
-
-            position_rows = position_rows[: self._max_positions]
-            total_pnl += account_total
-            total_eth += account_eth
-            total_btc += account_btc
-
-            accounts_payload.append(
-                {
-                    "name": session.label,
-                    "total_pnl": decimal_to_str(account_total),
-                    "eth_pnl": decimal_to_str(account_eth),
-                    "btc_pnl": decimal_to_str(account_btc),
-                    "positions": position_rows,
-                    "updated_at": timestamp,
-                }
-            )
+        position_rows = position_rows[: self._max_positions]
 
         summary = {
-            "account_count": len(accounts_payload),
-            "total_pnl": decimal_to_str(total_pnl),
-            "eth_pnl": decimal_to_str(total_eth),
-            "btc_pnl": decimal_to_str(total_btc),
+            "account_count": 1,
+            "total_pnl": decimal_to_str(account_total),
+            "eth_pnl": decimal_to_str(account_eth),
+            "btc_pnl": decimal_to_str(account_btc),
             "updated_at": timestamp,
         }
 
         payload = {
             "agent_id": self._agent_id,
-            "instrument": "GRVT multi-account",
+            "instrument": f"GRVT {self._session.label}",
             "grvt_accounts": {
                 "updated_at": timestamp,
                 "summary": summary,
-                "accounts": accounts_payload,
+                "accounts": [
+                    {
+                        "name": self._session.label,
+                        "total_pnl": decimal_to_str(account_total),
+                        "eth_pnl": decimal_to_str(account_eth),
+                        "btc_pnl": decimal_to_str(account_btc),
+                        "positions": position_rows,
+                        "updated_at": timestamp,
+                    }
+                ],
             },
         }
         return payload
@@ -398,18 +387,18 @@ class GrvtAccountMonitor:
 
     def run_once(self) -> None:
         payload = self._collect()
-        if not payload["grvt_accounts"]["accounts"]:
-            LOGGER.warning("No GRVT account data collected; skipping coordinator update")
+        if payload is None:
+            LOGGER.warning("Skipping coordinator update; unable to collect account data")
             return
         self._push(payload)
         LOGGER.info(
-            "Pushed GRVT monitor snapshot (%s accounts, total PnL %s)",
-            payload["grvt_accounts"]["summary"].get("account_count"),
+            "Pushed GRVT monitor snapshot for %s (PnL %s)",
+            self._session.label,
             payload["grvt_accounts"]["summary"].get("total_pnl"),
         )
 
     def run_forever(self) -> None:
-        LOGGER.info("Starting GRVT monitor for %s accounts", len(self._sessions))
+        LOGGER.info("Starting GRVT monitor for account %s", self._session.label)
         while True:
             start = time.time()
             try:
@@ -422,22 +411,18 @@ class GrvtAccountMonitor:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Monitor multiple GRVT accounts and forward PnL data to the dashboard")
+    parser = argparse.ArgumentParser(description="Monitor a GRVT account per VPS and forward PnL data to the dashboard")
     parser.add_argument(
         "--coordinator-url",
         required=True,
         help="Hedge coordinator base URL, e.g. http://localhost:8899",
     )
-    parser.add_argument(
-        "--account",
-        action="append",
-        required=True,
-        help=(
-            "Account label / env prefix. '--account alpha' expects GRVT_ALPHA_TRADING_ACCOUNT_ID / PRIVATE_KEY / API_KEY. "
-            "Use '--account default' to reuse the base GRVT_* variables."
-        ),
-    )
     parser.add_argument("--agent-id", default="grvt-monitor", help="Agent identifier reported to the coordinator")
+    parser.add_argument(
+        "--account-label",
+        default=os.getenv("GRVT_ACCOUNT_LABEL", "default"),
+        help="Label shown on the dashboard for this VPS/account",
+    )
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_SECONDS, help="Seconds between refreshes")
     parser.add_argument("--request-timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="HTTP timeout for coordinator updates")
     parser.add_argument("--max-positions", type=int, default=MAX_ACCOUNT_POSITIONS, help="Maximum positions to include per account in the payload")
@@ -459,14 +444,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     load_env_files(env_files)
 
     try:
-        credentials = [load_account(label) for label in args.account]
+        credentials = load_single_account(label=args.account_label)
     except ValueError as exc:
         LOGGER.error(str(exc))
         sys.exit(1)
 
-    sessions = [build_session(creds) for creds in credentials]
+    session = build_session(credentials)
     monitor = GrvtAccountMonitor(
-        sessions=sessions,
+        session=session,
         coordinator_url=args.coordinator_url,
         agent_id=args.agent_id,
         poll_interval=args.poll_interval,
