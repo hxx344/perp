@@ -1568,8 +1568,8 @@
             const text = await response.text();
             throw new Error(text || `HTTP ${response.status}`);
           }
-          const payload = await response.json();
-          grvtPendingRequestId = payload?.request?.request_id ?? null;
+          const responsePayload = await response.json();
+          grvtPendingRequestId = responsePayload?.request?.request_id ?? null;
           if (grvtAdjustStatus) {
             grvtAdjustStatus.textContent = '等待 VPS ACK…';
           }
