@@ -34,6 +34,7 @@ class AdjustmentRequest:
     created_at: float
     created_by: Optional[str]
     target_agents: List[str]
+    target_symbols: List[str] = field(default_factory=list)
     agent_states: Dict[str, AdjustmentAgentState] = field(default_factory=dict)
     expires_at: Optional[float] = None
 
@@ -69,6 +70,8 @@ class AdjustmentRequest:
             "created_by": self.created_by,
             "expires_at": self.expires_at,
             "target_agents": list(self.target_agents),
+            "target_symbols": list(self.target_symbols),
+            "symbols": list(self.target_symbols),
             "overall_status": self.overall_status(),
             "agents": [state.serialize() for state in self.agent_states.values()],
         }
@@ -95,11 +98,13 @@ class GrvtAdjustmentManager:
         action: AdjustmentAction,
         magnitude: float,
         agent_ids: Iterable[str],
+        symbols: Optional[Iterable[str]] = None,
         created_by: Optional[str] = None,
     ) -> Dict[str, Any]:
         agent_list = self._normalize_agent_ids(agent_ids)
         if not agent_list:
             raise ValueError("No valid agent IDs specified for adjustment request")
+        symbol_list = self._normalize_symbols(symbols)
         magnitude = float(magnitude)
         if not (magnitude > 0):
             raise ValueError("Adjustment magnitude must be positive")
@@ -110,6 +115,7 @@ class GrvtAdjustmentManager:
             created_at=time.time(),
             created_by=(created_by or "dashboard"),
             target_agents=agent_list,
+            target_symbols=symbol_list,
             expires_at=time.time() + self._expiry_seconds,
             agent_states={agent: AdjustmentAgentState(agent_id=agent) for agent in agent_list},
         )
@@ -158,6 +164,7 @@ class GrvtAdjustmentManager:
                             "action": request.action,
                             "magnitude": request.magnitude,
                             "created_at": request.created_at,
+                            "symbols": list(request.target_symbols),
                         }
                     )
             return pending
@@ -217,6 +224,25 @@ class GrvtAdjustmentManager:
         except Exception:
             return ""
         return text[:120] if text else ""
+
+    def _normalize_symbols(self, symbols: Optional[Iterable[str]]) -> List[str]:
+        if not symbols:
+            return []
+        normalized: List[str] = []
+        for symbol in symbols:
+            value = self._normalize_symbol(symbol)
+            if value and value not in normalized:
+                normalized.append(value)
+        return normalized
+
+    @staticmethod
+    def _normalize_symbol(symbol: Any) -> str:
+        try:
+            text = str(symbol).strip()
+        except Exception:
+            return ""
+        text = text.upper()
+        return text[:80] if text else ""
 
     def _prune_locked(self, now: float) -> None:
         to_remove: List[str] = []

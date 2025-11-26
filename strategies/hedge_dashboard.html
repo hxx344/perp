@@ -166,6 +166,34 @@
         font-size: 0.95rem;
       }
 
+      .grvt-adjust-controls select {
+        margin-top: 0.35rem;
+        background: #11141d;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        padding: 0.4rem 0.65rem;
+        color: #f5f7fb;
+        font-size: 0.85rem;
+        min-width: 140px;
+      }
+
+      .grvt-adjust-controls select[multiple] {
+        min-height: 6.2rem;
+      }
+
+      .grvt-adjust-controls label.grvt-adjust-symbols {
+        flex: 1;
+        min-width: 200px;
+        max-width: 240px;
+      }
+
+      .grvt-adjust-controls label small {
+        margin-top: 0.3rem;
+        font-size: 0.75rem;
+        color: #6d768f;
+        display: block;
+      }
+
       .grvt-adjust-buttons {
         display: flex;
         gap: 0.75rem;
@@ -813,6 +841,13 @@
               Step size
               <input type="number" id="grvt-adjust-size" min="0.01" step="0.01" value="1" />
             </label>
+            <label for="grvt-adjust-symbols" class="grvt-adjust-symbols">
+              目标币种
+              <select id="grvt-adjust-symbols" multiple size="4">
+                <option value="__ALL__" selected>全部</option>
+              </select>
+              <small>多选=指定币种；留空或选全部=广播所有</small>
+            </label>
             <div class="grvt-adjust-buttons">
               <button type="button" id="grvt-adjust-add">加仓</button>
               <button type="button" class="button-danger" id="grvt-adjust-reduce">减仓</button>
@@ -826,6 +861,7 @@
                   <th>时间</th>
                   <th>动作</th>
                   <th>步长</th>
+                  <th>币种</th>
                   <th>状态</th>
                   <th>节点</th>
                 </tr>
@@ -977,6 +1013,7 @@
   const grvtAccountsEmpty = document.getElementById('grvt-accounts-empty');
   const grvtAdjustPanel = document.getElementById('grvt-adjust-panel');
   const grvtAdjustSizeInput = document.getElementById('grvt-adjust-size');
+  const grvtAdjustSymbolsSelect = document.getElementById('grvt-adjust-symbols');
   const grvtAdjustAddButton = document.getElementById('grvt-adjust-add');
   const grvtAdjustReduceButton = document.getElementById('grvt-adjust-reduce');
   const grvtAdjustStatus = document.getElementById('grvt-adjust-status');
@@ -1047,6 +1084,7 @@
       let lastMetricsSnapshot = null;
   let grvtAdjustLocked = false;
   let grvtPendingRequestId = null;
+  const GRVT_SYMBOL_ALL_VALUE = '__ALL__';
 
       const numberFormatter = new Intl.NumberFormat(undefined, {
         minimumFractionDigits: 2,
@@ -1410,6 +1448,88 @@
         return normalized;
       }
 
+      function normalizeSymbolLabel(value) {
+        if (value === null || value === undefined) {
+          return '';
+        }
+        const text = String(value).trim();
+        if (!text) {
+          return '';
+        }
+        return text.toUpperCase();
+      }
+
+      function describeSymbolScope(symbols) {
+        if (!Array.isArray(symbols)) {
+          return '全部';
+        }
+        const normalized = symbols
+          .map((symbol) => normalizeSymbolLabel(symbol))
+          .filter(Boolean);
+        if (!normalized.length) {
+          return '全部';
+        }
+        return normalized.join(', ');
+      }
+
+      function updateGrvtSymbolOptions(symbols) {
+        if (!grvtAdjustSymbolsSelect) {
+          return;
+        }
+        const normalized = Array.from(
+          new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => normalizeSymbolLabel(symbol)).filter(Boolean))
+        ).sort();
+        const previousSelection = new Set(
+          Array.from(grvtAdjustSymbolsSelect.selectedOptions || [], (option) => option.value)
+        );
+        grvtAdjustSymbolsSelect.innerHTML = '';
+        const allOption = document.createElement('option');
+        allOption.value = GRVT_SYMBOL_ALL_VALUE;
+        allOption.textContent = '全部';
+        allOption.selected = previousSelection.size === 0 || previousSelection.has(GRVT_SYMBOL_ALL_VALUE);
+        grvtAdjustSymbolsSelect.appendChild(allOption);
+        for (const symbol of normalized) {
+          const option = document.createElement('option');
+          option.value = symbol;
+          option.textContent = symbol;
+          if (previousSelection.has(symbol)) {
+            option.selected = true;
+          }
+          grvtAdjustSymbolsSelect.appendChild(option);
+        }
+      }
+
+      function getSelectedGrvtSymbols() {
+        if (!grvtAdjustSymbolsSelect) {
+          return null;
+        }
+        const selected = Array.from(
+          grvtAdjustSymbolsSelect.selectedOptions || [],
+          (option) => option.value
+        );
+        const filtered = selected.filter((value) => value && value !== GRVT_SYMBOL_ALL_VALUE);
+        return filtered.length ? filtered : null;
+      }
+
+      function handleGrvtSymbolSelectionChange() {
+        if (!grvtAdjustSymbolsSelect) {
+          return;
+        }
+        const selected = Array.from(grvtAdjustSymbolsSelect.selectedOptions || [], (option) => option.value);
+        const hasAll = selected.includes(GRVT_SYMBOL_ALL_VALUE);
+        if (hasAll && selected.length > 1) {
+          for (const option of grvtAdjustSymbolsSelect.options) {
+            option.selected = option.value === GRVT_SYMBOL_ALL_VALUE;
+          }
+          return;
+        }
+        if (selected.length === 0) {
+          for (const option of grvtAdjustSymbolsSelect.options) {
+            option.selected = option.value === GRVT_SYMBOL_ALL_VALUE;
+          }
+        }
+      }
+
       function updateGrvtAdjustButtons() {
         const disabled = grvtAdjustLocked;
         [grvtAdjustAddButton, grvtAdjustReduceButton].forEach((button) => {
@@ -1431,11 +1551,17 @@
           grvtAdjustStatus.textContent = `提交${describeAdjustmentAction(action)}请求…`;
         }
 
+        const payload = { action, magnitude };
+        const selectedSymbols = getSelectedGrvtSymbols();
+        if (selectedSymbols) {
+          payload.symbols = selectedSymbols;
+        }
+
         try {
           const response = await fetch('/grvt/adjust', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action, magnitude })
+            body: JSON.stringify(payload)
           });
           redirectIfUnauthorized(response);
           if (!response.ok) {
@@ -1466,6 +1592,7 @@
         let locked = false;
 
         const normalizeStatus = (value) => String(value || '').toLowerCase();
+        const scopeFor = (request) => describeSymbolScope(request?.target_symbols ?? request?.symbols);
 
         if (active && ['pending', 'in_progress'].includes(normalizeStatus(active.overall_status))) {
             locked = true;
@@ -1475,7 +1602,8 @@
             if (grvtAdjustStatus) {
               const total = agents.length || 0;
               const pendingCount = pendingAgents.length;
-              grvtAdjustStatus.textContent = `等待 ${pendingCount}/${total || '-'} 个 VPS ACK`;
+              const scopeText = scopeFor(active);
+              grvtAdjustStatus.textContent = `等待 ${pendingCount}/${total || '-'} 个 VPS ACK（${scopeText}）`;
             }
         } else if (requests.length) {
           const latest = requests[0];
@@ -1486,19 +1614,21 @@
             const agents = Array.isArray(latest.agents) ? latest.agents : [];
             const pendingAgents = agents.filter((agent) => normalizeStatus(agent.status) === 'pending');
             if (grvtAdjustStatus) {
-              grvtAdjustStatus.textContent = `等待 ${pendingAgents.length}/${agents.length || '-'} 个 VPS ACK`;
+              const scopeText = scopeFor(latest);
+              grvtAdjustStatus.textContent = `等待 ${pendingAgents.length}/${agents.length || '-'} 个 VPS ACK（${scopeText}）`;
             }
           } else if (grvtAdjustStatus) {
+            const scopeText = scopeFor(latest);
             if (statusText === 'completed') {
-              grvtAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)} 已完成`;
+              grvtAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)}（${scopeText}）已完成`;
             } else if (statusText === 'failed') {
-              grvtAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)} 部分失败`;
+              grvtAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)}（${scopeText}）部分失败`;
             } else {
-              grvtAdjustStatus.textContent = `最近状态：${statusText}`;
+              grvtAdjustStatus.textContent = `最近状态：${statusText}（${scopeText}）`;
             }
           }
         } else if (grvtAdjustStatus) {
-          grvtAdjustStatus.textContent = '等待指令…';
+          grvtAdjustStatus.textContent = '等待指令…（默认全部币种）';
         }
 
         grvtAdjustLocked = locked;
@@ -1508,7 +1638,7 @@
         updateGrvtAdjustButtons();
 
         if (!requests.length) {
-          grvtAdjustHistoryBody.innerHTML = '<tr><td colspan="5">暂无广播记录</td></tr>';
+          grvtAdjustHistoryBody.innerHTML = '<tr><td colspan="6">暂无广播记录</td></tr>';
           return;
         }
 
@@ -1517,6 +1647,7 @@
           const statusText = request.overall_status || 'pending';
           const createdText = formatTimestamp(request.created_at) ?? '--';
           const agents = Array.isArray(request.agents) ? request.agents : [];
+          const scopeText = scopeFor(request);
           const badges = agents
             .map((agent) => {
               const status = normalizeStatus(agent.status || 'pending');
@@ -1539,6 +1670,7 @@
               <td>${escapeHtml(createdText)}</td>
               <td>${escapeHtml(describeAdjustmentAction(request.action))}</td>
               <td>${escapeHtml(numberFormatter.format(toNumber(request.magnitude ?? 0)))}</td>
+              <td>${escapeHtml(scopeText)}</td>
               <td>${escapeHtml(statusText)}</td>
               <td>${badges || '—'}</td>
             </tr>
@@ -1621,6 +1753,14 @@
 
         const grvtMap = data?.grvt_accounts ?? {};
         const entries = Object.entries(grvtMap);
+        const symbolCandidates = new Set();
+        const instrumentList = Array.isArray(data?.instruments) ? data.instruments : [];
+        for (const instrument of instrumentList) {
+          const symbolText = normalizeSymbolLabel(instrument);
+          if (symbolText) {
+            symbolCandidates.add(symbolText);
+          }
+        }
 
         if (!entries.length) {
           grvtCard.classList.add('hidden');
@@ -1645,6 +1785,7 @@
           if (grvtAccountsEmpty) {
             grvtAccountsEmpty.classList.add('hidden');
           }
+          updateGrvtSymbolOptions(Array.from(symbolCandidates));
           return;
         }
 
@@ -1907,6 +2048,15 @@
           const walletValue = entry.walletValue;
           const riskPercent = Number.isFinite(entry.riskRatio) ? entry.riskRatio * 100 : null;
 
+          if (Array.isArray(account?.positions)) {
+            for (const position of account.positions) {
+              const symbolText = normalizeSymbolLabel(position?.symbol);
+              if (symbolText) {
+                symbolCandidates.add(symbolText);
+              }
+            }
+          }
+
           const card = document.createElement('article');
           card.className = 'grvt-account-card';
           card.innerHTML = `
@@ -1985,6 +2135,8 @@
 
           grvtAccountGrid.appendChild(card);
         }
+
+        updateGrvtSymbolOptions(Array.from(symbolCandidates));
       }
 
       function renderAggregate(data) {
@@ -2722,6 +2874,10 @@
       if (grvtAdjustReduceButton) {
         grvtAdjustReduceButton.addEventListener('click', () => sendGrvtAdjustment('reduce'));
       }
+      if (grvtAdjustSymbolsSelect) {
+        grvtAdjustSymbolsSelect.addEventListener('change', handleGrvtSymbolSelectionChange);
+      }
+      updateGrvtSymbolOptions([]);
       refreshMetrics();
       setInterval(refreshMetrics, 2000);
     </script>

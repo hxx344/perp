@@ -911,6 +911,22 @@ class CoordinatorApp:
         if not agent_ids:
             raise web.HTTPBadRequest(text="No agent IDs available for adjustment; ensure bots are reporting metrics")
 
+        symbols_raw = body.get("symbols")
+        if symbols_raw is None and body.get("symbol"):
+            symbols_raw = [body.get("symbol")]
+
+        if symbols_raw is None:
+            symbols: Optional[List[str]] = None
+        elif isinstance(symbols_raw, list):
+            normalized_symbols: List[str] = []
+            for item in symbols_raw:
+                value = self._normalize_symbol(item)
+                if value and value not in normalized_symbols:
+                    normalized_symbols.append(value)
+            symbols = normalized_symbols
+        else:
+            raise web.HTTPBadRequest(text="symbols must be an array of strings")
+
         created_by = request.remote or "dashboard"
         action = cast(AdjustmentAction, action_raw)
         try:
@@ -918,6 +934,7 @@ class CoordinatorApp:
                 action=action,
                 magnitude=magnitude,
                 agent_ids=agent_ids,
+                symbols=symbols,
                 created_by=created_by,
             )
         except ValueError as exc:
@@ -957,6 +974,15 @@ class CoordinatorApp:
             raise web.HTTPBadRequest(text=str(exc))
 
         return web.json_response({"request": payload})
+
+    @staticmethod
+    def _normalize_symbol(symbol: Any) -> str:
+        try:
+            text = str(symbol).strip()
+        except Exception:
+            return ""
+        text = text.upper()
+        return text[:80] if text else ""
 
     def _credentials_configured(self) -> bool:
         return bool(self._dashboard_username or self._dashboard_password)
