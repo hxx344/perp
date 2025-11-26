@@ -2109,7 +2109,16 @@
             applyRiskTone(riskBadge, entryRiskRatio, 'inline');
           }
 
-          const positions = Array.isArray(account?.positions) ? account.positions.slice(0, MAX_GRVT_POSITIONS) : [];
+          const positions = Array.isArray(account?.positions)
+            ? account.positions
+                .slice()
+                .sort((a, b) => {
+                  const aSymbol = normalizeSymbolLabel(a?.symbol);
+                  const bSymbol = normalizeSymbolLabel(b?.symbol);
+                  return aSymbol.localeCompare(bSymbol, undefined, { sensitivity: 'base' });
+                })
+                .slice(0, MAX_GRVT_POSITIONS)
+            : [];
           if (positions.length) {
             const table = document.createElement('table');
             table.className = 'grvt-positions-table';
