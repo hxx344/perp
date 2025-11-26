@@ -29,14 +29,16 @@ import base64
 import binascii
 import copy
 import logging
+import os
 import signal
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence
+from urllib.parse import quote_plus
 
-from aiohttp import web
+from aiohttp import ClientSession, ClientTimeout, web
 
 BASE_DIR = Path(__file__).resolve().parent
 DASHBOARD_PATH = BASE_DIR / "hedge_dashboard.html"
@@ -45,6 +47,49 @@ LOGGER = logging.getLogger("hedge.coordinator")
 MAX_SPREAD_HISTORY = 600
 MAX_STRATEGY_EVENTS = 400
 MAX_STRATEGY_TRADES = 200
+
+
+class BarkNotifier:
+    def __init__(self, url_template: str, timeout: float = 10.0) -> None:
+        self._template = (url_template or "").strip()
+        self._timeout = max(timeout, 1.0)
+
+    async def send(self, *, title: str, body: str) -> None:
+        if not self._template:
+            LOGGER.warning("Bark notifier missing push URL; skipping alert")
+            return
+
+        safe_title = quote_plus(title or "Alert")
+        safe_body = quote_plus(body or "")
+        if "{title}" in self._template or "{body}" in self._template:
+            endpoint = self._template.replace("{title}", safe_title).replace("{body}", safe_body)
+        else:
+            endpoint = f"{self._template.rstrip('/')}/{safe_title}/{safe_body}"
+
+        timeout = ClientTimeout(total=self._timeout)
+        try:
+            async with ClientSession(timeout=timeout) as session:
+                async with session.get(endpoint) as response:
+                    if response.status >= 400:
+                        body_text = await response.text()
+                        LOGGER.warning(
+                            "Bark push failed (HTTP %s): %s",
+                            response.status,
+                            body_text[:200],
+                        )
+        except Exception as exc:  # pragma: no cover - network path
+            LOGGER.warning("Bark push request failed: %s", exc)
+
+
+@dataclass(frozen=True)
+class RiskAlertInfo:
+    key: str
+    agent_id: str
+    account_label: str
+    ratio: float
+    loss_value: Decimal
+    base_value: Decimal
+    base_label: str
 
 
 @dataclass
@@ -230,7 +275,14 @@ class HedgeState:
 class HedgeCoordinator:
     """aiohttp based coordinator that stores the latest hedging metrics."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        bark_notifier: Optional[BarkNotifier] = None,
+        risk_alert_threshold: Optional[float] = None,
+        risk_alert_reset: Optional[float] = None,
+        risk_alert_cooldown: float = 900.0,
+    ) -> None:
         self._states: Dict[str, HedgeState] = {}
         self._lock = asyncio.Lock()
         self._eviction_seconds = 6 * 3600  # prune entries idle for 6 hours
@@ -238,6 +290,18 @@ class HedgeCoordinator:
         self._last_agent_id: Optional[str] = None
         self._controls: Dict[str, Dict[str, Any]] = {}
         self._default_paused: bool = False
+        self._bark_notifier = bark_notifier
+        self._risk_alert_threshold = risk_alert_threshold if risk_alert_threshold and risk_alert_threshold > 0 else None
+        if self._risk_alert_threshold is not None:
+            if risk_alert_reset is not None and 0 < risk_alert_reset < self._risk_alert_threshold:
+                self._risk_alert_reset = risk_alert_reset
+            else:
+                self._risk_alert_reset = self._risk_alert_threshold * 0.7
+        else:
+            self._risk_alert_reset = None
+        self._risk_alert_cooldown = max(0.0, risk_alert_cooldown)
+        self._risk_alert_active: Dict[str, bool] = {}
+        self._risk_alert_last_ts: Dict[str, float] = {}
 
     @staticmethod
     def _normalize_agent_id(raw: Any) -> str:
@@ -381,6 +445,7 @@ class HedgeCoordinator:
         return snapshot
 
     async def update(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        alerts: Sequence[RiskAlertInfo] = []
         async with self._lock:
             agent_id = self._normalize_agent_id(payload.get("agent_id"))
             state = self._states.get(agent_id)
@@ -389,18 +454,171 @@ class HedgeCoordinator:
                 self._states[agent_id] = state
 
             state.update_from_payload(payload)
+            alerts = self._prepare_risk_alerts(agent_id, state.grvt_accounts)
 
             now = time.time()
             self._prune_stale(now)
             self._last_agent_id = agent_id
             snapshot = self._build_snapshot(now)
-            return snapshot
+
+        if alerts:
+            self._schedule_risk_alerts(alerts)
+        return snapshot
 
     async def snapshot(self) -> Dict[str, Any]:
         async with self._lock:
             now = time.time()
             self._prune_stale(now)
             return self._build_snapshot(now)
+
+    def _prepare_risk_alerts(self, agent_id: str, grvt_payload: Optional[Dict[str, Any]]) -> Sequence[RiskAlertInfo]:
+        if self._bark_notifier is None or self._risk_alert_threshold is None:
+            return []
+        if not isinstance(grvt_payload, dict):
+            return []
+
+        threshold = self._risk_alert_threshold
+        reset_ratio = self._risk_alert_reset if self._risk_alert_reset is not None else threshold * 0.7
+        summary = grvt_payload.get("summary") if isinstance(grvt_payload.get("summary"), dict) else None
+        now = time.time()
+        alerts: List[RiskAlertInfo] = []
+        seen_keys: set[str] = set()
+
+        for entry_key, label, account_payload in self._flatten_grvt_accounts(agent_id, grvt_payload):
+            seen_keys.add(entry_key)
+            total_value = self._decimal_from(account_payload.get("total_pnl"))
+            if total_value is None:
+                total_value = self._decimal_from(account_payload.get("total"))
+            if total_value is None:
+                self._risk_alert_active.pop(entry_key, None)
+                continue
+
+            base_value, base_label = self._select_base_value(account_payload, summary)
+            ratio = self._compute_risk_ratio(total_value, base_value)
+
+            if ratio is None:
+                self._risk_alert_active.pop(entry_key, None)
+                continue
+
+            if ratio >= threshold:
+                already_active = self._risk_alert_active.get(entry_key, False)
+                last_ts = self._risk_alert_last_ts.get(entry_key, 0.0)
+                if not already_active and (now - last_ts) >= self._risk_alert_cooldown:
+                    alerts.append(
+                        RiskAlertInfo(
+                            key=entry_key,
+                            agent_id=agent_id,
+                            account_label=label,
+                            ratio=ratio,
+                            loss_value=abs(total_value),
+                            base_value=base_value if base_value is not None else Decimal("0"),
+                            base_label=base_label or "wallet",
+                        )
+                    )
+                    self._risk_alert_active[entry_key] = True
+                    self._risk_alert_last_ts[entry_key] = now
+                elif already_active:
+                    # keep active flag but no new alert
+                    pass
+            else:
+                if ratio < reset_ratio:
+                    self._risk_alert_active.pop(entry_key, None)
+
+        stale_keys = [key for key in self._risk_alert_active if key not in seen_keys]
+        for key in stale_keys:
+            self._risk_alert_active.pop(key, None)
+            self._risk_alert_last_ts.pop(key, None)
+
+        return alerts
+
+    def _flatten_grvt_accounts(
+        self, agent_id: str, payload: Dict[str, Any]
+    ) -> List[tuple[str, str, Dict[str, Any]]]:
+        entries: List[tuple[str, str, Dict[str, Any]]] = []
+        accounts = payload.get("accounts")
+        if isinstance(accounts, list) and accounts:
+            for idx, account in enumerate(accounts):
+                if not isinstance(account, dict):
+                    continue
+                label_raw = account.get("name")
+                try:
+                    label = str(label_raw).strip()
+                except Exception:
+                    label = ""
+                if not label:
+                    label = f"Account {idx + 1}"
+                entries.append((f"{agent_id}:{label}", label, account))
+        else:
+            summary = payload.get("summary")
+            if isinstance(summary, dict):
+                entries.append((f"{agent_id}:summary", "Summary", summary))
+        return entries
+
+    @staticmethod
+    def _select_base_value(
+        primary: Dict[str, Any], fallback: Optional[Dict[str, Any]] = None
+    ) -> tuple[Optional[Decimal], str]:
+        for source in (primary, fallback or {}):
+            if not isinstance(source, dict):
+                continue
+            for field in ("equity", "available_equity", "balance", "available_balance"):
+                value = HedgeCoordinator._decimal_from(source.get(field))
+                if value is not None and value > 0:
+                    label = "equity" if field in {"equity", "available_equity"} else "wallet"
+                    return value, label
+        return None, ""
+
+    @staticmethod
+    def _compute_risk_ratio(total_value: Decimal, base_value: Optional[Decimal]) -> Optional[float]:
+        if total_value is None or total_value >= 0:
+            return None
+        if base_value is None or base_value <= 0:
+            return None
+        try:
+            ratio = (-total_value) / base_value
+            if ratio <= 0:
+                return None
+            return float(ratio)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _decimal_from(value: Any) -> Optional[Decimal]:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_decimal(value: Decimal) -> str:
+        try:
+            return format(value, ",.2f")
+        except Exception:
+            return str(value)
+
+    def _schedule_risk_alerts(self, alerts: Sequence[RiskAlertInfo]) -> None:
+        if not alerts or self._bark_notifier is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            LOGGER.warning("Unable to schedule Bark alert; event loop not running")
+            return
+        for alert in alerts:
+            loop.create_task(self._send_risk_alert(alert))
+
+    async def _send_risk_alert(self, alert: RiskAlertInfo) -> None:
+        if self._bark_notifier is None:
+            return
+        title = f"GRVT Risk {alert.ratio * 100:.1f}%"
+        base_label = alert.base_label or "wallet"
+        body = (
+            f"{alert.account_label} ({alert.agent_id}) loss {self._format_decimal(alert.loss_value)} "
+            f"/ {base_label} {self._format_decimal(alert.base_value)}"
+        )
+        await self._bark_notifier.send(title=title, body=body)
 
 
 class CoordinatorApp:
@@ -409,8 +627,17 @@ class CoordinatorApp:
         *,
         dashboard_username: Optional[str] = None,
         dashboard_password: Optional[str] = None,
+        bark_notifier: Optional[BarkNotifier] = None,
+        risk_alert_threshold: Optional[float] = None,
+        risk_alert_reset: Optional[float] = None,
+        risk_alert_cooldown: float = 900.0,
     ) -> None:
-        self._coordinator = HedgeCoordinator()
+        self._coordinator = HedgeCoordinator(
+            bark_notifier=bark_notifier,
+            risk_alert_threshold=risk_alert_threshold,
+            risk_alert_reset=risk_alert_reset,
+            risk_alert_cooldown=risk_alert_cooldown,
+        )
         self._dashboard_username = (dashboard_username or "").strip()
         self._dashboard_password = (dashboard_password or "").strip()
         self._app = web.Application()
@@ -433,7 +660,7 @@ class CoordinatorApp:
         self._enforce_dashboard_auth(request)
         raise web.HTTPFound("/dashboard")
 
-    async def handle_dashboard(self, request: web.Request) -> web.Response:
+    async def handle_dashboard(self, request: web.Request) -> web.StreamResponse:
         self._enforce_dashboard_auth(request)
         if not DASHBOARD_PATH.exists():
             raise web.HTTPNotFound(text="dashboard asset missing; ensure hedge_dashboard.html exists")
@@ -540,9 +767,32 @@ class CoordinatorApp:
 async def _run_app(args: argparse.Namespace) -> None:
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
+    risk_threshold = args.risk_alert_threshold if args.risk_alert_threshold and args.risk_alert_threshold > 0 else None
+    risk_reset = None
+    if risk_threshold and args.risk_alert_reset and args.risk_alert_reset > 0:
+        risk_reset = min(args.risk_alert_reset, risk_threshold)
+    bark_notifier: Optional[BarkNotifier] = None
+    bark_url = (args.bark_url or "").strip()
+    if bark_url:
+        bark_notifier = BarkNotifier(bark_url, timeout=max(args.bark_timeout, 1.0))
+        if risk_threshold:
+            LOGGER.info(
+                "Bark notifications enabled; risk alerts fire at %.1f%%",
+                risk_threshold * 100,
+            )
+    elif risk_threshold:
+        LOGGER.warning(
+            "Risk alert threshold %.1f%% configured without --bark-url; alerts disabled.",
+            risk_threshold * 100,
+        )
+
     coordinator_app = CoordinatorApp(
         dashboard_username=args.dashboard_username,
         dashboard_password=args.dashboard_password,
+        bark_notifier=bark_notifier,
+        risk_alert_threshold=risk_threshold,
+        risk_alert_reset=risk_reset,
+        risk_alert_cooldown=max(args.risk_alert_cooldown, 0.0),
     )
 
     if (args.dashboard_username or "") or (args.dashboard_password or ""):
@@ -571,6 +821,15 @@ async def _run_app(args: argparse.Namespace) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
+    def _env_float(name: str, default: float) -> float:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+
     parser = argparse.ArgumentParser(description="Run the hedging metrics coordinator")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address for the HTTP server")
     parser.add_argument("--port", type=int, default=8899, help="Port for the HTTP server")
@@ -586,6 +845,35 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dashboard-password",
         help="Optional password required to access the dashboard (enables HTTP Basic auth)",
+    )
+    parser.add_argument(
+        "--risk-alert-threshold",
+        type=float,
+        default=_env_float("RISK_ALERT_THRESHOLD", 0.30),
+        help="Risk ratio trigger (e.g. 0.3 == 30%%). Set <= 0 to disable alerts.",
+    )
+    parser.add_argument(
+        "--risk-alert-reset",
+        type=float,
+        default=_env_float("RISK_ALERT_RESET", 0.20),
+        help="Ratio below which alerts reset (defaults to ~70%% of threshold).",
+    )
+    parser.add_argument(
+        "--risk-alert-cooldown",
+        type=float,
+        default=_env_float("RISK_ALERT_COOLDOWN", 900.0),
+        help="Seconds to wait before re-alerting the same account.",
+    )
+    parser.add_argument(
+        "--bark-url",
+        default=os.getenv("BARK_URL"),
+        help="Full Bark push URL or template (supports {title} and {body} placeholders).",
+    )
+    parser.add_argument(
+        "--bark-timeout",
+        type=float,
+        default=_env_float("BARK_TIMEOUT", 10.0),
+        help="HTTP timeout in seconds for Bark push requests.",
     )
     return parser.parse_args()
 
