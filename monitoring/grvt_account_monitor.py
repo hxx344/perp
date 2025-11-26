@@ -224,7 +224,7 @@ def determine_signed_size(size: Optional[Decimal], side: Optional[str]) -> Optio
     return size
 
 
-def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]]:
+def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any], Optional[Decimal]]:
     size_candidates = [
         ("contracts",),
         ("size",),
@@ -290,7 +290,7 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
         "mark_price": decimal_to_str(mark_price),
         "pnl": decimal_to_str(pnl_value),
     }
-    return pnl_value, payload
+    return pnl_value, payload, signed_size
 
 
 def load_single_account(*, label: str) -> AccountCredentials:
@@ -374,6 +374,7 @@ class GrvtAccountMonitor:
         ) or None
         self._symbol_aliases: Dict[str, str] = {}
         self._processed_adjustments: Dict[str, Dict[str, Any]] = {}
+        self._latest_positions: Dict[str, Decimal] = {}
         self._control_endpoint = f"{self._coordinator_url}/control"
         self._update_endpoint = f"{self._coordinator_url}/update"
         self._ack_endpoint = f"{self._coordinator_url}/grvt/adjust/ack"
@@ -393,7 +394,7 @@ class GrvtAccountMonitor:
         position_rows: List[Dict[str, Any]] = []
 
         for raw_position in positions:
-            pnl_value, position_payload = compute_position_pnl(raw_position)
+            pnl_value, position_payload, signed_size = compute_position_pnl(raw_position)
             account_total += pnl_value
             base = base_asset(position_payload.get("symbol", ""))
             if base == "ETH":
@@ -401,7 +402,7 @@ class GrvtAccountMonitor:
             elif base == "BTC":
                 account_btc += pnl_value
             position_rows.append(position_payload)
-            self._register_symbol_hint(position_payload.get("symbol"))
+            self._record_position(position_payload.get("symbol"), signed_size)
 
         position_rows = position_rows[: self._max_positions]
 
@@ -492,6 +493,44 @@ class GrvtAccountMonitor:
         for token in ("/", "-", ":", "_", " "):
             text = text.replace(token, "")
         return text
+
+    def _record_position(self, symbol: Optional[str], signed_size: Optional[Decimal]) -> None:
+        if symbol is None or signed_size is None:
+            return
+        normalized = self._normalize_symbol_label(symbol)
+        if not normalized:
+            return
+        self._register_symbol_hint(symbol)
+        self._latest_positions[normalized] = signed_size
+
+    def _update_cached_position(self, symbol: Optional[str], signed_size: Decimal) -> None:
+        if symbol is None:
+            return
+        normalized = self._normalize_symbol_label(symbol)
+        if not normalized:
+            return
+        self._register_symbol_hint(symbol)
+        self._latest_positions[normalized] = signed_size
+
+    def _lookup_net_position(self, symbol: str) -> Optional[Decimal]:
+        normalized = self._normalize_symbol_label(symbol)
+        if normalized and normalized in self._latest_positions:
+            return self._latest_positions.get(normalized)
+        self._refresh_position_cache()
+        if normalized and normalized in self._latest_positions:
+            return self._latest_positions.get(normalized)
+        return None
+
+    def _refresh_position_cache(self) -> None:
+        try:
+            raw_positions = self._session.client.fetch_positions() or []
+        except Exception as exc:
+            LOGGER.warning("Failed to refresh GRVT positions for %s: %s", self._session.label, exc)
+            return
+        self._latest_positions = {}
+        for entry in raw_positions:
+            _, payload, signed_size = compute_position_pnl(entry)
+            self._record_position(payload.get("symbol"), signed_size)
 
     def _register_symbol_hint(self, symbol: Optional[str]) -> None:
         if not symbol:
@@ -599,9 +638,31 @@ class GrvtAccountMonitor:
         symbol = self._resolve_symbol(target_symbols)
         if not symbol:
             raise ValueError("Unable to resolve symbol for adjustment request")
-        self._register_symbol_hint(symbol)
-        side = "buy" if action == "add" else "sell"
-        order = self._place_market_order(symbol, side, magnitude)
+        net_size = self._lookup_net_position(symbol)
+        if net_size is None:
+            net_size = Decimal("0")
+        if net_size == 0:
+            raise ValueError("Current position is flat; cannot determine direction for adjustment")
+
+        trade_quantity = magnitude
+        note_suffix: Optional[str] = None
+        if action == "add":
+            side = "buy" if net_size > 0 else "sell"
+        else:  # reduce
+            max_reducible = abs(net_size)
+            if max_reducible == 0:
+                raise ValueError("No exposure available to reduce")
+            if magnitude > max_reducible:
+                trade_quantity = max_reducible
+                note_suffix = (
+                    f"requested {decimal_to_str(magnitude) or magnitude} exceeded exposure; "
+                    f"clamped to {decimal_to_str(trade_quantity) or trade_quantity}"
+                )
+            side = "sell" if net_size > 0 else "buy"
+            if trade_quantity <= 0:
+                raise ValueError("Reduce request resolved to zero size")
+
+        order = self._place_market_order(symbol, side, trade_quantity)
         order_id = None
         if isinstance(order, dict):
             for key in ("id", "order_id", "client_order_id", "clientOrderId"):
@@ -609,9 +670,17 @@ class GrvtAccountMonitor:
                 if value:
                     order_id = str(value)
                     break
-        note_core = f"{side.upper()} {decimal_to_str(magnitude) or magnitude} {symbol}"
+        delta = trade_quantity if side == "buy" else -trade_quantity
+        new_net = net_size + delta
+        self._update_cached_position(symbol, new_net)
+        note_core = (
+            f"{side.upper()} {decimal_to_str(trade_quantity) or trade_quantity} {symbol} "
+            f"(net {decimal_to_str(net_size) or net_size} -> {decimal_to_str(new_net) or new_net})"
+        )
         if order_id:
             note_core = f"{note_core} (order {order_id})"
+        if note_suffix:
+            note_core = f"{note_core}; {note_suffix}"
         LOGGER.info("Executed GRVT adjustment via monitor: %s", note_core)
         return "acknowledged", note_core
 
