@@ -588,11 +588,37 @@
       .hidden {
         display: none !important;
       }
+
+      .dashboard-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 1.5rem;
+        flex-wrap: wrap;
+      }
+
+      .logout-button {
+        min-width: 140px;
+        font-weight: 600;
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+      }
+
+      .logout-button:hover {
+        background: rgba(255, 255, 255, 0.15);
+      }
     </style>
   </head>
   <body>
-    <h1>Hedging Cycle Overview</h1>
-    <p class="subtitle">Live metrics reported by the Aster–Lighter hedging executor.</p>
+    <div class="dashboard-top">
+      <div>
+        <h1>Hedging Cycle Overview</h1>
+        <p class="subtitle">Live metrics reported by the Aster–Lighter hedging executor.</p>
+      </div>
+      <form id="logout-form" method="post" action="/logout">
+        <button type="submit" class="logout-button">退出登录</button>
+      </form>
+    </div>
 
     <section class="grid">
       <article class="card">
@@ -1757,6 +1783,12 @@
         resumeAllButton.classList.toggle('button-ghost', !lastDefaultPaused);
       }
 
+      function redirectIfUnauthorized(response) {
+        if (response && response.status === 401) {
+          window.location.href = '/login';
+        }
+      }
+
       async function sendControl(agentId, action, button) {
         if (!agentId || !action) {
           return;
@@ -1774,6 +1806,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ agent_id: agentId, action })
           });
+          redirectIfUnauthorized(response);
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
@@ -1810,6 +1843,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ scope: 'all', action })
           });
+          redirectIfUnauthorized(response);
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }
@@ -2333,6 +2367,7 @@
       async function refreshMetrics() {
         try {
           const response = await fetch('/metrics', { cache: 'no-store' });
+          redirectIfUnauthorized(response);
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
           }

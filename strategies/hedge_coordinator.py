@@ -30,6 +30,7 @@ import binascii
 import copy
 import logging
 import os
+import secrets
 import signal
 import time
 from dataclasses import dataclass, field
@@ -42,6 +43,103 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 BASE_DIR = Path(__file__).resolve().parent
 DASHBOARD_PATH = BASE_DIR / "hedge_dashboard.html"
+LOGIN_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"zh-CN\">
+    <head>
+        <meta charset=\"utf-8\" />
+        <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+        <title>Hedge Dashboard Login</title>
+        <style>
+            :root {
+                color-scheme: dark;
+                font-family: \"Segoe UI\", system-ui, -apple-system, sans-serif;
+                background: #0b0d13;
+                color: #f2f4f8;
+            }
+            body {
+                margin: 0;
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 2rem;
+            }
+            form {
+                background: #161a22;
+                border-radius: 16px;
+                padding: 2rem;
+                width: min(400px, 100%);
+                box-shadow: 0 25px 45px rgba(0,0,0,.45);
+            }
+            h1 {
+                margin: 0 0 1.5rem;
+                font-size: 1.5rem;
+                text-align: center;
+                letter-spacing: .05em;
+            }
+            label {
+                display: block;
+                margin-bottom: .5rem;
+                color: #9ca5bd;
+                font-size: .85rem;
+                letter-spacing: .05em;
+            }
+            input {
+                width: 100%;
+                padding: .8rem 1rem;
+                border-radius: 10px;
+                border: 1px solid rgba(255,255,255,.08);
+                background: rgba(255,255,255,.05);
+                color: inherit;
+                margin-bottom: 1.25rem;
+                font-size: 1rem;
+            }
+            button {
+                width: 100%;
+                padding: .85rem 1rem;
+                border-radius: 10px;
+                border: none;
+                font-weight: 600;
+                font-size: 1rem;
+                cursor: pointer;
+                background: linear-gradient(120deg,#4f9cff,#7c4dff);
+                color: #fff;
+                transition: opacity .2s ease;
+            }
+            button:hover {
+                opacity: .9;
+            }
+            .error {
+                margin: 0 0 1.25rem;
+                padding: .75rem 1rem;
+                border-radius: 10px;
+                background: rgba(255,87,126,.15);
+                color: #ffb4c4;
+                font-size: .9rem;
+                text-align: center;
+            }
+            .hint {
+                margin-top: 1rem;
+                font-size: .8rem;
+                color: #8a94a6;
+                text-align: center;
+            }
+        </style>
+    </head>
+    <body>
+        <form method=\"post\" action=\"/login\">
+            <h1>Dashboard 登录</h1>
+            {error_block}
+            <label for=\"username\">用户名</label>
+            <input id=\"username\" name=\"username\" autocomplete=\"username\" required />
+            <label for=\"password\">密码</label>
+            <input id=\"password\" type=\"password\" name=\"password\" autocomplete=\"current-password\" required />
+            <button type=\"submit\">登录</button>
+            <p class=\"hint\">如需关闭认证，可省略 --dashboard-username/--dashboard-password</p>
+        </form>
+    </body>
+</html>
+"""
 
 LOGGER = logging.getLogger("hedge.coordinator")
 MAX_SPREAD_HISTORY = 600
@@ -635,6 +733,7 @@ class CoordinatorApp:
         *,
         dashboard_username: Optional[str] = None,
         dashboard_password: Optional[str] = None,
+        dashboard_session_ttl: float = 12 * 3600,
         bark_notifier: Optional[BarkNotifier] = None,
         risk_alert_threshold: Optional[float] = None,
         risk_alert_reset: Optional[float] = None,
@@ -648,10 +747,16 @@ class CoordinatorApp:
         )
         self._dashboard_username = (dashboard_username or "").strip()
         self._dashboard_password = (dashboard_password or "").strip()
+        self._session_cookie: str = "hedge_session"
+        self._session_ttl: float = max(float(dashboard_session_ttl), 300.0)
+        self._sessions: Dict[str, float] = {}
         self._app = web.Application()
         self._app.add_routes(
             [
                 web.get("/", self.handle_dashboard_redirect),
+                web.get("/login", self.handle_login_form),
+                web.post("/login", self.handle_login_submit),
+                web.post("/logout", self.handle_logout),
                 web.get("/dashboard", self.handle_dashboard),
                 web.get("/metrics", self.handle_metrics),
                 web.post("/update", self.handle_update),
@@ -665,11 +770,11 @@ class CoordinatorApp:
         return self._app
 
     async def handle_dashboard_redirect(self, request: web.Request) -> web.Response:
-        self._enforce_dashboard_auth(request)
+        self._enforce_dashboard_auth(request, redirect_on_fail=True)
         raise web.HTTPFound("/dashboard")
 
     async def handle_dashboard(self, request: web.Request) -> web.StreamResponse:
-        self._enforce_dashboard_auth(request)
+        self._enforce_dashboard_auth(request, redirect_on_fail=True)
         if not DASHBOARD_PATH.exists():
             raise web.HTTPNotFound(text="dashboard asset missing; ensure hedge_dashboard.html exists")
         return web.FileResponse(path=DASHBOARD_PATH)
@@ -750,26 +855,110 @@ class CoordinatorApp:
 
         return web.json_response(snapshot)
 
-    def _enforce_dashboard_auth(self, request: web.Request) -> None:
-        username = self._dashboard_username
-        password = self._dashboard_password
+    def _credentials_configured(self) -> bool:
+        return bool(self._dashboard_username or self._dashboard_password)
 
-        if not username and not password:
-            return
+    def _validate_password(self, username: str, password: str) -> bool:
+        expected_username = self._dashboard_username
+        expected_password = self._dashboard_password
+        if not self._credentials_configured():
+            return True
+        if expected_username and username != expected_username:
+            return False
+        if expected_password and password != expected_password:
+            return False
+        return True
 
+    def _validate_basic_header(self, request: web.Request) -> bool:
         header = request.headers.get("Authorization", "")
         if not header.startswith("Basic "):
-            raise web.HTTPUnauthorized(headers={"WWW-Authenticate": 'Basic realm="Hedge Dashboard"'})
-
+            return False
         token = header[6:]
         try:
             decoded = base64.b64decode(token).decode("utf-8")
         except (binascii.Error, UnicodeDecodeError):
-            raise web.HTTPUnauthorized(headers={"WWW-Authenticate": 'Basic realm="Hedge Dashboard"'})
-
+            return False
         provided_username, _, provided_password = decoded.partition(":")
-        if username != provided_username or password != provided_password:
-            raise web.HTTPUnauthorized(headers={"WWW-Authenticate": 'Basic realm="Hedge Dashboard"'})
+        return self._validate_password(provided_username, provided_password)
+
+    def _validate_session(self, request: web.Request) -> bool:
+        token = request.cookies.get(self._session_cookie)
+        if not token:
+            return False
+        expires_at = self._sessions.get(token)
+        if not expires_at:
+            return False
+        now = time.time()
+        if expires_at < now:
+            self._sessions.pop(token, None)
+            return False
+        self._sessions[token] = now + self._session_ttl
+        return True
+
+    def _issue_session(self) -> str:
+        token = secrets.token_urlsafe(32)
+        self._sessions[token] = time.time() + self._session_ttl
+        return token
+
+    def _invalidate_session(self, token: Optional[str]) -> None:
+        if token:
+            self._sessions.pop(token, None)
+
+    def _enforce_dashboard_auth(self, request: web.Request, *, redirect_on_fail: bool = False) -> None:
+        if not self._credentials_configured():
+            return
+        if self._validate_session(request):
+            return
+        if self._validate_basic_header(request):
+            return
+        if redirect_on_fail and request.method == "GET":
+            raise web.HTTPFound("/login")
+        raise web.HTTPUnauthorized(headers={"WWW-Authenticate": 'Basic realm="Hedge Dashboard"'})
+
+    def _render_login_page(self, error: bool = False) -> web.Response:
+        error_block = ""
+        if error:
+            error_block = '<div class="error">用户名或密码不正确</div>'
+        html = LOGIN_TEMPLATE.format(error_block=error_block)
+        return web.Response(text=html, content_type="text/html")
+
+    async def handle_login_form(self, request: web.Request) -> web.Response:
+        if not self._credentials_configured():
+            raise web.HTTPFound("/dashboard")
+        if self._validate_session(request):
+            raise web.HTTPFound("/dashboard")
+        error = request.rel_url.query.get("error") == "1"
+        return self._render_login_page(error)
+
+    async def handle_login_submit(self, request: web.Request) -> web.Response:
+        if not self._credentials_configured():
+            raise web.HTTPFound("/dashboard")
+        data = await request.post()
+        username = (data.get("username") or "").strip()
+        password = (data.get("password") or "").strip()
+        if not self._validate_password(username, password):
+            raise web.HTTPFound("/login?error=1")
+        token = self._issue_session()
+        response = web.HTTPFound("/dashboard")
+        response.set_cookie(
+            self._session_cookie,
+            token,
+            max_age=int(self._session_ttl),
+            httponly=True,
+            secure=False,
+            samesite="Lax",
+        )
+        return response
+
+    async def handle_logout(self, request: web.Request) -> web.Response:
+        if not self._credentials_configured():
+            raise web.HTTPFound("/dashboard")
+        self._enforce_dashboard_auth(request)
+        token = request.cookies.get(self._session_cookie)
+        self._invalidate_session(token)
+        response = web.HTTPFound("/login")
+        response.del_cookie(self._session_cookie)
+        return response
 
 
 async def _run_app(args: argparse.Namespace) -> None:
@@ -803,6 +992,7 @@ async def _run_app(args: argparse.Namespace) -> None:
     coordinator_app = CoordinatorApp(
         dashboard_username=args.dashboard_username,
         dashboard_password=args.dashboard_password,
+        dashboard_session_ttl=args.dashboard_session_ttl,
         bark_notifier=bark_notifier,
         risk_alert_threshold=risk_threshold,
         risk_alert_reset=risk_reset,
@@ -870,6 +1060,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dashboard-password",
         help="Optional password required to access the dashboard (enables HTTP Basic auth)",
+    )
+    parser.add_argument(
+        "--dashboard-session-ttl",
+        type=float,
+        default=_env_float("DASHBOARD_SESSION_TTL", 12 * 3600),
+        help="Seconds that a dashboard login session remains valid (default 12h).",
     )
     parser.add_argument(
         "--risk-alert-threshold",

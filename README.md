@@ -334,6 +334,13 @@ python strategies/hedge_coordinator.py --host 0.0.0.0 --port 8899
 随后运行对冲脚本时带上 `--coordinator-url http://<host>:8899`，即可在浏览器访问 `/dashboard`
 查看当前 Lighter 仓位、累计循环次数、累计收益以及累计成交量等指标。
 
+**面板登录保护**：
+
+- 启动协调机时加入 `--dashboard-username admin --dashboard-password secret` 即可开启账号密码登录，浏览器会先跳转到 `/login` 表单。
+- 登录成功后会发放 12 小时有效的会话 Cookie（可用 `--dashboard-session-ttl 7200` 调整为 2 小时等）。
+- CLI 工具或脚本也可继续使用 HTTP Basic 头部访问受保护接口（与旧版本兼容）。
+- 退出登录可点击页面中的退出按钮（若需自定义可直接 POST `/logout`）。
+
 ## GRVT-Lighter 对冲循环
 
 如果想实现与 Aster 类似的流程，但将 Maker 端替换为 GRVT，可使用 `strategies/grvt_lighter_cycle.py`：
