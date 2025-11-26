@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
+from requests.auth import HTTPBasicAuth
+from requests.exceptions import RequestException
 
 getcontext().prec = 28
 
@@ -348,6 +350,9 @@ class GrvtAccountMonitor:
         poll_interval: float,
         request_timeout: float,
         max_positions: int,
+        coordinator_username: Optional[str] = None,
+        coordinator_password: Optional[str] = None,
+        default_symbol: Optional[str] = None,
     ) -> None:
         self._session = session
         self._coordinator_url = coordinator_url.rstrip("/")
@@ -356,6 +361,23 @@ class GrvtAccountMonitor:
         self._timeout = max(request_timeout, 1.0)
         self._max_positions = max(1, max_positions)
         self._http = requests.Session()
+        username = (coordinator_username or "").strip()
+        password = (coordinator_password or "").strip()
+        self._auth: Optional[HTTPBasicAuth] = None
+        if username or password:
+            self._auth = HTTPBasicAuth(username, password)
+            self._http.auth = self._auth
+        self._default_symbol = (
+            (default_symbol or "").strip()
+            or os.getenv("GRVT_DEFAULT_SYMBOL", "").strip()
+            or os.getenv("GRVT_INSTRUMENT", "").strip()
+        ) or None
+        self._symbol_aliases: Dict[str, str] = {}
+        self._processed_adjustments: Dict[str, Dict[str, Any]] = {}
+        self._control_endpoint = f"{self._coordinator_url}/control"
+        self._update_endpoint = f"{self._coordinator_url}/update"
+        self._ack_endpoint = f"{self._coordinator_url}/grvt/adjust/ack"
+        self._register_symbol_hint(self._default_symbol)
 
     def _collect(self) -> Optional[Dict[str, Any]]:
         timestamp = time.time()
@@ -379,6 +401,7 @@ class GrvtAccountMonitor:
             elif base == "BTC":
                 account_btc += pnl_value
             position_rows.append(position_payload)
+            self._register_symbol_hint(position_payload.get("symbol"))
 
         position_rows = position_rows[: self._max_positions]
 
@@ -458,9 +481,236 @@ class GrvtAccountMonitor:
         }
         return payload
 
+    @staticmethod
+    def _normalize_symbol_label(value: Optional[str]) -> str:
+        if value is None:
+            return ""
+        try:
+            text = str(value).strip().upper()
+        except Exception:
+            return ""
+        for token in ("/", "-", ":", "_", " "):
+            text = text.replace(token, "")
+        return text
+
+    def _register_symbol_hint(self, symbol: Optional[str]) -> None:
+        if not symbol:
+            return
+        normalized = self._normalize_symbol_label(symbol)
+        if not normalized:
+            return
+        if normalized not in self._symbol_aliases:
+            self._symbol_aliases[normalized] = symbol
+
+    def _resolve_symbol(self, requested_symbols: Optional[Iterable[str]]) -> Optional[str]:
+        resolved: Optional[str] = None
+        normalized_targets: List[str] = []
+        saw_all = False
+        symbols_iter: Iterable[str]
+        if isinstance(requested_symbols, str):
+            symbols_iter = [requested_symbols]
+        else:
+            symbols_iter = requested_symbols or []
+        for candidate in symbols_iter:
+                normalized = self._normalize_symbol_label(candidate)
+                if not normalized:
+                    continue
+                if normalized in {"ALL", "__ALL__"}:
+                    saw_all = True
+                normalized_targets.append(normalized)
+        for normalized in normalized_targets:
+            hint = self._symbol_aliases.get(normalized)
+            if hint:
+                resolved = hint
+                break
+        if resolved:
+            return resolved
+        if saw_all and self._default_symbol:
+            return self._default_symbol
+        if normalized_targets and not resolved:
+            # Fallback to default if provided but no direct match
+            if self._default_symbol:
+                return self._default_symbol
+        if not resolved and self._symbol_aliases:
+            return next(iter(self._symbol_aliases.values()))
+        return self._default_symbol
+
+    def _fetch_agent_control(self) -> Optional[Dict[str, Any]]:
+        try:
+            response = self._http.get(
+                self._control_endpoint,
+                params={"agent_id": self._agent_id},
+                timeout=self._timeout,
+                auth=self._auth,
+            )
+        except RequestException as exc:
+            raise RuntimeError(f"Failed to query coordinator control endpoint: {exc}") from exc
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Coordinator control query failed: HTTP {response.status_code} {response.text}"
+            )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            snippet = response.text[:200]
+            raise RuntimeError(f"Coordinator control response not JSON: {snippet}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"Unexpected control payload type: {type(payload).__name__}"
+            )
+        return payload
+
+    def _place_market_order(self, symbol: str, side: str, quantity: Decimal) -> Any:
+        client = self._session.client
+        side = side.lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError(f"Unsupported order side '{side}'")
+        amount_value = float(quantity)
+        errors: List[str] = []
+        try:
+            return client.create_order(symbol, "market", side, amount_value)
+        except AttributeError:
+            errors.append("create_order unavailable")
+        except Exception as exc:
+            errors.append(f"create_order failed: {exc}")
+        try:
+            return client.create_market_order(symbol, side, amount_value)
+        except AttributeError:
+            errors.append("create_market_order unavailable")
+        except Exception as exc:
+            errors.append(f"create_market_order failed: {exc}")
+        method_name = f"create_market_{side}_order"
+        method = getattr(client, method_name, None)
+        if method is not None:
+            try:
+                return method(symbol, amount_value)
+            except Exception as exc:
+                errors.append(f"{method_name} failed: {exc}")
+        raise RuntimeError("; ".join(errors) or "No supported order placement method available")
+
+    def _execute_adjustment(self, entry: Dict[str, Any]) -> Tuple[str, str]:
+        action = str(entry.get("action", "")).strip().lower()
+        if action not in {"add", "reduce"}:
+            raise ValueError(f"Unsupported adjustment action '{action}'")
+        magnitude = decimal_from(entry.get("magnitude"))
+        if magnitude is None or magnitude <= 0:
+            raise ValueError(f"Invalid adjustment magnitude '{entry.get('magnitude')}'")
+        target_symbols = entry.get("symbols") or entry.get("target_symbols")
+        symbol = self._resolve_symbol(target_symbols)
+        if not symbol:
+            raise ValueError("Unable to resolve symbol for adjustment request")
+        self._register_symbol_hint(symbol)
+        side = "buy" if action == "add" else "sell"
+        order = self._place_market_order(symbol, side, magnitude)
+        order_id = None
+        if isinstance(order, dict):
+            for key in ("id", "order_id", "client_order_id", "clientOrderId"):
+                value = order.get(key)
+                if value:
+                    order_id = str(value)
+                    break
+        note_core = f"{side.upper()} {decimal_to_str(magnitude) or magnitude} {symbol}"
+        if order_id:
+            note_core = f"{note_core} (order {order_id})"
+        LOGGER.info("Executed GRVT adjustment via monitor: %s", note_core)
+        return "acknowledged", note_core
+
+    def _acknowledge_adjustment(self, request_id: str, status: str, note: Optional[str]) -> bool:
+        payload = {
+            "request_id": request_id,
+            "agent_id": self._agent_id,
+            "status": status,
+        }
+        if note is not None:
+            payload["note"] = note
+        try:
+            response = self._http.post(
+                self._ack_endpoint,
+                json=payload,
+                timeout=self._timeout,
+                auth=self._auth,
+            )
+        except RequestException as exc:
+            LOGGER.warning("Adjustment ACK request failed for %s: %s", request_id, exc)
+            return False
+        if response.status_code >= 400:
+            LOGGER.warning(
+                "Coordinator rejected ACK for %s: HTTP %s %s",
+                request_id,
+                response.status_code,
+                response.text,
+            )
+            return False
+        return True
+
+    def _process_adjustments(self) -> None:
+        try:
+            snapshot = self._fetch_agent_control()
+        except Exception as exc:
+            LOGGER.debug("Skipping adjustment processing; control fetch failed: %s", exc)
+            return
+        if not snapshot:
+            return
+        agent_block = snapshot.get("agent")
+        if not isinstance(agent_block, dict):
+            return
+        pending = agent_block.get("pending_adjustments")
+        if not isinstance(pending, list) or not pending:
+            self._prune_processed_adjustments()
+            return
+        for entry in pending:
+            if not isinstance(entry, dict):
+                continue
+            request_id = entry.get("request_id")
+            if not request_id:
+                continue
+            cache = self._processed_adjustments.get(request_id)
+            if cache:
+                if not cache.get("acked"):
+                    acked = self._acknowledge_adjustment(
+                        request_id,
+                        cache.get("status", "acknowledged"),
+                        cache.get("note"),
+                    )
+                    if acked:
+                        cache["acked"] = True
+                        cache["timestamp"] = time.time()
+                continue
+            status = "failed"
+            note: Optional[str] = None
+            try:
+                status, note = self._execute_adjustment(entry)
+            except Exception as exc:
+                status = "failed"
+                note = f"execution error: {exc}"
+                LOGGER.error("Adjustment %s execution failed: %s", request_id, exc)
+            acked = self._acknowledge_adjustment(request_id, status, note)
+            self._processed_adjustments[request_id] = {
+                "status": status,
+                "note": note,
+                "acked": acked,
+                "timestamp": time.time(),
+            }
+        self._prune_processed_adjustments()
+
+    def _prune_processed_adjustments(self, ttl: float = 3600.0) -> None:
+        if not self._processed_adjustments:
+            return
+        cutoff = time.time() - max(ttl, 60.0)
+        for request_id, record in list(self._processed_adjustments.items()):
+            if record.get("acked") and record.get("timestamp", 0) < cutoff:
+                self._processed_adjustments.pop(request_id, None)
+
     def _push(self, payload: Dict[str, Any]) -> None:
-        endpoint = f"{self._coordinator_url}/update"
-        response = self._http.post(endpoint, json=payload, timeout=self._timeout)
+        try:
+            response = self._http.post(
+                self._update_endpoint,
+                json=payload,
+                timeout=self._timeout,
+                auth=self._auth,
+            )
+        except RequestException as exc:
+            raise RuntimeError(f"Failed to push monitor payload: {exc}") from exc
         if response.status_code >= 400:
             raise RuntimeError(f"Coordinator rejected payload: HTTP {response.status_code} {response.text}")
 
@@ -468,13 +718,14 @@ class GrvtAccountMonitor:
         payload = self._collect()
         if payload is None:
             LOGGER.warning("Skipping coordinator update; unable to collect account data")
-            return
-        self._push(payload)
-        LOGGER.info(
-            "Pushed GRVT monitor snapshot for %s (PnL %s)",
-            self._session.label,
-            payload["grvt_accounts"]["summary"].get("total_pnl"),
-        )
+        else:
+            self._push(payload)
+            LOGGER.info(
+                "Pushed GRVT monitor snapshot for %s (PnL %s)",
+                self._session.label,
+                payload["grvt_accounts"]["summary"].get("total_pnl"),
+            )
+        self._process_adjustments()
 
     def run_forever(self) -> None:
         LOGGER.info("Starting GRVT monitor for account %s", self._session.label)
@@ -496,6 +747,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         required=True,
         help="Hedge coordinator base URL, e.g. http://localhost:8899",
     )
+    parser.add_argument("--coordinator-username", help="Optional Basic Auth username for coordinator access")
+    parser.add_argument("--coordinator-password", help="Optional Basic Auth password for coordinator access")
     parser.add_argument("--agent-id", default="grvt-monitor", help="Agent identifier reported to the coordinator")
     parser.add_argument(
         "--account-label",
@@ -505,6 +758,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_SECONDS, help="Seconds between refreshes")
     parser.add_argument("--request-timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="HTTP timeout for coordinator updates")
     parser.add_argument("--max-positions", type=int, default=MAX_ACCOUNT_POSITIONS, help="Maximum positions to include per account in the payload")
+    parser.add_argument(
+        "--default-symbol",
+        help="Fallback GRVT symbol/instrument to trade when adjustments omit explicit symbols",
+    )
     parser.add_argument("--once", action="store_true", help="Collect and push a single snapshot, then exit")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument(
@@ -528,6 +785,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         LOGGER.error(str(exc))
         sys.exit(1)
 
+    coordinator_username = args.coordinator_username or os.getenv("COORDINATOR_USERNAME")
+    coordinator_password = args.coordinator_password or os.getenv("COORDINATOR_PASSWORD")
+    default_symbol = (
+        args.default_symbol
+        or os.getenv("GRVT_DEFAULT_SYMBOL")
+        or os.getenv("GRVT_INSTRUMENT")
+    )
+
     session = build_session(credentials)
     monitor = GrvtAccountMonitor(
         session=session,
@@ -536,6 +801,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         poll_interval=args.poll_interval,
         request_timeout=args.request_timeout,
         max_positions=args.max_positions,
+        coordinator_username=coordinator_username,
+        coordinator_password=coordinator_password,
+        default_symbol=default_symbol,
     )
 
     if args.once:
