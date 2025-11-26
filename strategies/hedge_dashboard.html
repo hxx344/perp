@@ -132,6 +132,99 @@
         gap: 1.1rem;
       }
 
+      .grvt-adjust-panel {
+        margin-top: 1.5rem;
+        padding: 1rem 1.25rem;
+        border-radius: 12px;
+        background: #1b1f2a;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .grvt-adjust-controls {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 1rem;
+        margin-bottom: 1rem;
+      }
+
+      .grvt-adjust-controls label {
+        display: flex;
+        flex-direction: column;
+        font-size: 0.85rem;
+        color: #8a94a6;
+      }
+
+      .grvt-adjust-controls input {
+        margin-top: 0.35rem;
+        background: #11141d;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        padding: 0.4rem 0.65rem;
+        color: #f5f7fb;
+        min-width: 120px;
+        font-size: 0.95rem;
+      }
+
+      .grvt-adjust-buttons {
+        display: flex;
+        gap: 0.75rem;
+      }
+
+      .grvt-adjust-status {
+        flex: 1;
+        font-size: 0.85rem;
+        color: #8a94a6;
+      }
+
+      .grvt-adjust-history table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.78rem;
+      }
+
+      .grvt-adjust-history thead {
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .grvt-adjust-history th,
+      .grvt-adjust-history td {
+        padding: 0.4rem 0.5rem;
+        text-align: left;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .adjust-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
+        padding: 0.15rem 0.5rem;
+        border-radius: 999px;
+        font-size: 0.7rem;
+        margin: 0 0.25rem 0.25rem 0;
+        background: rgba(255, 255, 255, 0.08);
+      }
+
+      .adjust-badge.status-pending {
+        background: rgba(255, 255, 255, 0.08);
+        color: #f5f7fb;
+      }
+
+      .adjust-badge.status-acknowledged {
+        background: rgba(45, 206, 137, 0.15);
+        color: #9ff3c9;
+      }
+
+      .adjust-badge.status-failed {
+        background: rgba(239, 71, 111, 0.18);
+        color: #ffb3c1;
+      }
+
+      .adjust-badge.status-expired {
+        background: rgba(255, 193, 7, 0.18);
+        color: #ffe8a3;
+      }
+
       .grvt-account-card {
         background: #1f2533;
         border-radius: 12px;
@@ -710,6 +803,37 @@
             <p class="grvt-summary-updated" id="grvt-summary-updated">Updated —</p>
           </article>
         </div>
+        <div class="grvt-adjust-panel" id="grvt-adjust-panel">
+          <div class="grvt-adjust-header">
+            <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Global Position Adjustments</h3>
+            <p class="summary-sub" style="margin: 0;">Broadcast add/reduce requests to every VPS</p>
+          </div>
+          <div class="grvt-adjust-controls">
+            <label for="grvt-adjust-size">
+              Step size
+              <input type="number" id="grvt-adjust-size" min="0.01" step="0.01" value="1" />
+            </label>
+            <div class="grvt-adjust-buttons">
+              <button type="button" id="grvt-adjust-add">加仓</button>
+              <button type="button" class="button-danger" id="grvt-adjust-reduce">减仓</button>
+            </div>
+            <p class="grvt-adjust-status" id="grvt-adjust-status">等待指令…</p>
+          </div>
+          <div class="grvt-adjust-history">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>动作</th>
+                  <th>步长</th>
+                  <th>状态</th>
+                  <th>节点</th>
+                </tr>
+              </thead>
+              <tbody id="grvt-adjust-history"></tbody>
+            </table>
+          </div>
+        </div>
         <div>
           <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">Per Account Net PnL</h3>
           <div class="grvt-account-grid" id="grvt-account-grid"></div>
@@ -851,6 +975,12 @@
   const grvtSummaryUpdated = document.getElementById('grvt-summary-updated');
   const grvtAccountGrid = document.getElementById('grvt-account-grid');
   const grvtAccountsEmpty = document.getElementById('grvt-accounts-empty');
+  const grvtAdjustPanel = document.getElementById('grvt-adjust-panel');
+  const grvtAdjustSizeInput = document.getElementById('grvt-adjust-size');
+  const grvtAdjustAddButton = document.getElementById('grvt-adjust-add');
+  const grvtAdjustReduceButton = document.getElementById('grvt-adjust-reduce');
+  const grvtAdjustStatus = document.getElementById('grvt-adjust-status');
+  const grvtAdjustHistoryBody = document.getElementById('grvt-adjust-history');
     const spreadAgentCount = document.getElementById('spread-agent-count');
     const spreadAgentLabel = document.getElementById('spread-agent-label');
     const spreadAgentSelect = document.getElementById('spread-agent-select');
@@ -915,6 +1045,8 @@
       let selectedStrategyAgent = null;
       let lastStrategyOptionsKey = '';
       let lastMetricsSnapshot = null;
+  let grvtAdjustLocked = false;
+  let grvtPendingRequestId = null;
 
       const numberFormatter = new Intl.NumberFormat(undefined, {
         minimumFractionDigits: 2,
@@ -1262,6 +1394,158 @@
           return null;
         }
         return new Date(seconds * 1000).toLocaleString();
+      }
+
+      function describeAdjustmentAction(action) {
+        if (!action) {
+          return '—';
+        }
+        const normalized = String(action).trim().toLowerCase();
+        if (normalized === 'add') {
+          return '加仓';
+        }
+        if (normalized === 'reduce') {
+          return '减仓';
+        }
+        return normalized;
+      }
+
+      function updateGrvtAdjustButtons() {
+        const disabled = grvtAdjustLocked;
+        [grvtAdjustAddButton, grvtAdjustReduceButton].forEach((button) => {
+          if (button) {
+            button.disabled = disabled;
+          }
+        });
+      }
+
+      async function sendGrvtAdjustment(action) {
+        if (!action || grvtAdjustLocked) {
+          return;
+        }
+        const rawMagnitude = parseFloat(grvtAdjustSizeInput?.value ?? '1');
+        const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : 1;
+        grvtAdjustLocked = true;
+        updateGrvtAdjustButtons();
+        if (grvtAdjustStatus) {
+          grvtAdjustStatus.textContent = `提交${describeAdjustmentAction(action)}请求…`;
+        }
+
+        try {
+          const response = await fetch('/grvt/adjust', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action, magnitude })
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const payload = await response.json();
+          grvtPendingRequestId = payload?.request?.request_id ?? null;
+          if (grvtAdjustStatus) {
+            grvtAdjustStatus.textContent = '等待 VPS ACK…';
+          }
+          await refreshMetrics();
+        } catch (error) {
+          grvtAdjustLocked = false;
+          updateGrvtAdjustButtons();
+          if (grvtAdjustStatus) {
+            grvtAdjustStatus.textContent = `请求失败：${error}`;
+          }
+        }
+      }
+
+      function renderGrvtAdjustments(summary) {
+        if (!grvtAdjustPanel || !grvtAdjustHistoryBody) {
+          return;
+        }
+        const requests = Array.isArray(summary?.requests) ? summary.requests : [];
+        const active = summary?.active_request;
+        let locked = false;
+
+        const normalizeStatus = (value) => String(value || '').toLowerCase();
+
+        if (active && ['pending', 'in_progress'].includes(normalizeStatus(active.overall_status))) {
+            locked = true;
+            grvtPendingRequestId = active.request_id || null;
+            const agents = Array.isArray(active.agents) ? active.agents : [];
+            const pendingAgents = agents.filter((agent) => normalizeStatus(agent.status) === 'pending');
+            if (grvtAdjustStatus) {
+              const total = agents.length || 0;
+              const pendingCount = pendingAgents.length;
+              grvtAdjustStatus.textContent = `等待 ${pendingCount}/${total || '-'} 个 VPS ACK`;
+            }
+        } else if (requests.length) {
+          const latest = requests[0];
+          const statusText = normalizeStatus(latest.overall_status || 'pending');
+          if (['pending', 'in_progress'].includes(statusText)) {
+            locked = true;
+            grvtPendingRequestId = latest.request_id || null;
+            const agents = Array.isArray(latest.agents) ? latest.agents : [];
+            const pendingAgents = agents.filter((agent) => normalizeStatus(agent.status) === 'pending');
+            if (grvtAdjustStatus) {
+              grvtAdjustStatus.textContent = `等待 ${pendingAgents.length}/${agents.length || '-'} 个 VPS ACK`;
+            }
+          } else if (grvtAdjustStatus) {
+            if (statusText === 'completed') {
+              grvtAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)} 已完成`;
+            } else if (statusText === 'failed') {
+              grvtAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)} 部分失败`;
+            } else {
+              grvtAdjustStatus.textContent = `最近状态：${statusText}`;
+            }
+          }
+        } else if (grvtAdjustStatus) {
+          grvtAdjustStatus.textContent = '等待指令…';
+        }
+
+        grvtAdjustLocked = locked;
+        if (!locked) {
+          grvtPendingRequestId = null;
+        }
+        updateGrvtAdjustButtons();
+
+        if (!requests.length) {
+          grvtAdjustHistoryBody.innerHTML = '<tr><td colspan="5">暂无广播记录</td></tr>';
+          return;
+        }
+
+        const historyRows = [];
+        for (const request of requests.slice(0, 6)) {
+          const statusText = request.overall_status || 'pending';
+          const createdText = formatTimestamp(request.created_at) ?? '--';
+          const agents = Array.isArray(request.agents) ? request.agents : [];
+          const badges = agents
+            .map((agent) => {
+              const status = normalizeStatus(agent.status || 'pending');
+              const label = escapeHtml(agent.agent_id || 'agent');
+              let icon = '⏳';
+              if (status === 'acknowledged') {
+                icon = '✅';
+              } else if (status === 'failed') {
+                icon = '⚠️';
+              } else if (status === 'expired') {
+                icon = '⌛';
+              }
+              const cls = `adjust-badge status-${status}`;
+              return `<span class="${cls}">${icon} ${label}</span>`;
+            })
+            .join(' ');
+
+          historyRows.push(`
+            <tr>
+              <td>${escapeHtml(createdText)}</td>
+              <td>${escapeHtml(describeAdjustmentAction(request.action))}</td>
+              <td>${escapeHtml(numberFormatter.format(toNumber(request.magnitude ?? 0)))}</td>
+              <td>${escapeHtml(statusText)}</td>
+              <td>${badges || '—'}</td>
+            </tr>
+          `);
+        }
+
+        grvtAdjustHistoryBody.innerHTML = historyRows.join('');
       }
 
       function computeRiskRatio(totalValue, balanceValue) {
@@ -2377,6 +2661,7 @@
           renderAggregate(data);
           renderAgents(data);
           renderGrvt(data);
+          renderGrvtAdjustments(data?.grvt_adjustments);
           renderSpread(data);
           renderStrategy(data);
         } catch (error) {
@@ -2430,6 +2715,12 @@
             renderStrategy(lastMetricsSnapshot);
           }
         });
+      }
+      if (grvtAdjustAddButton) {
+        grvtAdjustAddButton.addEventListener('click', () => sendGrvtAdjustment('add'));
+      }
+      if (grvtAdjustReduceButton) {
+        grvtAdjustReduceButton.addEventListener('click', () => sendGrvtAdjustment('reduce'));
       }
       refreshMetrics();
       setInterval(refreshMetrics, 2000);

@@ -36,10 +36,15 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, cast
 from urllib.parse import quote_plus
 
 from aiohttp import ClientSession, ClientTimeout, web
+
+try:
+    from .grvt_adjustments import AdjustmentAction, GrvtAdjustmentManager
+except ImportError:  # pragma: no cover - script execution path
+    from grvt_adjustments import AdjustmentAction, GrvtAdjustmentManager
 
 BASE_DIR = Path(__file__).resolve().parent
 DASHBOARD_PATH = BASE_DIR / "hedge_dashboard.html"
@@ -572,6 +577,10 @@ class HedgeCoordinator:
             self._prune_stale(now)
             return self._build_snapshot(now)
 
+    async def list_agent_ids(self) -> List[str]:
+        async with self._lock:
+            return list(self._states.keys())
+
     def _prepare_risk_alerts(self, agent_id: str, grvt_payload: Optional[Dict[str, Any]]) -> Sequence[RiskAlertInfo]:
         if self._bark_notifier is None or self._risk_alert_threshold is None:
             return []
@@ -745,6 +754,7 @@ class CoordinatorApp:
             risk_alert_reset=risk_alert_reset,
             risk_alert_cooldown=risk_alert_cooldown,
         )
+        self._adjustments = GrvtAdjustmentManager()
         self._dashboard_username = (dashboard_username or "").strip()
         self._dashboard_password = (dashboard_password or "").strip()
         self._session_cookie: str = "hedge_session"
@@ -762,6 +772,9 @@ class CoordinatorApp:
                 web.post("/update", self.handle_update),
                 web.get("/control", self.handle_control_get),
                 web.post("/control", self.handle_control_update),
+                web.get("/grvt/adjustments", self.handle_grvt_adjustments),
+                web.post("/grvt/adjust", self.handle_grvt_adjust),
+                web.post("/grvt/adjust/ack", self.handle_grvt_adjust_ack),
             ]
         )
 
@@ -782,6 +795,7 @@ class CoordinatorApp:
     async def handle_metrics(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
         payload = await self._coordinator.snapshot()
+        payload["grvt_adjustments"] = await self._adjustments.summary()
         return web.json_response(payload)
 
     async def handle_update(self, request: web.Request) -> web.Response:
@@ -800,6 +814,12 @@ class CoordinatorApp:
         self._enforce_dashboard_auth(request)
         agent_id = request.rel_url.query.get("agent_id")
         snapshot = await self._coordinator.control_snapshot(agent_id)
+        if agent_id:
+            pending = await self._adjustments.pending_for_agent(agent_id)
+            if pending:
+                agent_block = snapshot.get("agent")
+                if isinstance(agent_block, dict):
+                    agent_block["pending_adjustments"] = pending
         return web.json_response(snapshot)
 
     async def handle_control_update(self, request: web.Request) -> web.Response:
@@ -854,6 +874,89 @@ class CoordinatorApp:
             raise web.HTTPBadRequest(text="control payload requires 'action' or 'paused'")
 
         return web.json_response(snapshot)
+
+    async def handle_grvt_adjustments(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        summary = await self._adjustments.summary()
+        return web.json_response(summary)
+
+    async def handle_grvt_adjust(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="adjustment payload must be JSON")
+
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="adjustment payload must be an object")
+
+        action_raw = (body.get("action") or "").strip().lower()
+        if action_raw not in {"add", "reduce"}:
+            raise web.HTTPBadRequest(text="action must be 'add' or 'reduce'")
+
+        magnitude_raw = body.get("magnitude", 1)
+        try:
+            magnitude = float(magnitude_raw)
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(text="magnitude must be numeric")
+
+        agent_ids_raw = body.get("agent_ids")
+        if agent_ids_raw is None:
+            agent_ids = await self._coordinator.list_agent_ids()
+        elif isinstance(agent_ids_raw, list):
+            agent_ids = [str(agent).strip() for agent in agent_ids_raw if str(agent).strip()]
+        else:
+            raise web.HTTPBadRequest(text="agent_ids must be an array of strings")
+
+        if not agent_ids:
+            raise web.HTTPBadRequest(text="No agent IDs available for adjustment; ensure bots are reporting metrics")
+
+        created_by = request.remote or "dashboard"
+        action = cast(AdjustmentAction, action_raw)
+        try:
+            payload = await self._adjustments.create_request(
+                action=action,
+                magnitude=magnitude,
+                agent_ids=agent_ids,
+                created_by=created_by,
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+
+        return web.json_response({"request": payload})
+
+    async def handle_grvt_adjust_ack(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="ack payload must be JSON")
+
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="ack payload must be an object")
+
+        request_id = (body.get("request_id") or "").strip()
+        agent_id = (body.get("agent_id") or "").strip()
+        status = body.get("status") or "acknowledged"
+        note = body.get("note")
+
+        if not request_id:
+            raise web.HTTPBadRequest(text="request_id is required")
+        if not agent_id:
+            raise web.HTTPBadRequest(text="agent_id is required")
+
+        try:
+            payload = await self._adjustments.acknowledge(
+                request_id=request_id,
+                agent_id=agent_id,
+                status=status,
+                note=(note if isinstance(note, str) else None),
+            )
+        except KeyError as exc:
+            raise web.HTTPNotFound(text=str(exc))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+
+        return web.json_response({"request": payload})
 
     def _credentials_configured(self) -> bool:
         return bool(self._dashboard_username or self._dashboard_password)

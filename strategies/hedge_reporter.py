@@ -130,6 +130,40 @@ class HedgeMetricsReporter:
         except Exception as exc:
             raise RuntimeError(f"Failed to fetch coordinator control state: {exc}") from exc
 
+    async def acknowledge_adjustment(
+        self,
+        request_id: str,
+        *,
+        agent_id: Optional[str] = None,
+        status: str = "acknowledged",
+        note: Optional[str] = None,
+    ) -> None:
+        request_id = (request_id or "").strip()
+        if not request_id:
+            raise ValueError("request_id is required for adjustment acknowledgement")
+
+        payload: Dict[str, Any] = {
+            "request_id": request_id,
+            "status": status,
+        }
+        identifier = (agent_id or self._agent_id or "").strip()
+        if identifier:
+            payload["agent_id"] = identifier
+        if note is not None:
+            payload["note"] = str(note)
+
+        session = await self._ensure_session()
+        url = f"{self._base_url}/grvt/adjust/ack"
+        try:
+            async with session.post(url, json=payload, auth=self._basic_auth) as response:
+                if response.status >= 400:
+                    text = await response.text()
+                    raise RuntimeError(
+                        f"Coordinator adjustment ACK failed: HTTP {response.status} {text}"
+                    )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to send adjustment acknowledgement: {exc}") from exc
+
     async def aclose(self) -> None:
         if self._session is not None and not self._session.closed:
             await self._session.close()
