@@ -524,7 +524,12 @@ class HedgeCoordinator:
                 if ratio < reset_ratio:
                     self._risk_alert_active.pop(entry_key, None)
 
-        stale_keys = [key for key in self._risk_alert_active if key not in seen_keys]
+        agent_prefix = f"{agent_id}:"
+        stale_keys = [
+            key
+            for key in self._risk_alert_active
+            if key.startswith(agent_prefix) and key not in seen_keys
+        ]
         for key in stale_keys:
             self._risk_alert_active.pop(key, None)
             self._risk_alert_last_ts.pop(key, None)
