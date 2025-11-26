@@ -50,9 +50,10 @@ MAX_STRATEGY_TRADES = 200
 
 
 class BarkNotifier:
-    def __init__(self, url_template: str, timeout: float = 10.0) -> None:
+    def __init__(self, url_template: str, timeout: float = 10.0, append_payload: bool = True) -> None:
         self._template = (url_template or "").strip()
         self._timeout = max(timeout, 1.0)
+        self._append_payload = bool(append_payload)
 
     async def send(self, *, title: str, body: str) -> None:
         if not self._template:
@@ -63,8 +64,10 @@ class BarkNotifier:
         safe_body = quote_plus(body or "")
         if "{title}" in self._template or "{body}" in self._template:
             endpoint = self._template.replace("{title}", safe_title).replace("{body}", safe_body)
-        else:
+        elif self._append_payload:
             endpoint = f"{self._template.rstrip('/')}/{safe_title}/{safe_body}"
+        else:
+            endpoint = self._template
 
         timeout = ClientTimeout(total=self._timeout)
         try:
@@ -779,12 +782,18 @@ async def _run_app(args: argparse.Namespace) -> None:
     bark_notifier: Optional[BarkNotifier] = None
     bark_url = (args.bark_url or "").strip()
     if bark_url:
-        bark_notifier = BarkNotifier(bark_url, timeout=max(args.bark_timeout, 1.0))
+        bark_notifier = BarkNotifier(
+            bark_url,
+            timeout=max(args.bark_timeout, 1.0),
+            append_payload=bool(args.bark_append_title_body),
+        )
         if risk_threshold:
             LOGGER.info(
                 "Bark notifications enabled; risk alerts fire at %.1f%%",
                 risk_threshold * 100,
             )
+        if not args.bark_append_title_body:
+            LOGGER.info("Bark notifier configured to skip automatic title/body appending")
     elif risk_threshold:
         LOGGER.warning(
             "Risk alert threshold %.1f%% configured without --bark-url; alerts disabled.",
@@ -835,6 +844,17 @@ def _parse_args() -> argparse.Namespace:
         except ValueError:
             return default
 
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        text = raw.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+
     parser = argparse.ArgumentParser(description="Run the hedging metrics coordinator")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address for the HTTP server")
     parser.add_argument("--port", type=int, default=8899, help="Port for the HTTP server")
@@ -873,6 +893,12 @@ def _parse_args() -> argparse.Namespace:
         "--bark-url",
         default=os.getenv("BARK_URL"),
         help="Full Bark push URL or template (supports {title} and {body} placeholders).",
+    )
+    parser.add_argument(
+        "--bark-append-title-body",
+        default=_env_bool("BARK_APPEND_TITLE_BODY", True),
+        action=argparse.BooleanOptionalAction,
+        help="Append encoded title/body when the template lacks placeholders (use --no-bark-append-title-body to disable).",
     )
     parser.add_argument(
         "--bark-timeout",
