@@ -12,6 +12,7 @@ import argparse
 import importlib
 import logging
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -184,11 +185,33 @@ def guess_symbol(entry: Dict[str, Any]) -> str:
 def base_asset(symbol: str) -> Optional[str]:
     if not symbol:
         return None
-    text = symbol.replace(":", "/")
-    parts = text.split("/")
-    if not parts:
+
+    text = str(symbol).strip().upper()
+    if not text:
         return None
-    return parts[0].upper().strip() or None
+
+    # Normalise common delimiters so we can reliably split the base leg
+    for token in (":", "-", "_", " "):
+        text = text.replace(token, "/")
+    parts = [part for part in text.split("/") if part]
+    candidate = parts[0] if parts else text
+
+    # Strip common suffixes so ETHPERP / BTCUSDT -> ETH / BTC
+    suffixes = ("PERP", "FUT", "FUTURES", "USD", "USDT", "USDC")
+    stripped = True
+    while stripped and candidate:
+        stripped = False
+        for suffix in suffixes:
+            if candidate.endswith(suffix) and len(candidate) > len(suffix):
+                candidate = candidate[: -len(suffix)]
+                stripped = True
+                break
+
+    match = re.match(r"[A-Z]+", candidate)
+    if match:
+        candidate = match.group(0)
+
+    return candidate or None
 
 
 def normalize_side(entry: Dict[str, Any], size: Optional[Decimal]) -> Optional[str]:

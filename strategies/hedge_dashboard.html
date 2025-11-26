@@ -177,6 +177,28 @@
         min-width: 140px;
       }
 
+      .grvt-symbol-input {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+      }
+
+      .grvt-symbol-reset {
+        appearance: none;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 6px;
+        background: rgba(255, 255, 255, 0.08);
+        color: #f5f7fb;
+        padding: 0.35rem 0.8rem;
+        font-size: 0.78rem;
+        cursor: pointer;
+        transition: opacity 0.2s ease;
+      }
+
+      .grvt-symbol-reset:hover {
+        opacity: 0.8;
+      }
+
       .grvt-adjust-controls label.grvt-adjust-symbols {
         flex: 1;
         min-width: 200px;
@@ -790,10 +812,11 @@
             </label>
             <label for="grvt-adjust-symbols" class="grvt-adjust-symbols">
               目标币种
-              <select id="grvt-adjust-symbols">
-                <option value="">未指定（广播所有）</option>
-              </select>
-              <small>使用下拉选择单个币种；保持“未指定”即广播所有</small>
+              <div class="grvt-symbol-input">
+                <select id="grvt-adjust-symbols"></select>
+                <button type="button" class="grvt-symbol-reset" id="grvt-reset-symbol">清空</button>
+              </div>
+              <small>从下拉中选择需要调整的币种；不选择则广播到所有币种</small>
             </label>
             <div class="grvt-adjust-buttons">
               <button type="button" id="grvt-adjust-add">加仓</button>
@@ -1011,6 +1034,7 @@
   const grvtAdjustPanel = document.getElementById('grvt-adjust-panel');
   const grvtAdjustSizeInput = document.getElementById('grvt-adjust-size');
   const grvtAdjustSymbolsSelect = document.getElementById('grvt-adjust-symbols');
+  const grvtResetSymbolButton = document.getElementById('grvt-reset-symbol');
   const grvtAdjustAddButton = document.getElementById('grvt-adjust-add');
   const grvtAdjustReduceButton = document.getElementById('grvt-adjust-reduce');
   const grvtAdjustStatus = document.getElementById('grvt-adjust-status');
@@ -1475,24 +1499,26 @@
         const normalized = Array.from(
           new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => normalizeSymbolLabel(symbol)).filter(Boolean))
         ).sort();
-        const previousValue = grvtAdjustSymbolsSelect.value;
+        const previousValue = normalizeSymbolLabel(grvtAdjustSymbolsSelect.value);
         grvtAdjustSymbolsSelect.innerHTML = '';
-
-        const placeholder = document.createElement('option');
-        placeholder.value = '';
-        placeholder.textContent = '未指定（广播所有）';
-        placeholder.selected = !previousValue || !normalized.includes(previousValue);
-        grvtAdjustSymbolsSelect.appendChild(placeholder);
-
+        grvtAdjustSymbolsSelect.disabled = normalized.length === 0;
+        if (grvtResetSymbolButton) {
+          grvtResetSymbolButton.disabled = normalized.length === 0;
+        }
+        let matched = false;
         for (const symbol of normalized) {
           const option = document.createElement('option');
           option.value = symbol;
           option.textContent = symbol;
           if (previousValue === symbol) {
             option.selected = true;
-            placeholder.selected = false;
+            matched = true;
           }
           grvtAdjustSymbolsSelect.appendChild(option);
+        }
+
+        if (!matched) {
+          grvtAdjustSymbolsSelect.selectedIndex = -1;
         }
       }
 
@@ -1505,6 +1531,14 @@
           return null;
         }
         return [value];
+      }
+
+      function clearGrvtSymbolSelection() {
+        if (!grvtAdjustSymbolsSelect) {
+          return;
+        }
+        grvtAdjustSymbolsSelect.value = '';
+        grvtAdjustSymbolsSelect.selectedIndex = -1;
       }
 
       function updateGrvtAdjustButtons() {
@@ -2850,6 +2884,11 @@
       }
       if (grvtAdjustReduceButton) {
         grvtAdjustReduceButton.addEventListener('click', () => sendGrvtAdjustment('reduce'));
+      }
+      if (grvtResetSymbolButton) {
+        grvtResetSymbolButton.addEventListener('click', () => {
+          clearGrvtSymbolSelection();
+        });
       }
       updateGrvtSymbolOptions([]);
       refreshMetrics();
