@@ -183,6 +183,19 @@
         align-items: center;
       }
 
+      .grvt-symbol-label {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        margin-bottom: 0.35rem;
+        color: #8a94a6;
+      }
+
+      .grvt-symbol-label small {
+        font-size: 0.75rem;
+        color: #6d768f;
+      }
+
       .grvt-symbol-reset {
         appearance: none;
         border: 1px solid rgba(255, 255, 255, 0.15);
@@ -203,13 +216,6 @@
         flex: 1;
         min-width: 200px;
         max-width: 240px;
-      }
-
-      .grvt-adjust-controls label small {
-        margin-top: 0.3rem;
-        font-size: 0.75rem;
-        color: #6d768f;
-        display: block;
       }
 
       .grvt-adjust-buttons {
@@ -811,12 +817,14 @@
               <input type="number" id="grvt-adjust-size" min="0.01" step="0.01" value="1" />
             </label>
             <label for="grvt-adjust-symbols" class="grvt-adjust-symbols">
-              目标币种
+              <div class="grvt-symbol-label">
+                <span>目标币种</span>
+                <small>选择需要调整的币种；未选中时广播所有</small>
+              </div>
               <div class="grvt-symbol-input">
                 <select id="grvt-adjust-symbols"></select>
                 <button type="button" class="grvt-symbol-reset" id="grvt-reset-symbol">清空</button>
               </div>
-              <small>从下拉中选择需要调整的币种；不选择则广播到所有币种</small>
             </label>
             <div class="grvt-adjust-buttons">
               <button type="button" id="grvt-adjust-add">加仓</button>
