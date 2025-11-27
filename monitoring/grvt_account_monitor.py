@@ -15,7 +15,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -104,12 +104,17 @@ class AccountCredentials:
     private_key: str
     api_key: str
     environment: str
+    main_account_id: Optional[str] = None
+    main_sub_account_id: str = "0"
 
 
 @dataclass
 class AccountSession:
     label: str
     client: Any
+    main_account_id: Optional[str] = None
+    sub_account_id: Optional[str] = None
+    main_sub_account_id: str = "0"
 
 
 def import_grvt_sdk():  # pragma: no cover - thin import wrapper
@@ -332,6 +337,8 @@ def load_single_account(*, label: str) -> AccountCredentials:
         )
 
     env_name = (_env("ENVIRONMENT") or _env("ENV") or "prod").strip().lower()
+    main_account_id = _env("MAIN_ACCOUNT_ID") or os.getenv("GRVT_MAIN_ACCOUNT_ID")
+    main_sub_account_id = _env("MAIN_SUB_ACCOUNT_ID") or os.getenv("GRVT_MAIN_SUB_ACCOUNT_ID") or "0"
 
     return AccountCredentials(
         label=label_clean,
@@ -339,6 +346,8 @@ def load_single_account(*, label: str) -> AccountCredentials:
         private_key=private_key.strip(),
         api_key=api_key.strip(),
         environment=env_name,
+        main_account_id=(main_account_id or None),
+        main_sub_account_id=str(main_sub_account_id or "0"),
     )
 
 
@@ -360,7 +369,13 @@ def build_session(creds: AccountCredentials) -> AccountSession:
             "api_key": creds.api_key,
         },
     )
-    return AccountSession(label=creds.label, client=client)
+    return AccountSession(
+        label=creds.label,
+        client=client,
+        main_account_id=creds.main_account_id,
+        sub_account_id=creds.trading_account_id,
+        main_sub_account_id=creds.main_sub_account_id,
+    )
 
 
 class GrvtAccountMonitor:
@@ -376,6 +391,9 @@ class GrvtAccountMonitor:
         coordinator_username: Optional[str] = None,
         coordinator_password: Optional[str] = None,
         default_symbol: Optional[str] = None,
+        default_transfer_currency: Optional[str] = None,
+        default_transfer_direction: Optional[str] = None,
+        default_transfer_type: Optional[str] = None,
     ) -> None:
         self._session = session
         self._coordinator_url = coordinator_url.rstrip("/")
@@ -402,6 +420,76 @@ class GrvtAccountMonitor:
         self._update_endpoint = f"{self._coordinator_url}/update"
         self._ack_endpoint = f"{self._coordinator_url}/grvt/adjust/ack"
         self._register_symbol_hint(self._default_symbol)
+        self._home_main_account_id = session.main_account_id or os.getenv("GRVT_MAIN_ACCOUNT_ID")
+        self._home_sub_account_id = session.sub_account_id or os.getenv("GRVT_TRADING_ACCOUNT_ID")
+        self._home_main_sub_account_id = (
+            session.main_sub_account_id
+            or os.getenv("GRVT_MAIN_SUB_ACCOUNT_ID")
+            or "0"
+        )
+        transfer_currency_env = os.getenv("GRVT_DEFAULT_TRANSFER_CURRENCY") or os.getenv("GRVT_TRANSFER_CURRENCY")
+        transfer_direction_env = os.getenv("GRVT_DEFAULT_TRANSFER_DIRECTION") or os.getenv("GRVT_TRANSFER_DIRECTION")
+        transfer_type_env = os.getenv("GRVT_DEFAULT_TRANSFER_TYPE") or os.getenv("GRVT_TRANSFER_TYPE")
+        currency_source = default_transfer_currency or transfer_currency_env or "USDT"
+        direction_source = default_transfer_direction or transfer_direction_env or "sub_to_main"
+        type_source = default_transfer_type or transfer_type_env or "INTERNAL"
+        self._default_transfer_currency = str(currency_source).strip().upper()
+        self._default_transfer_direction = str(direction_source).strip().lower()
+        self._default_transfer_type = type_source
+
+    def _build_transfer_route(self, direction: str) -> Optional[Dict[str, str]]:
+        direction_normalized = (direction or "").strip().lower()
+        main_account = (self._home_main_account_id or "").strip()
+        trading_sub = (self._home_sub_account_id or "").strip()
+        main_sub = (self._home_main_sub_account_id or "").strip() or "0"
+
+        if not main_account:
+            return None
+
+        if direction_normalized == "sub_to_main":
+            if not trading_sub:
+                return None
+            return {
+                "from_account_id": main_account,
+                "from_sub_account_id": trading_sub,
+                "to_account_id": main_account,
+                "to_sub_account_id": main_sub,
+            }
+        if direction_normalized == "main_to_sub":
+            if not trading_sub:
+                return None
+            return {
+                "from_account_id": main_account,
+                "from_sub_account_id": main_sub,
+                "to_account_id": main_account,
+                "to_sub_account_id": trading_sub,
+            }
+        return None
+
+    def _build_transfer_defaults(self) -> Optional[Dict[str, Any]]:
+        routes: Dict[str, Dict[str, str]] = {}
+        for direction in ("sub_to_main", "main_to_sub"):
+            route = self._build_transfer_route(direction)
+            if route:
+                routes[direction] = route
+
+        baseline_account = (self._home_main_account_id or "").strip()
+        trading_sub = (self._home_sub_account_id or "").strip()
+        defaults: Dict[str, Any] = {
+            "agent_label": self._session.label,
+            "main_account_id": baseline_account or None,
+            "sub_account_id": trading_sub or None,
+            "main_sub_account_id": (self._home_main_sub_account_id or "").strip() or None,
+            "currency": self._default_transfer_currency,
+            "direction": self._default_transfer_direction,
+            "transfer_type": self._default_transfer_type,
+        }
+        defaults = {key: value for key, value in defaults.items() if value not in {None, ""}}
+        if not defaults and not routes:
+            return None
+        if routes:
+            defaults["routes"] = routes
+        return defaults
 
     def _collect(self) -> Optional[Dict[str, Any]]:
         timestamp = time.time()
@@ -503,6 +591,9 @@ class GrvtAccountMonitor:
                 ],
             },
         }
+        transfer_defaults = self._build_transfer_defaults()
+        if transfer_defaults:
+            payload["grvt_accounts"]["transfer_defaults"] = transfer_defaults
         return payload
 
     @staticmethod
@@ -707,6 +798,133 @@ class GrvtAccountMonitor:
         LOGGER.info("Executed GRVT adjustment via monitor: %s", note_core)
         return "acknowledged", note_core
 
+    def _execute_transfer(self, entry: Dict[str, Any]) -> Tuple[str, str]:
+        payload = self._prepare_transfer_payload(entry)
+        response = self._call_transfer_endpoint(payload)
+        transfer_id: Optional[str] = None
+        if isinstance(response, dict):
+            for key in ("transfer_id", "tx_id", "id", "request_id"):
+                value = response.get(key)
+                if value:
+                    transfer_id = str(value)
+                    break
+        descriptor_from = self._format_transfer_descriptor(
+            payload.get("from_account_id"), payload.get("from_sub_account_id")
+        )
+        descriptor_to = self._format_transfer_descriptor(
+            payload.get("to_account_id"), payload.get("to_sub_account_id")
+        )
+        note = (
+            f"TRANSFER {payload['num_tokens']} {payload['currency']} "
+            f"{descriptor_from} -> {descriptor_to}"
+        )
+        if transfer_id:
+            note = f"{note} (tx {transfer_id})"
+        LOGGER.info("Executed GRVT transfer via monitor: %s", note)
+        return "acknowledged", note
+
+    def _prepare_transfer_payload(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        sources: List[Dict[str, Any]] = []
+        for key in ("payload", "transfer"):
+            block = entry.get(key)
+            if isinstance(block, dict):
+                sources.append(block)
+        sources.append(entry)
+        fields = (
+            "from_account_id",
+            "from_sub_account_id",
+            "to_account_id",
+            "to_sub_account_id",
+            "currency",
+            "num_tokens",
+            "transfer_type",
+        )
+        for source in sources:
+            for field in fields:
+                value = source.get(field)
+                if value is not None and field not in payload:
+                    payload[field] = value
+        metadata: Dict[str, Any] = {}
+        for source in sources:
+            meta = source.get("transfer_metadata") or source.get("metadata")
+            if isinstance(meta, dict):
+                metadata.update({k: v for k, v in meta.items() if v is not None})
+        if metadata:
+            payload["transfer_metadata"] = metadata
+        magnitude = payload.get("num_tokens")
+        if magnitude is None:
+            magnitude = entry.get("magnitude")
+        amount = decimal_from(magnitude)
+        if amount is None or amount <= 0:
+            raise ValueError(f"Invalid transfer amount '{magnitude}'")
+        payload["num_tokens"] = decimal_to_str(amount)
+        currency = payload.get("currency")
+        if currency:
+            payload["currency"] = str(currency).strip().upper()
+        elif self._default_transfer_currency:
+            payload["currency"] = self._default_transfer_currency
+        else:
+            raise ValueError("Transfer currency not specified and no default configured")
+        if "transfer_type" not in payload and self._default_transfer_type:
+            payload["transfer_type"] = self._default_transfer_type
+        self._apply_default_transfer_targets(payload)
+        required = (
+            "from_account_id",
+            "from_sub_account_id",
+            "to_account_id",
+            "to_sub_account_id",
+        )
+        for field in required:
+            if not payload.get(field):
+                raise ValueError(f"Transfer request missing required field '{field}'")
+        return payload
+
+    def _apply_default_transfer_targets(self, payload: Dict[str, Any]) -> None:
+        metadata = payload.get("transfer_metadata") or {}
+        direction = str(
+            metadata.get("direction")
+            or payload.get("direction")
+            or self._default_transfer_direction
+        ).strip().lower()
+        if not payload.get("from_account_id") and self._home_main_account_id:
+            payload["from_account_id"] = self._home_main_account_id
+        if not payload.get("from_sub_account_id"):
+            default_from_sub = self._home_sub_account_id if direction != "main_to_sub" else self._home_main_sub_account_id
+            payload["from_sub_account_id"] = default_from_sub or self._home_main_sub_account_id
+        if not payload.get("to_account_id"):
+            payload["to_account_id"] = self._home_main_account_id or payload.get("from_account_id")
+        if not payload.get("to_sub_account_id"):
+            if direction in {"sub_to_main", "default", "to_main"}:
+                payload["to_sub_account_id"] = self._home_main_sub_account_id
+            elif direction == "main_to_sub":
+                payload["to_sub_account_id"] = self._home_sub_account_id or self._home_main_sub_account_id
+            else:
+                payload["to_sub_account_id"] = self._home_main_sub_account_id
+
+    def _call_transfer_endpoint(self, payload: Dict[str, Any]) -> Any:
+        client = self._session.client
+        errors: List[str] = []
+        for method_name in (
+            "private_post_full_v1_transfer",
+            "privatePostFullV1Transfer",
+            "transfer",
+        ):
+            method = getattr(client, method_name, None)
+            if method is None:
+                continue
+            try:
+                return method(payload)
+            except Exception as exc:
+                errors.append(f"{method_name} failed: {exc}")
+        raise RuntimeError(errors[0] if errors else "No transfer endpoint available on GRVT client")
+
+    @staticmethod
+    def _format_transfer_descriptor(account_id: Optional[str], sub_id: Optional[str]) -> str:
+        account_text = (account_id or "?")
+        sub_text = (sub_id or "?")
+        return f"account={account_text} sub={sub_text}"
+
     def _acknowledge_adjustment(self, request_id: str, status: str, note: Optional[str]) -> bool:
         payload = {
             "request_id": request_id,
@@ -771,7 +989,11 @@ class GrvtAccountMonitor:
             status = "failed"
             note: Optional[str] = None
             try:
-                status, note = self._execute_adjustment(entry)
+                action = str(entry.get("action") or "").strip().lower()
+                if action == "transfer":
+                    status, note = self._execute_transfer(entry)
+                else:
+                    status, note = self._execute_adjustment(entry)
             except Exception as exc:
                 status = "failed"
                 note = f"execution error: {exc}"
@@ -854,6 +1076,28 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--default-symbol",
         help="Fallback GRVT symbol/instrument to trade when adjustments omit explicit symbols",
     )
+    parser.add_argument(
+        "--main-account-id",
+        help="Main account identifier for the GRVT sub account (fallback for transfer requests)",
+    )
+    parser.add_argument(
+        "--main-sub-account-id",
+        default=os.getenv("GRVT_MAIN_SUB_ACCOUNT_ID", "0"),
+        help="Main account sub-account identifier (usually '0')",
+    )
+    parser.add_argument(
+        "--default-transfer-currency",
+        help="Default currency ticker for GRVT transfers when UI does not specify one",
+    )
+    parser.add_argument(
+        "--default-transfer-direction",
+        choices=["sub_to_main", "main_to_sub", "sub_to_sub", "default"],
+        help="Default logical direction for GRVT transfers",
+    )
+    parser.add_argument(
+        "--default-transfer-type",
+        help="Default GRVT transfer type label (e.g. INTERNAL, WITHDRAWAL)",
+    )
     parser.add_argument("--once", action="store_true", help="Collect and push a single snapshot, then exit")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument(
@@ -876,6 +1120,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     except ValueError as exc:
         LOGGER.error(str(exc))
         sys.exit(1)
+    if args.main_account_id or args.main_sub_account_id:
+        credentials = replace(
+            credentials,
+            main_account_id=(args.main_account_id or credentials.main_account_id),
+            main_sub_account_id=(args.main_sub_account_id or credentials.main_sub_account_id),
+        )
 
     coordinator_username = args.coordinator_username or os.getenv("COORDINATOR_USERNAME")
     coordinator_password = args.coordinator_password or os.getenv("COORDINATOR_PASSWORD")
@@ -896,6 +1146,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         coordinator_username=coordinator_username,
         coordinator_password=coordinator_password,
         default_symbol=default_symbol,
+        default_transfer_currency=args.default_transfer_currency,
+        default_transfer_direction=args.default_transfer_direction,
+        default_transfer_type=args.default_transfer_type,
     )
 
     if args.once:

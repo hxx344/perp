@@ -581,6 +581,20 @@ class HedgeCoordinator:
         async with self._lock:
             return list(self._states.keys())
 
+    async def get_agent_transfer_defaults(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        normalized = self._normalize_agent_id(agent_id)
+        async with self._lock:
+            state = self._states.get(normalized)
+            if not state:
+                return None
+            grvt_block = state.grvt_accounts
+            if not isinstance(grvt_block, dict):
+                return None
+            defaults = grvt_block.get("transfer_defaults")
+            if isinstance(defaults, dict):
+                return copy.deepcopy(defaults)
+            return None
+
     def _prepare_risk_alerts(self, agent_id: str, grvt_payload: Optional[Dict[str, Any]]) -> Sequence[RiskAlertInfo]:
         if self._bark_notifier is None or self._risk_alert_threshold is None:
             return []
@@ -774,6 +788,7 @@ class CoordinatorApp:
                 web.post("/control", self.handle_control_update),
                 web.get("/grvt/adjustments", self.handle_grvt_adjustments),
                 web.post("/grvt/adjust", self.handle_grvt_adjust),
+                web.post("/grvt/transfer", self.handle_grvt_transfer),
                 web.post("/grvt/adjust/ack", self.handle_grvt_adjust_ack),
             ]
         )
@@ -942,6 +957,167 @@ class CoordinatorApp:
 
         return web.json_response({"request": payload})
 
+    async def handle_grvt_transfer(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="transfer payload must be JSON")
+
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="transfer payload must be an object")
+
+        def _clean_required(value: Any, field: str) -> str:
+            try:
+                text = str(value).strip()
+            except Exception:
+                text = ""
+            if not text:
+                raise web.HTTPBadRequest(text=f"{field} is required")
+            return text
+
+        def _clean_optional(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            try:
+                text = str(value).strip()
+            except Exception:
+                return None
+            return text or None
+
+        amount_raw = body.get("num_tokens") or body.get("amount")
+        try:
+            amount = Decimal(str(amount_raw))
+        except Exception:
+            raise web.HTTPBadRequest(text="num_tokens must be numeric")
+        if amount <= 0:
+            raise web.HTTPBadRequest(text="num_tokens must be positive")
+
+        currency = (body.get("currency") or "USDT")
+        currency_clean = _clean_required(currency, "currency").upper()
+
+        agent_ids_raw = body.get("agent_ids")
+        if agent_ids_raw is None:
+            agent_ids = await self._coordinator.list_agent_ids()
+        elif isinstance(agent_ids_raw, list):
+            agent_ids = [
+                str(agent).strip()
+                for agent in agent_ids_raw
+                if str(agent).strip()
+            ]
+        else:
+            raise web.HTTPBadRequest(text="agent_ids must be an array of strings")
+        if not agent_ids:
+            raise web.HTTPBadRequest(text="No agent IDs available for transfer request")
+        if len(agent_ids) > 1:
+            raise web.HTTPBadRequest(text="Transfers currently support a single agent per request")
+
+        target_agent_id = agent_ids[0]
+        transfer_defaults = await self._coordinator.get_agent_transfer_defaults(target_agent_id)
+
+        metadata = body.get("transfer_metadata") or {}
+        if metadata and not isinstance(metadata, dict):
+            raise web.HTTPBadRequest(text="transfer_metadata must be an object if provided")
+        metadata = dict(metadata or {})
+        if body.get("reason") and not metadata.get("reason"):
+            metadata["reason"] = str(body["reason"])
+        metadata.setdefault("agent_id", target_agent_id)
+        if transfer_defaults and transfer_defaults.get("agent_label"):
+            metadata.setdefault("agent_label", str(transfer_defaults["agent_label"]))
+
+        requested_direction = _clean_optional(body.get("direction"))
+        default_direction = _clean_optional((transfer_defaults or {}).get("direction"))
+        direction = (requested_direction or default_direction or "sub_to_main").lower()
+        metadata.setdefault("direction", direction)
+
+        routes_block = transfer_defaults.get("routes") if isinstance(transfer_defaults, dict) else None
+        route_candidate = routes_block.get(direction) if isinstance(routes_block, dict) else None
+
+        def _route_from_defaults() -> Optional[Dict[str, str]]:
+            if not isinstance(transfer_defaults, dict):
+                return None
+            if isinstance(route_candidate, dict):
+                return route_candidate
+            main_account = _clean_optional(transfer_defaults.get("main_account_id"))
+            trading_sub = _clean_optional(transfer_defaults.get("sub_account_id"))
+            main_sub = _clean_optional(transfer_defaults.get("main_sub_account_id")) or "0"
+            if not main_account or not trading_sub:
+                return None
+            if direction == "sub_to_main":
+                return {
+                    "from_account_id": main_account,
+                    "from_sub_account_id": trading_sub,
+                    "to_account_id": main_account,
+                    "to_sub_account_id": main_sub,
+                }
+            if direction == "main_to_sub":
+                return {
+                    "from_account_id": main_account,
+                    "from_sub_account_id": main_sub,
+                    "to_account_id": main_account,
+                    "to_sub_account_id": trading_sub,
+                }
+            return None
+
+        route_values = _route_from_defaults()
+
+        transfer_payload: Dict[str, Any] = {
+            "currency": currency_clean,
+            "num_tokens": format(amount, "f"),
+            "direction": direction,
+        }
+
+        user_fields = {
+            "from_account_id": _clean_optional(body.get("from_account_id")),
+            "from_sub_account_id": _clean_optional(body.get("from_sub_account_id")),
+            "to_account_id": _clean_optional(body.get("to_account_id")),
+            "to_sub_account_id": _clean_optional(body.get("to_sub_account_id")),
+        }
+
+        fallback_map = {
+            "from_account_id": ["main_account_id", "from_account_id"],
+            "from_sub_account_id": ["sub_account_id", "from_sub_account_id"],
+            "to_account_id": ["main_account_id", "to_account_id"],
+            "to_sub_account_id": ["main_sub_account_id", "to_sub_account_id"],
+        }
+        if direction == "main_to_sub":
+            fallback_map["from_sub_account_id"] = ["main_sub_account_id", "from_sub_account_id", "sub_account_id"]
+            fallback_map["to_sub_account_id"] = ["sub_account_id", "to_sub_account_id", "main_sub_account_id"]
+
+        for field, provided in user_fields.items():
+            if provided:
+                transfer_payload[field] = provided
+                continue
+            candidate = _clean_optional(route_values.get(field)) if route_values else None
+            if not candidate and isinstance(transfer_defaults, dict):
+                for key in fallback_map.get(field, []):
+                    candidate = _clean_optional(transfer_defaults.get(key))
+                    if candidate:
+                        break
+            if candidate:
+                transfer_payload[field] = candidate
+
+        missing_fields = [field for field in ("from_account_id", "from_sub_account_id", "to_account_id", "to_sub_account_id") if not transfer_payload.get(field)]
+        if missing_fields:
+            raise web.HTTPBadRequest(text=f"Missing transfer fields: {', '.join(missing_fields)}")
+
+        transfer_type = body.get("transfer_type") or ((transfer_defaults or {}).get("transfer_type"))
+        if transfer_type:
+            transfer_payload["transfer_type"] = str(transfer_type).strip()
+        if metadata:
+            transfer_payload["transfer_metadata"] = metadata
+
+        created_by = request.remote or "dashboard"
+        payload = await self._adjustments.create_request(
+            action="transfer",
+            magnitude=float(amount),
+            agent_ids=agent_ids,
+            symbols=None,
+            created_by=created_by,
+            payload=transfer_payload,
+        )
+        return web.json_response({"request": payload})
+
     async def handle_grvt_adjust_ack(self, request: web.Request) -> web.Response:
         try:
             body = await request.json()
@@ -1063,8 +1239,12 @@ class CoordinatorApp:
         if not self._credentials_configured():
             raise web.HTTPFound("/dashboard")
         data = await request.post()
-        username = (data.get("username") or "").strip()
-        password = (data.get("password") or "").strip()
+        username_raw = data.get("username")
+        password_raw = data.get("password")
+        username = str(username_raw) if username_raw is not None else ""
+        password = str(password_raw) if password_raw is not None else ""
+        username = username.strip()
+        password = password.strip()
         if not self._validate_password(username, password):
             raise web.HTTPFound("/login?error=1")
         token = self._issue_session()

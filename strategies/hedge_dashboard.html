@@ -140,6 +140,78 @@
         border: 1px solid rgba(255, 255, 255, 0.05);
       }
 
+      .grvt-transfer-panel {
+        margin-top: 1.25rem;
+        padding: 1rem 1.25rem 1.25rem;
+        border-radius: 12px;
+        background: #141823;
+        border: 1px solid rgba(255, 255, 255, 0.04);
+      }
+
+      .grvt-transfer-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 0.85rem;
+        margin-top: 1rem;
+      }
+
+      .grvt-transfer-grid label {
+        display: flex;
+        flex-direction: column;
+        font-size: 0.8rem;
+        color: #8a94a6;
+      }
+
+      .grvt-transfer-grid input,
+      .grvt-transfer-grid select,
+      .grvt-transfer-grid textarea {
+        margin-top: 0.35rem;
+        background: #11141d;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        padding: 0.45rem 0.65rem;
+        color: #f5f7fb;
+        font-size: 0.9rem;
+      }
+
+      .grvt-transfer-grid textarea {
+        min-height: 46px;
+        resize: vertical;
+      }
+
+      .grvt-transfer-actions {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        margin-top: 1.1rem;
+        flex-wrap: wrap;
+      }
+
+      .grvt-transfer-status {
+        flex: 1;
+        min-width: 240px;
+        font-size: 0.85rem;
+        color: #8a94a6;
+      }
+
+      .grvt-transfer-history table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.78rem;
+        margin-top: 0.9rem;
+      }
+
+      .grvt-transfer-history thead {
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .grvt-transfer-history th,
+      .grvt-transfer-history td {
+        padding: 0.4rem 0.5rem;
+        text-align: left;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
       .grvt-adjust-controls {
         display: flex;
         flex-wrap: wrap;
@@ -848,6 +920,387 @@
             </table>
           </div>
         </div>
+        <div class="grvt-transfer-panel hidden" id="grvt-transfer-panel">
+          <div class="grvt-adjust-header">
+            <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">账户间资金划转</h3>
+            <p class="summary-sub" style="margin: 0;">默认方向：每台 VPS 子账户 → 主账户</p>
+          </div>
+          <div class="grvt-transfer-grid">
+            <label>
+              VPS 节点
+              <select id="grvt-transfer-agent"></select>
+            </label>
+            <label>
+              转账方向
+              <select id="grvt-transfer-direction">
+                <option value="sub_to_main">交易子账户 → 主账户</option>
+                <option value="main_to_sub">主账户 → 交易子账户</option>
+              </select>
+            </label>
+            <label>
+              数量
+              <input type="number" id="grvt-transfer-amount" min="0" step="0.01" value="0" />
+            </label>
+            <label>
+              币种
+              <input type="text" id="grvt-transfer-currency" value="USDT" />
+
+            function buildTransferRouteFromDefaults(defaults, direction) {
+              if (!defaults) {
+                return null;
+              }
+              const normalizedDirection = String(direction || defaults.direction || 'sub_to_main').toLowerCase();
+              if (defaults.routes && typeof defaults.routes === 'object') {
+                const fromRoutes = defaults.routes[normalizedDirection];
+                if (fromRoutes && typeof fromRoutes === 'object') {
+                  return fromRoutes;
+                }
+              }
+              const normalize = (value) => {
+                if (value === null || value === undefined) {
+                  return '';
+                }
+                return String(value).trim();
+              };
+              const mainAccount = normalize(defaults.main_account_id || defaults.from_account_id);
+              const tradingSub = normalize(defaults.sub_account_id || defaults.to_sub_account_id);
+              const mainSub = normalize(defaults.main_sub_account_id || defaults.to_sub_account_id || '0') || '0';
+              if (!mainAccount) {
+                return null;
+              }
+              if (normalizedDirection === 'sub_to_main') {
+                if (!tradingSub) {
+                  return null;
+                }
+                return {
+                  from_account_id: mainAccount,
+                  from_sub_account_id: tradingSub,
+                  to_account_id: mainAccount,
+                  to_sub_account_id: mainSub,
+                };
+              }
+              if (normalizedDirection === 'main_to_sub') {
+                if (!tradingSub) {
+                  return null;
+                }
+                return {
+                  from_account_id: mainAccount,
+                  from_sub_account_id: mainSub,
+                  to_account_id: mainAccount,
+                  to_sub_account_id: tradingSub,
+                };
+              }
+              return null;
+            }
+
+            function setGrvtTransferStatus(message) {
+              if (grvtTransferStatus) {
+                grvtTransferStatus.textContent = message || '等待指令…';
+              }
+            }
+
+            function updateGrvtTransferButtons() {
+              if (!grvtTransferSubmitButton) {
+                return;
+              }
+              const hasAgent = Boolean(grvtTransferAgentSelect?.value);
+              grvtTransferSubmitButton.disabled = grvtTransferLocked || !hasAgent;
+            }
+
+            function updateGrvtTransferAgents(options) {
+              if (!grvtTransferPanel || !grvtTransferAgentSelect) {
+                return;
+              }
+              const normalized = Array.isArray(options)
+                ? options
+                    .map((option) => {
+                      const agentId = option?.agentId || option?.agent || option?.id || '';
+                      if (!agentId) {
+                        return null;
+                      }
+                      const label = option?.label || option?.name || agentId;
+                      const defaults = option?.defaults && typeof option.defaults === 'object' ? option.defaults : {};
+                      return { agentId, label, defaults };
+                    })
+                    .filter(Boolean)
+                : [];
+
+              if (!normalized.length) {
+                grvtTransferPanel.classList.add('hidden');
+                grvtTransferAgentSelect.innerHTML = '';
+                grvtTransferDefaults.clear();
+                grvtTransferLocked = false;
+                grvtTransferOptionsKey = '';
+                setGrvtTransferStatus('等待 VPS 提供转账参数…');
+                updateGrvtTransferButtons();
+                return;
+              }
+
+              const optionsKey = normalized
+                .map((option) => `${option.agentId}:${JSON.stringify(option.defaults || {})}`)
+                .join('|');
+              const shouldRebuild = optionsKey !== grvtTransferOptionsKey || grvtTransferAgentSelect.options.length !== normalized.length;
+              grvtTransferDefaults.clear();
+              for (const option of normalized) {
+                grvtTransferDefaults.set(option.agentId, option.defaults || {});
+              }
+              grvtTransferPanel.classList.remove('hidden');
+
+              if (!shouldRebuild) {
+                updateGrvtTransferButtons();
+                return;
+              }
+
+              grvtTransferOptionsKey = optionsKey;
+              const previousValue = grvtTransferAgentSelect.value;
+              grvtTransferAgentSelect.innerHTML = '';
+              for (const option of normalized) {
+                const element = document.createElement('option');
+                element.value = option.agentId;
+                element.textContent = option.label;
+                grvtTransferAgentSelect.appendChild(element);
+              }
+              if (previousValue && normalized.some((option) => option.agentId === previousValue)) {
+                grvtTransferAgentSelect.value = previousValue;
+              } else if (grvtTransferAgentSelect.options.length) {
+                grvtTransferAgentSelect.selectedIndex = 0;
+              }
+              const selectedAgent = grvtTransferAgentSelect.value;
+              if (selectedAgent) {
+                applyGrvtTransferDefaults(selectedAgent, { forceAll: true });
+              }
+              updateGrvtTransferButtons();
+            }
+
+            function applyGrvtTransferDefaults(agentId, { forceAll = false } = {}) {
+              if (!agentId) {
+                updateGrvtTransferButtons();
+                return;
+              }
+              const defaults = grvtTransferDefaults.get(agentId) || {};
+              const directionValue = String(defaults.direction || 'sub_to_main').toLowerCase();
+              if (grvtTransferDirectionSelect && (forceAll || !grvtTransferDirectionSelect.value)) {
+                grvtTransferDirectionSelect.value = directionValue;
+              }
+              if (grvtTransferCurrencyInput && (forceAll || !grvtTransferCurrencyInput.value)) {
+                grvtTransferCurrencyInput.value = (defaults.currency || 'USDT').toUpperCase();
+              }
+              if (grvtTransferTypeInput && (forceAll || !grvtTransferTypeInput.value)) {
+                grvtTransferTypeInput.value = defaults.transfer_type || 'spot';
+              }
+              updateGrvtTransferRoute(agentId, { force: true });
+              updateGrvtTransferButtons();
+            }
+
+            function updateGrvtTransferRoute(agentId, { force = false } = {}) {
+              if (!agentId) {
+                return;
+              }
+              const defaults = grvtTransferDefaults.get(agentId) || {};
+              const direction = String(grvtTransferDirectionSelect?.value || defaults.direction || 'sub_to_main').toLowerCase();
+              let route = null;
+              if (defaults.routes && defaults.routes[direction]) {
+                route = defaults.routes[direction];
+              } else {
+                route = buildTransferRouteFromDefaults(defaults, direction);
+              }
+              const fallbackFromAccount = route?.from_account_id || defaults.main_account_id || defaults.from_account_id || '';
+              const fallbackFromSub = route?.from_sub_account_id || defaults.sub_account_id || defaults.from_sub_account_id || '';
+              const fallbackToAccount = route?.to_account_id || defaults.main_account_id || defaults.to_account_id || '';
+              const fallbackToSub = route?.to_sub_account_id || defaults.main_sub_account_id || defaults.to_sub_account_id || '';
+              setInputValue(grvtTransferFromAccountInput, fallbackFromAccount, { force });
+              setInputValue(grvtTransferFromSubInput, fallbackFromSub, { force });
+              setInputValue(grvtTransferToAccountInput, fallbackToAccount, { force });
+              setInputValue(grvtTransferToSubInput, fallbackToSub, { force });
+            }
+
+            async function sendGrvtTransfer() {
+              if (grvtTransferLocked) {
+                return;
+              }
+              const agentId = grvtTransferAgentSelect?.value;
+              if (!agentId) {
+                setGrvtTransferStatus('请选择 VPS 节点');
+                return;
+              }
+              const amountValue = parseFloat(getInputValue(grvtTransferAmountInput) || '0');
+              if (!Number.isFinite(amountValue) || amountValue <= 0) {
+                setGrvtTransferStatus('请输入合法的数量');
+                return;
+              }
+              const currencyValue = (getInputValue(grvtTransferCurrencyInput) || 'USDT').toUpperCase();
+              const payload = {
+                agent_ids: [agentId],
+                num_tokens: amountValue,
+                currency: currencyValue,
+                direction: (grvtTransferDirectionSelect?.value || 'sub_to_main').toLowerCase(),
+                from_account_id: getInputValue(grvtTransferFromAccountInput),
+                from_sub_account_id: getInputValue(grvtTransferFromSubInput),
+                to_account_id: getInputValue(grvtTransferToAccountInput),
+                to_sub_account_id: getInputValue(grvtTransferToSubInput),
+                transfer_type: getInputValue(grvtTransferTypeInput) || undefined,
+              };
+
+              const missing = Object.entries({
+                from_account_id: payload.from_account_id,
+                from_sub_account_id: payload.from_sub_account_id,
+                to_account_id: payload.to_account_id,
+                to_sub_account_id: payload.to_sub_account_id,
+              })
+                .filter(([, value]) => !value)
+                .map(([key]) => key);
+              if (missing.length) {
+                setGrvtTransferStatus(`缺少字段：${missing.join(', ')}`);
+                return;
+              }
+
+              if (!payload.transfer_type) {
+                delete payload.transfer_type;
+              }
+
+              const reason = getInputValue(grvtTransferReasonInput);
+              if (reason) {
+                payload.reason = reason;
+              }
+
+              grvtTransferLocked = true;
+              updateGrvtTransferButtons();
+              setGrvtTransferStatus('提交转账请求…');
+              try {
+                const response = await fetch('/grvt/transfer', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(payload),
+                });
+                redirectIfUnauthorized(response);
+                if (!response.ok) {
+                  const text = await response.text();
+                  throw new Error(text || `HTTP ${response.status}`);
+                }
+                setGrvtTransferStatus('等待 VPS ACK…');
+                await refreshMetrics();
+              } catch (error) {
+                grvtTransferLocked = false;
+                updateGrvtTransferButtons();
+                setGrvtTransferStatus(`请求失败：${error}`);
+              }
+            }
+
+            function renderGrvtTransferHistory(summary) {
+              if (!grvtTransferHistoryBody) {
+                return;
+              }
+              const requests = Array.isArray(summary?.requests)
+                ? summary.requests.filter((request) => (request?.action || '').toLowerCase() === 'transfer')
+                : [];
+              const normalizeStatus = (value) => String(value || '').toLowerCase();
+              const pendingStatuses = ['pending', 'in_progress'];
+              let locked = false;
+              let statusMessage = '等待指令…';
+
+              const active = summary?.active_request;
+              const activeIsTransfer = (active?.action || '').toLowerCase() === 'transfer' && pendingStatuses.includes(normalizeStatus(active?.overall_status));
+              const pendingCandidate = activeIsTransfer ? active : requests.find((request) => pendingStatuses.includes(normalizeStatus(request.overall_status)));
+              if (pendingCandidate) {
+                locked = true;
+                const targetAgents = Array.isArray(pendingCandidate.target_agents) ? pendingCandidate.target_agents.join(', ') : 'VPS';
+                statusMessage = `等待 ${targetAgents || 'VPS'} ACK…`;
+              } else if (requests.length) {
+                const latest = requests[0];
+                const latestStatus = normalizeStatus(latest.overall_status);
+                const payload = latest?.payload || {};
+                const directionText = describeTransferDirection(payload.direction || latest?.direction);
+                if (latestStatus === 'completed' || latestStatus === 'acknowledged') {
+                  statusMessage = `最近一次 ${directionText} 已完成`;
+                } else if (latestStatus === 'failed') {
+                  statusMessage = `最近一次 ${directionText} 部分失败`;
+                } else if (latestStatus) {
+                  statusMessage = `最近状态：${latestStatus}`;
+                }
+              }
+
+              grvtTransferLocked = locked;
+              setGrvtTransferStatus(statusMessage);
+              updateGrvtTransferButtons();
+
+              if (!requests.length) {
+                grvtTransferHistoryBody.innerHTML = '<tr><td colspan="6">暂无转账记录</td></tr>';
+                return;
+              }
+
+              const rows = [];
+              for (const request of requests.slice(0, 6)) {
+                const createdText = formatTimestamp(request.created_at) ?? '--';
+                const payload = request.payload || {};
+                const agents = Array.isArray(request.target_agents) ? request.target_agents.join(', ') : '—';
+                const amountValue = `${numberFormatter.format(toNumber(payload.num_tokens ?? request.magnitude ?? 0))} ${(payload.currency || 'USDT').toUpperCase()}`;
+                const routeText = formatTransferRoute(payload);
+                const statusText = request.overall_status || 'pending';
+                const reasonText = payload?.transfer_metadata?.reason || payload.reason || '';
+                const directionText = describeTransferDirection(payload.direction || payload?.transfer_metadata?.direction || request.direction);
+                const noteText = reasonText ? `${statusText} / ${reasonText}` : statusText;
+                rows.push(`
+                  <tr>
+                    <td>${escapeHtml(createdText)}</td>
+                    <td>${escapeHtml(agents || '—')}</td>
+                    <td>${escapeHtml(directionText)}</td>
+                    <td>${escapeHtml(amountValue)}</td>
+                    <td>${escapeHtml(routeText)}</td>
+                    <td>${escapeHtml(noteText)}</td>
+                  </tr>
+                `);
+              }
+
+              grvtTransferHistoryBody.innerHTML = rows.join('');
+            }
+            </label>
+            <label>
+              Transfer 类型
+              <input type="text" id="grvt-transfer-type" value="spot" />
+            </label>
+            <label>
+              备注（可选）
+              <textarea id="grvt-transfer-reason" placeholder="记录用途或审批信息"></textarea>
+            </label>
+          </div>
+          <div class="grvt-transfer-grid">
+            <label>
+              From Account ID
+              <input type="text" id="grvt-transfer-from-account" />
+            </label>
+            <label>
+              From Sub Account ID
+              <input type="text" id="grvt-transfer-from-sub" />
+            </label>
+            <label>
+              To Account ID
+              <input type="text" id="grvt-transfer-to-account" />
+            </label>
+            <label>
+              To Sub Account ID
+              <input type="text" id="grvt-transfer-to-sub" />
+            </label>
+          </div>
+          <div class="grvt-transfer-actions">
+            <button type="button" id="grvt-transfer-submit">提交互转</button>
+            <p class="grvt-transfer-status" id="grvt-transfer-status">等待指令…</p>
+          </div>
+          <div class="grvt-transfer-history">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>VPS</th>
+                  <th>方向</th>
+                  <th>金额</th>
+                  <th>路径</th>
+                  <th>状态 / 备注</th>
+                </tr>
+              </thead>
+              <tbody id="grvt-transfer-history"></tbody>
+            </table>
+          </div>
+        </div>
         <div>
           <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">Per Account Net PnL</h3>
           <div class="grvt-account-grid" id="grvt-account-grid"></div>
@@ -1047,6 +1500,20 @@
   const grvtAdjustReduceButton = document.getElementById('grvt-adjust-reduce');
   const grvtAdjustStatus = document.getElementById('grvt-adjust-status');
   const grvtAdjustHistoryBody = document.getElementById('grvt-adjust-history');
+  const grvtTransferPanel = document.getElementById('grvt-transfer-panel');
+  const grvtTransferAgentSelect = document.getElementById('grvt-transfer-agent');
+  const grvtTransferDirectionSelect = document.getElementById('grvt-transfer-direction');
+  const grvtTransferAmountInput = document.getElementById('grvt-transfer-amount');
+  const grvtTransferCurrencyInput = document.getElementById('grvt-transfer-currency');
+  const grvtTransferTypeInput = document.getElementById('grvt-transfer-type');
+  const grvtTransferReasonInput = document.getElementById('grvt-transfer-reason');
+  const grvtTransferFromAccountInput = document.getElementById('grvt-transfer-from-account');
+  const grvtTransferFromSubInput = document.getElementById('grvt-transfer-from-sub');
+  const grvtTransferToAccountInput = document.getElementById('grvt-transfer-to-account');
+  const grvtTransferToSubInput = document.getElementById('grvt-transfer-to-sub');
+  const grvtTransferSubmitButton = document.getElementById('grvt-transfer-submit');
+  const grvtTransferStatus = document.getElementById('grvt-transfer-status');
+  const grvtTransferHistoryBody = document.getElementById('grvt-transfer-history');
     const spreadAgentCount = document.getElementById('spread-agent-count');
     const spreadAgentLabel = document.getElementById('spread-agent-label');
     const spreadAgentSelect = document.getElementById('spread-agent-select');
@@ -1128,6 +1595,9 @@
       let lastMetricsSnapshot = null;
   let grvtAdjustLocked = false;
   let grvtPendingRequestId = null;
+  let grvtTransferLocked = false;
+  let grvtTransferOptionsKey = '';
+  const grvtTransferDefaults = new Map();
 
       const numberFormatter = new Intl.NumberFormat(undefined, {
         minimumFractionDigits: 2,
@@ -1488,6 +1958,9 @@
         if (normalized === 'reduce') {
           return '减仓';
         }
+        if (normalized === 'transfer') {
+          return '转账';
+        }
         return normalized;
       }
 
@@ -1513,6 +1986,57 @@
           return '全部';
         }
         return normalized.join(', ');
+      }
+
+      function describeTransferDirection(direction) {
+        if (!direction) {
+          return '—';
+        }
+        const normalized = String(direction).trim().toLowerCase();
+        if (normalized === 'main_to_sub') {
+          return '主账户 → 子账户';
+        }
+        if (normalized === 'sub_to_main') {
+          return '子账户 → 主账户';
+        }
+        return normalized;
+      }
+
+      function formatTransferRoute(payload) {
+        if (!payload) {
+          return '—';
+        }
+        const fromAccount = payload.from_account_id || payload.from_account || payload.from || '';
+        const fromSub = payload.from_sub_account_id ?? payload.from_sub_account ?? '';
+        const toAccount = payload.to_account_id || payload.to_account || payload.to || '';
+        const toSub = payload.to_sub_account_id ?? payload.to_sub_account ?? '';
+        const formatSide = (account, sub) => {
+          if (!account && !sub) {
+            return '?';
+          }
+          if (!sub) {
+            return account || '?';
+          }
+          return `${account || '?'} (#${sub})`;
+        };
+        return `${formatSide(fromAccount, fromSub)} → ${formatSide(toAccount, toSub)}`;
+      }
+
+      function getInputValue(element) {
+        if (!element) {
+          return '';
+        }
+        return String(element.value ?? '').trim();
+      }
+
+      function setInputValue(element, value, { force = false } = {}) {
+        if (!element) {
+          return;
+        }
+        if (!force && element.value) {
+          return;
+        }
+        element.value = value ?? '';
       }
 
       function extractBaseAsset(symbol) {
@@ -1695,26 +2219,29 @@
         if (!grvtAdjustPanel || !grvtAdjustHistoryBody) {
           return;
         }
-        const requests = Array.isArray(summary?.requests) ? summary.requests : [];
+        const allRequests = Array.isArray(summary?.requests) ? summary.requests : [];
+        const adjustmentRequests = allRequests.filter((request) => (request?.action || '').toLowerCase() !== 'transfer');
         const active = summary?.active_request;
+        const activeIsAdjustment = (active?.action || '').toLowerCase() !== 'transfer';
+        const effectiveActive = activeIsAdjustment ? active : null;
         let locked = false;
 
         const normalizeStatus = (value) => String(value || '').toLowerCase();
         const scopeFor = (request) => describeSymbolScope(request?.target_symbols ?? request?.symbols);
 
-        if (active && ['pending', 'in_progress'].includes(normalizeStatus(active.overall_status))) {
+        if (effectiveActive && ['pending', 'in_progress'].includes(normalizeStatus(effectiveActive.overall_status))) {
             locked = true;
-            grvtPendingRequestId = active.request_id || null;
-            const agents = Array.isArray(active.agents) ? active.agents : [];
+            grvtPendingRequestId = effectiveActive.request_id || null;
+            const agents = Array.isArray(effectiveActive.agents) ? effectiveActive.agents : [];
             const pendingAgents = agents.filter((agent) => normalizeStatus(agent.status) === 'pending');
             if (grvtAdjustStatus) {
               const total = agents.length || 0;
               const pendingCount = pendingAgents.length;
-              const scopeText = scopeFor(active);
+              const scopeText = scopeFor(effectiveActive);
               grvtAdjustStatus.textContent = `等待 ${pendingCount}/${total || '-'} 个 VPS ACK（${scopeText}）`;
             }
-        } else if (requests.length) {
-          const latest = requests[0];
+        } else if (adjustmentRequests.length) {
+          const latest = adjustmentRequests[0];
           const statusText = normalizeStatus(latest.overall_status || 'pending');
           if (['pending', 'in_progress'].includes(statusText)) {
             locked = true;
@@ -1745,35 +2272,33 @@
         }
         updateGrvtAdjustButtons();
 
-        if (!requests.length) {
+        if (!adjustmentRequests.length) {
           grvtAdjustHistoryBody.innerHTML = '<tr><td colspan="6">暂无广播记录</td></tr>';
-          return;
-        }
+        } else {
+          const historyRows = [];
+          for (const request of adjustmentRequests.slice(0, 6)) {
+            const statusText = request.overall_status || 'pending';
+            const createdText = formatTimestamp(request.created_at) ?? '--';
+            const agents = Array.isArray(request.agents) ? request.agents : [];
+            const scopeText = scopeFor(request);
+            const badges = agents
+              .map((agent) => {
+                const status = normalizeStatus(agent.status || 'pending');
+                const label = escapeHtml(agent.agent_id || 'agent');
+                let icon = '⏳';
+                if (status === 'acknowledged') {
+                  icon = '✅';
+                } else if (status === 'failed') {
+                  icon = '⚠️';
+                } else if (status === 'expired') {
+                  icon = '⌛';
+                }
+                const cls = `adjust-badge status-${status}`;
+                return `<span class="${cls}">${icon} ${label}</span>`;
+              })
+              .join(' ');
 
-        const historyRows = [];
-        for (const request of requests.slice(0, 6)) {
-          const statusText = request.overall_status || 'pending';
-          const createdText = formatTimestamp(request.created_at) ?? '--';
-          const agents = Array.isArray(request.agents) ? request.agents : [];
-          const scopeText = scopeFor(request);
-          const badges = agents
-            .map((agent) => {
-              const status = normalizeStatus(agent.status || 'pending');
-              const label = escapeHtml(agent.agent_id || 'agent');
-              let icon = '⏳';
-              if (status === 'acknowledged') {
-                icon = '✅';
-              } else if (status === 'failed') {
-                icon = '⚠️';
-              } else if (status === 'expired') {
-                icon = '⌛';
-              }
-              const cls = `adjust-badge status-${status}`;
-              return `<span class="${cls}">${icon} ${label}</span>`;
-            })
-            .join(' ');
-
-          historyRows.push(`
+            historyRows.push(`
             <tr>
               <td>${escapeHtml(createdText)}</td>
               <td>${escapeHtml(describeAdjustmentAction(request.action))}</td>
@@ -1783,9 +2308,11 @@
               <td>${badges || '—'}</td>
             </tr>
           `);
-        }
+          }
 
-        grvtAdjustHistoryBody.innerHTML = historyRows.join('');
+          grvtAdjustHistoryBody.innerHTML = historyRows.join('');
+        }
+        renderGrvtTransferHistory(summary);
       }
 
       function computeRiskRatio(totalValue, balanceValue) {
@@ -1893,6 +2420,7 @@
           if (grvtAccountsEmpty) {
             grvtAccountsEmpty.classList.add('hidden');
           }
+          updateGrvtTransferAgents([]);
           updateGrvtSymbolOptions(Array.from(symbolCandidates));
           return;
         }
@@ -1909,6 +2437,7 @@
         let hasEth = false;
         let hasBtc = false;
         const flattenedAccounts = [];
+        const transferOptions = [];
 
         for (const [agentId, snapshot] of entries) {
           if (!snapshot) {
@@ -1916,6 +2445,11 @@
           }
 
           const summary = snapshot.summary ?? {};
+          const transferDefaults = snapshot.transfer_defaults && typeof snapshot.transfer_defaults === 'object'
+            ? snapshot.transfer_defaults
+            : {};
+          const agentLabel = summary?.label || summary?.account_label || summary?.name || agentId;
+          transferOptions.push({ agentId, label: agentLabel, defaults: transferDefaults });
           const accounts = Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
           const snapshotTs = Number(summary.updated_at ?? snapshot.updated_at);
           if (Number.isFinite(snapshotTs) && snapshotTs > latestUpdate) {
@@ -2116,6 +2650,8 @@
         const updatedText = formatTimestamp(latestUpdate);
         grvtSummaryTime.textContent = updatedText ?? '--';
         grvtSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
+
+        updateGrvtTransferAgents(transferOptions);
 
         if (!grvtAccountGrid) {
           return;
@@ -3030,7 +3566,30 @@
           clearGrvtSymbolSelection();
         });
       }
+      if (grvtTransferSubmitButton) {
+        grvtTransferSubmitButton.addEventListener('click', () => {
+          sendGrvtTransfer();
+        });
+      }
+      if (grvtTransferAgentSelect) {
+        grvtTransferAgentSelect.addEventListener('change', (event) => {
+          const agentId = event.target.value;
+          if (agentId) {
+            applyGrvtTransferDefaults(agentId, { forceAll: true });
+            setGrvtTransferStatus('等待指令…');
+          }
+          updateGrvtTransferButtons();
+        });
+      }
+      if (grvtTransferDirectionSelect) {
+        grvtTransferDirectionSelect.addEventListener('change', () => {
+          if (grvtTransferAgentSelect?.value) {
+            updateGrvtTransferRoute(grvtTransferAgentSelect.value, { force: true });
+          }
+        });
+      }
       updateGrvtSymbolOptions([]);
+      updateGrvtTransferButtons();
       refreshMetrics();
       setInterval(refreshMetrics, 2000);
     </script>

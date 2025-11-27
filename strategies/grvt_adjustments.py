@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Literal, Optional
 
-AdjustmentAction = Literal["add", "reduce"]
+AdjustmentAction = Literal["add", "reduce", "transfer"]
 AdjustmentAgentStatus = Literal["pending", "acknowledged", "failed", "expired"]
 
 
@@ -37,6 +37,7 @@ class AdjustmentRequest:
     target_symbols: List[str] = field(default_factory=list)
     agent_states: Dict[str, AdjustmentAgentState] = field(default_factory=dict)
     expires_at: Optional[float] = None
+    payload: Dict[str, Any] = field(default_factory=dict)
 
     def overall_status(self) -> str:
         if not self.agent_states:
@@ -74,6 +75,7 @@ class AdjustmentRequest:
             "symbols": list(self.target_symbols),
             "overall_status": self.overall_status(),
             "agents": [state.serialize() for state in self.agent_states.values()],
+            "payload": dict(self.payload),
         }
 
 
@@ -100,6 +102,7 @@ class GrvtAdjustmentManager:
         agent_ids: Iterable[str],
         symbols: Optional[Iterable[str]] = None,
         created_by: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         agent_list = self._normalize_agent_ids(agent_ids)
         if not agent_list:
@@ -118,6 +121,7 @@ class GrvtAdjustmentManager:
             target_symbols=symbol_list,
             expires_at=time.time() + self._expiry_seconds,
             agent_states={agent: AdjustmentAgentState(agent_id=agent) for agent in agent_list},
+            payload=dict(payload or {}),
         )
         async with self._lock:
             self._prune_locked(time.time())
@@ -165,6 +169,7 @@ class GrvtAdjustmentManager:
                             "magnitude": request.magnitude,
                             "created_at": request.created_at,
                             "symbols": list(request.target_symbols),
+                            "payload": dict(request.payload),
                         }
                     )
             return pending
