@@ -1101,12 +1101,16 @@ class GrvtAccountMonitor:
         json_payload: Optional[Any] = None,
     ) -> None:
         try:
+            raw_headers: Optional[Dict[str, Any]] = None
+            if headers:
+                raw_headers = {str(key): value for key, value in headers.items() if key is not None}
             sanitized_headers = self._sanitize_headers(headers)
             body_repr: Any = None
+            raw_body: Any = None
             if json_payload is not None:
+                raw_body = json_payload
                 body_repr = self._sanitize_transfer_payload(json_payload)
             elif body is not None:
-                text: str
                 if isinstance(body, (bytes, bytearray)):
                     text = body.decode("utf-8", errors="replace")
                 else:
@@ -1117,8 +1121,10 @@ class GrvtAccountMonitor:
                 except Exception:
                     parsed = None
                 if parsed is not None:
+                    raw_body = parsed
                     body_repr = self._sanitize_transfer_payload(parsed)
                 else:
+                    raw_body = text
                     body_repr = text[:2048]
             LOGGER.info(
                 "GRVT transfer request (%s): %s %s headers=%s body=%s",
@@ -1128,7 +1134,7 @@ class GrvtAccountMonitor:
                 sanitized_headers,
                 body_repr,
             )
-            self._append_transfer_log_entry(context, method, url, sanitized_headers, body_repr)
+            self._append_transfer_log_entry(context, method, url, raw_headers, raw_body)
         except Exception:
             LOGGER.debug("Failed to log GRVT transfer request", exc_info=True)
 
@@ -1137,7 +1143,7 @@ class GrvtAccountMonitor:
         context: str,
         method: str,
         url: str,
-        headers: Mapping[str, Any],
+        headers: Optional[Mapping[str, Any]],
         body: Any,
     ) -> None:
         path = self._transfer_log_path
@@ -1154,7 +1160,7 @@ class GrvtAccountMonitor:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as handle:
-                json.dump(record, handle, ensure_ascii=False, separators=(",", ":"))
+                json.dump(record, handle, ensure_ascii=False, separators=(",", ":"), default=str)
                 handle.write("\n")
         except Exception:
             LOGGER.debug("Failed to append GRVT transfer audit log entry", exc_info=True)
