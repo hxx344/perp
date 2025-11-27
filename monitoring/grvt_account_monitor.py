@@ -18,7 +18,7 @@ import re
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
@@ -32,6 +32,11 @@ try:  # pragma: no cover - optional dependency wiring
     from eth_account import Account as EthAccount
 except ImportError:  # pragma: no cover - fallback when pysdk deps missing
     EthAccount = None  # type: ignore
+
+try:  # pragma: no cover - optional dependency wiring
+    from web3 import Web3
+except ImportError:  # pragma: no cover - allow running without web3
+    Web3 = None  # type: ignore
 
 try:  # pragma: no cover - optional dependency wiring
     from pysdk.grvt_fixed_types import Transfer as GrvtTransfer
@@ -1170,7 +1175,7 @@ class GrvtAccountMonitor:
         if path is None:
             return
         record = {
-            "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
             "context": context,
             "method": method,
             "url": url,
@@ -1225,6 +1230,23 @@ class GrvtAccountMonitor:
             return len(value) == 0
         return False
 
+    @staticmethod
+    def _format_checksum_address(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            text = str(value).strip()
+        except Exception:
+            return None
+        if not text:
+            return None
+        if Web3 is not None:  # pragma: no cover - optional dependency guard
+            try:
+                return Web3.to_checksum_address(text)
+            except (ValueError, AttributeError):
+                return text
+        return text
+
     def _prepare_transfer_payload_for_variant(
         self,
         api_variant: str,
@@ -1260,8 +1282,10 @@ class GrvtAccountMonitor:
             and from_account_id
             and str(signer_value).strip().lower() == str(from_account_id).strip().lower()
         )
+        preferred_signer = signer_value if signer_matches_from else from_account_id
+        formatted_signer = self._format_checksum_address(preferred_signer) or preferred_signer
         lite_signature = {
-            "s": signer_value if signer_matches_from else from_account_id,
+            "s": formatted_signer,
             "r": signature_block.get("r"),
             "s1": signature_block.get("s"),
             "v": signature_block.get("v"),
