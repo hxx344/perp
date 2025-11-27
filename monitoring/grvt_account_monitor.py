@@ -1108,6 +1108,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Collect and push a single snapshot, then exit")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Shortcut for --log-level WARNING to reduce log noise",
+    )
+    parser.add_argument(
         "--env-file",
         action="append",
         help="Env file to preload (defaults to .env if present). Repeat to load multiple files.",
@@ -1117,7 +1122,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     args = parse_args(argv)
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+    log_level_name = args.log_level
+    if getattr(args, "quiet", False):
+        log_level_name = "WARNING"
+    logging.basicConfig(level=getattr(logging, (log_level_name or "INFO").upper(), logging.INFO))
 
     env_files = args.env_file if args.env_file is not None else [".env"]
     load_env_files(env_files)

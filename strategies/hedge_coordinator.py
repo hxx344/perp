@@ -1334,7 +1334,10 @@ class CoordinatorApp:
 
 
 async def _run_app(args: argparse.Namespace) -> None:
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+    log_level_name = args.log_level
+    if getattr(args, "quiet", False):
+        log_level_name = "WARNING"
+    logging.basicConfig(level=getattr(logging, (log_level_name or "INFO").upper(), logging.INFO))
 
     risk_threshold = args.risk_alert_threshold if args.risk_alert_threshold and args.risk_alert_threshold > 0 else None
     risk_reset = None
@@ -1424,6 +1427,11 @@ def _parse_args() -> argparse.Namespace:
         "--log-level",
         default="INFO",
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Shortcut for --log-level WARNING to suppress informational logs",
     )
     parser.add_argument(
         "--dashboard-username",
