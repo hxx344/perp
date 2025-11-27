@@ -1163,6 +1163,48 @@ class GrvtAccountMonitor:
         except Exception:
             LOGGER.debug("Failed to log GRVT transfer request", exc_info=True)
 
+    @staticmethod
+    def _summarize_http_error(response: Any) -> str:
+        if response is None:
+            return "HTTP request failed (no response)"
+        status = getattr(response, "status_code", None)
+        prefix = f"HTTP {status}" if status is not None else "HTTP error"
+        detail: Optional[str] = None
+        payload: Any = None
+        if hasattr(response, "json"):
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+        if isinstance(payload, dict):
+            for key in ("error", "message", "detail", "reason", "status", "code"):
+                value = payload.get(key)
+                if value is None:
+                    continue
+                if isinstance(value, (str, int, float)):
+                    detail = str(value)
+                    break
+                if isinstance(value, dict):
+                    try:
+                        detail = json.dumps(value, ensure_ascii=False)
+                    except Exception:
+                        detail = str(value)
+                    break
+        if detail is None:
+            text = getattr(response, "text", None)
+            if isinstance(text, str) and text.strip():
+                detail = text.strip()
+        if detail is None:
+            content = getattr(response, "content", None)
+            if isinstance(content, (bytes, bytearray)):
+                snippet = content.decode("utf-8", errors="replace").strip()
+                if snippet:
+                    detail = snippet
+        if detail:
+            detail = detail[:400]
+            return f"{prefix}: {detail}"
+        return prefix
+
     def _append_transfer_log_entry(
         self,
         context: str,
@@ -1424,7 +1466,11 @@ class GrvtAccountMonitor:
         )
         response = cast(Any, http_call)(method, url, data=body, headers=headers, timeout=self._timeout)
         if hasattr(response, "raise_for_status"):
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except Exception as exc:
+                detail = self._summarize_http_error(response)
+                raise RuntimeError(detail) from exc
         if hasattr(response, "json"):
             try:
                 return response.json()
@@ -1527,7 +1573,11 @@ class GrvtAccountMonitor:
             http_call("POST", url, json=request_payload, headers=headers, timeout=self._timeout),
         )
         if hasattr(response, "raise_for_status"):
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except Exception as exc:
+                detail = self._summarize_http_error(response)
+                raise RuntimeError(detail) from exc
         if hasattr(response, "json"):
             try:
                 return response.json()
