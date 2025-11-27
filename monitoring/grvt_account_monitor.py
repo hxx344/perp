@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from logging.handlers import RotatingFileHandler
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -1062,6 +1063,17 @@ class GrvtAccountMonitor:
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    def _env_bool(name: str, default: bool = False) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        text = raw.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+
     parser = argparse.ArgumentParser(description="Monitor a GRVT account per VPS and forward PnL data to the dashboard")
     parser.add_argument(
         "--coordinator-url",
@@ -1108,6 +1120,28 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Collect and push a single snapshot, then exit")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument(
+        "--log-file",
+        help="Optional path to write agent logs (rotating file handler)",
+    )
+    parser.add_argument(
+        "--log-file-max-bytes",
+        type=int,
+        default=int(os.getenv("GRVT_LOG_FILE_MAX_BYTES", "5242880")),
+        help="Rotate log file after this many bytes (default 5 MiB)",
+    )
+    parser.add_argument(
+        "--log-file-backup-count",
+        type=int,
+        default=int(os.getenv("GRVT_LOG_FILE_BACKUP_COUNT", "5")),
+        help="Number of rotated log files to keep",
+    )
+    parser.add_argument(
+        "--no-log-file",
+        action="store_true",
+        default=_env_bool("GRVT_DISABLE_LOG_FILE", False),
+        help="Disable file logging even if defaults would enable it",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Shortcut for --log-level WARNING to reduce log noise",
@@ -1120,12 +1154,51 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
-    args = parse_args(argv)
+def _resolve_log_file_path(args: argparse.Namespace) -> Optional[Path]:
+    if getattr(args, "no_log_file", False):
+        return None
+    explicit = getattr(args, "log_file", None) or os.getenv("GRVT_LOG_FILE")
+    if explicit:
+        return Path(explicit).expanduser()
+    agent_label = args.agent_id or os.getenv("GRVT_ACCOUNT_LABEL") or "grvt-monitor"
+    safe_agent = re.sub(r"[^A-Za-z0-9_.-]+", "-", agent_label) or "grvt-monitor"
+    log_dir = Path(os.getenv("GRVT_LOG_DIR", "logs")).expanduser()
+    return log_dir / f"{safe_agent}.log"
+
+
+def _configure_logging(args: argparse.Namespace) -> None:
     log_level_name = args.log_level
     if getattr(args, "quiet", False):
         log_level_name = "WARNING"
-    logging.basicConfig(level=getattr(logging, (log_level_name or "INFO").upper(), logging.INFO))
+    level = getattr(logging, (log_level_name or "INFO").upper(), logging.INFO)
+    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(logging.Formatter(log_format))
+    handlers: List[logging.Handler] = [stream_handler]
+
+    log_file_path = _resolve_log_file_path(args)
+    if log_file_path is not None:
+        max_bytes = max(1024, int(args.log_file_max_bytes or 0))
+        backup_count = max(1, int(args.log_file_backup_count or 1))
+        try:
+            log_file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = RotatingFileHandler(
+                log_file_path,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
+            file_handler.setFormatter(logging.Formatter(log_format))
+            handlers.append(file_handler)
+        except OSError as exc:
+            print(f"Failed to set up log file {log_file_path}: {exc}", file=sys.stderr)
+
+    logging.basicConfig(level=level, handlers=handlers, format=log_format)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    args = parse_args(argv)
+    _configure_logging(args)
 
     env_files = args.env_file if args.env_file is not None else [".env"]
     load_env_files(env_files)
