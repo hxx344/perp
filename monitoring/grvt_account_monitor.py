@@ -10,20 +10,46 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import logging
 import os
+import random
 import re
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, cast
 from logging.handlers import RotatingFileHandler
 
 import requests
 from requests.auth import HTTPBasicAuth
 from requests.exceptions import RequestException
+
+try:  # pragma: no cover - optional dependency wiring
+    from eth_account import Account as EthAccount
+except ImportError:  # pragma: no cover - fallback when pysdk deps missing
+    EthAccount = None  # type: ignore
+
+try:  # pragma: no cover - optional dependency wiring
+    from pysdk.grvt_fixed_types import Transfer as GrvtTransfer
+    from pysdk.grvt_raw_base import GrvtApiConfig
+    from pysdk.grvt_raw_env import GrvtEnv as RawGrvtEnv
+    from pysdk.grvt_raw_signing import sign_transfer
+    from pysdk.grvt_raw_types import Signature as GrvtSignature, TransferType
+    from pysdk.grvt_ccxt_env import GrvtEndpointType, get_grvt_endpoint_domains
+    from pysdk.grvt_ccxt_utils import GrvtCurrency
+except ImportError:  # pragma: no cover - fallback guard
+    GrvtTransfer = None  # type: ignore
+    GrvtApiConfig = None  # type: ignore
+    RawGrvtEnv = None  # type: ignore
+    sign_transfer = None  # type: ignore
+    GrvtSignature = None  # type: ignore
+    TransferType = None  # type: ignore
+    GrvtEndpointType = None  # type: ignore
+    get_grvt_endpoint_domains = None  # type: ignore
+    GrvtCurrency = None  # type: ignore
 
 getcontext().prec = 28
 
@@ -62,6 +88,9 @@ BALANCE_AVAILABLE_PATHS: Tuple[Tuple[str, ...], ...] = (
     ("info", "availableMargin"),
     ("info", "available_margin"),
 )
+DEFAULT_TRANSFER_CURRENCY = "USDT"
+DEFAULT_TRANSFER_CURRENCY_ID = 3
+SIGNATURE_TTL_SECONDS = 15 * 60
 def load_env_files(paths: Sequence[str]) -> None:
     if not paths:
         return
@@ -417,6 +446,7 @@ class GrvtAccountMonitor:
         self._symbol_aliases: Dict[str, str] = {}
         self._processed_adjustments: Dict[str, Dict[str, Any]] = {}
         self._latest_positions: Dict[str, Decimal] = {}
+        self._currency_catalog: Dict[str, int] = {}
         self._control_endpoint = f"{self._coordinator_url}/control"
         self._update_endpoint = f"{self._coordinator_url}/update"
         self._ack_endpoint = f"{self._coordinator_url}/grvt/adjust/ack"
@@ -437,6 +467,7 @@ class GrvtAccountMonitor:
         self._default_transfer_currency = str(currency_source).strip().upper()
         self._default_transfer_direction = str(direction_source).strip().lower()
         self._default_transfer_type = type_source
+        self._prime_currency_catalog()
 
     def _build_transfer_route(self, direction: str) -> Optional[Dict[str, str]]:
         direction_normalized = (direction or "").strip().lower()
@@ -910,6 +941,147 @@ class GrvtAccountMonitor:
             else:
                 payload["to_sub_account_id"] = self._home_main_sub_account_id
 
+    def _prime_currency_catalog(self) -> None:
+        if not self._currency_catalog and GrvtCurrency is not None:
+            try:
+                for member in GrvtCurrency:  # type: ignore[not-an-iterable]
+                    try:
+                        self._currency_catalog[str(member.name).upper()] = int(member.value)
+                    except Exception:
+                        continue
+            except Exception:
+                LOGGER.debug("Failed to prime GRVT currency catalog from enum", exc_info=True)
+        if DEFAULT_TRANSFER_CURRENCY not in self._currency_catalog:
+            self._currency_catalog[DEFAULT_TRANSFER_CURRENCY] = DEFAULT_TRANSFER_CURRENCY_ID
+
+    def _resolve_currency_id(self, currency: Optional[str]) -> int:
+        symbol = str(currency or self._default_transfer_currency or DEFAULT_TRANSFER_CURRENCY).strip().upper()
+        if not symbol:
+            symbol = DEFAULT_TRANSFER_CURRENCY
+        currency_id = self._currency_catalog.get(symbol)
+        if currency_id is not None:
+            return currency_id
+        self._refresh_currency_catalog()
+        currency_id = self._currency_catalog.get(symbol)
+        if currency_id is not None:
+            return currency_id
+        LOGGER.warning(
+            "Unknown GRVT currency '%s'; defaulting to %s (id %s)",
+            symbol,
+            DEFAULT_TRANSFER_CURRENCY,
+            DEFAULT_TRANSFER_CURRENCY_ID,
+        )
+        return self._currency_catalog.get(DEFAULT_TRANSFER_CURRENCY, DEFAULT_TRANSFER_CURRENCY_ID)
+
+    def _refresh_currency_catalog(self) -> None:
+        base_url = self._resolve_grvt_private_url()
+        if not base_url:
+            return
+        url = f"{base_url}/full/v1/currency"
+        client = self._session.client
+        http_session = getattr(client, "session", None)
+        http_call = getattr(http_session, "get", None)
+        if not callable(http_call):
+            http_call = requests.get
+        try:
+            response = http_call(url, timeout=self._timeout)
+            raise_for_status = getattr(response, "raise_for_status", None)
+            if callable(raise_for_status):
+                raise_for_status()
+            data_method = getattr(response, "json", None)
+            data = data_method() if callable(data_method) else None
+        except Exception as exc:
+            LOGGER.debug("Failed to refresh GRVT currency catalog: %s", exc)
+            return
+        results = None
+        if isinstance(data, dict):
+            results = data.get("result") or data.get("results")
+        if not isinstance(results, list):
+            return
+        for entry in results:
+            if not isinstance(entry, dict):
+                continue
+            symbol = entry.get("symbol")
+            identifier = entry.get("id")
+            if symbol and isinstance(identifier, int):
+                self._currency_catalog[str(symbol).strip().upper()] = identifier
+
+    def _resolve_grvt_private_url(self) -> Optional[str]:
+        client = self._session.client
+        urls = getattr(client, "urls", None)
+        if isinstance(urls, dict):
+            api_block = urls.get("api")
+            if isinstance(api_block, dict):
+                for key in ("private", "trade", "default", "rest"):
+                    candidate = api_block.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        return candidate.rstrip("/")
+        env_obj = getattr(client, "env", None)
+        env_value = getattr(env_obj, "value", env_obj)
+        if get_grvt_endpoint_domains and GrvtEndpointType is not None and env_value is not None:
+            try:
+                domains = get_grvt_endpoint_domains(env_value)  # type: ignore[misc]
+            except Exception:
+                domains = None
+            if isinstance(domains, dict):
+                trade_key = getattr(GrvtEndpointType, "TRADE_DATA", None)
+                trade_domain = domains.get(trade_key)
+                if hasattr(trade_key, "value") and not trade_domain:
+                    trade_domain = domains.get(getattr(trade_key, "value", None))
+                if not trade_domain:
+                    trade_domain = domains.get("TRADE_DATA") or domains.get("trade_data")
+                if isinstance(trade_domain, str) and trade_domain.strip():
+                    return trade_domain.rstrip("/")
+        return None
+
+    @staticmethod
+    def _serialize_transfer_metadata(metadata: Any) -> str:
+        if metadata is None:
+            return "{}"
+        if isinstance(metadata, str):
+            stripped = metadata.strip()
+            return stripped or "{}"
+        try:
+            return json.dumps(metadata, separators=(",", ":"), sort_keys=True)
+        except Exception:
+            return str(metadata)
+
+    def _resolve_raw_env(self, env_candidate: Any) -> Any:
+        if RawGrvtEnv is None:  # pragma: no cover - optional dependency guard
+            raise RuntimeError("RawGrvtEnv helpers unavailable")
+        env_value = getattr(env_candidate, "value", None) or getattr(env_candidate, "name", None)
+        text = str(env_value or "prod").strip()
+        if not text:
+            text = "prod"
+        lower_text = text.lower()
+        try:
+            return RawGrvtEnv(lower_text)  # type: ignore[call-arg]
+        except Exception:
+            try:
+                return RawGrvtEnv[text.upper()]  # type: ignore[index]
+            except Exception:
+                LOGGER.warning("Unknown GRVT environment '%s'; defaulting to PROD", text)
+                return RawGrvtEnv.PROD  # type: ignore[attr-defined]
+
+    def _normalize_transfer_type(self, transfer_type_value: Any) -> Any:
+        if TransferType is None:  # pragma: no cover - optional dependency guard
+            raise RuntimeError("TransferType helpers unavailable")
+        if isinstance(transfer_type_value, TransferType):
+            return transfer_type_value
+        if transfer_type_value is None:
+            transfer_type_value = self._default_transfer_type or "UNSPECIFIED"
+        text = str(transfer_type_value).strip()
+        if not text:
+            text = "UNSPECIFIED"
+        upper_text = text.upper()
+        try:
+            return TransferType[upper_text]  # type: ignore[index]
+        except Exception:
+            try:
+                return TransferType(text)  # type: ignore[call-arg]
+            except Exception as exc:
+                raise ValueError(f"Unsupported transfer type '{transfer_type_value}'") from exc
+
     def _call_transfer_endpoint(self, payload: Dict[str, Any]) -> Any:
         try:
             return self._post_transfer_request(payload)
@@ -919,8 +1091,16 @@ class GrvtAccountMonitor:
     def _post_transfer_request(self, payload: Dict[str, Any]) -> Any:
         client = self._session.client
         sign_method = getattr(client, "sign", None)
-        if not callable(sign_method):
-            raise RuntimeError("GRVT client does not expose sign(); cannot craft raw transfer request")
+        if callable(sign_method):
+            return self._post_transfer_via_client_sign(client, sign_method, payload)
+        return self._post_transfer_with_raw_signing(client, payload)
+
+    def _post_transfer_via_client_sign(
+        self,
+        client: Any,
+    sign_method: Callable[..., Any],
+        payload: Dict[str, Any],
+    ) -> Any:
         signed_request = sign_method("full/v1/transfer", "private", "POST", payload)
         if not isinstance(signed_request, dict):
             raise RuntimeError("sign() returned unexpected payload")
@@ -935,6 +1115,95 @@ class GrvtAccountMonitor:
         if not callable(http_call):
             http_call = requests.request
         response = cast(Any, http_call)(method, url, data=body, headers=headers, timeout=self._timeout)
+        if hasattr(response, "raise_for_status"):
+            response.raise_for_status()
+        if hasattr(response, "json"):
+            try:
+                return response.json()
+            except ValueError:
+                pass
+        return getattr(response, "text", response)
+
+    def _post_transfer_with_raw_signing(self, client: Any, payload: Dict[str, Any]) -> Any:
+        missing_helpers = [
+            GrvtTransfer,
+            GrvtSignature,
+            sign_transfer,
+            GrvtApiConfig,
+            RawGrvtEnv,
+            EthAccount,
+        ]
+        if any(helper is None for helper in missing_helpers):  # pragma: no cover - import guard
+            raise RuntimeError(
+                "Raw transfer signing helpers unavailable; please upgrade grvt-pysdk to v0.2.1 or newer"
+            )
+        private_key = getattr(client, "_private_key", None) or getattr(client, "private_key", None)
+        if not private_key:
+            raise RuntimeError("GRVT client missing private key; cannot sign transfer payload")
+        api_key = getattr(client, "_api_key", None) or os.getenv("GRVT_API_KEY")
+        trading_account_id = None
+        get_account_id = getattr(client, "get_trading_account_id", None)
+        if callable(get_account_id):
+            trading_account_id = get_account_id()
+        raw_env = self._resolve_raw_env(getattr(client, "env", None))
+        currency_id = self._resolve_currency_id(payload.get("currency"))
+        transfer_type_enum = self._normalize_transfer_type(payload.get("transfer_type"))
+        signature_nonce = random.randint(1, 2**32 - 1)
+        expiration_ns = int((time.time() + SIGNATURE_TTL_SECONDS) * 1_000_000_000)
+        signature = GrvtSignature(  # type: ignore[call-arg]
+            signer="",
+            r="",
+            s="",
+            v=0,
+            expiration=str(expiration_ns),
+            nonce=signature_nonce,
+        )
+        metadata_text = self._serialize_transfer_metadata(payload.get("transfer_metadata"))
+        transfer = GrvtTransfer(  # type: ignore[call-arg]
+            from_account_id=str(payload["from_account_id"]),
+            from_sub_account_id=str(payload["from_sub_account_id"]),
+            to_account_id=str(payload["to_account_id"]),
+            to_sub_account_id=str(payload["to_sub_account_id"]),
+            currency=str(payload["currency"]),
+            num_tokens=str(payload["num_tokens"]),
+            signature=signature,
+            transfer_type=transfer_type_enum,
+            transfer_metadata=metadata_text,
+        )
+        config = GrvtApiConfig(  # type: ignore[call-arg]
+            env=raw_env,
+            trading_account_id=trading_account_id,
+            private_key=str(private_key),
+            api_key=api_key,
+            logger=LOGGER,
+        )
+        account = EthAccount.from_key(str(private_key))  # type: ignore[arg-type]
+        signed_transfer = sign_transfer(  # type: ignore[misc]
+            transfer,
+            config,
+            account,
+            currencyId=currency_id,
+        )
+        transfer_dict = asdict(signed_transfer)
+        transfer_dict["transfer_type"] = transfer_type_enum.value
+        transfer_dict["transfer_metadata"] = metadata_text
+        signature_block = transfer_dict.get("signature")
+        if isinstance(signature_block, dict):
+            signature_block["expiration"] = str(expiration_ns)
+            signature_block["nonce"] = signature_nonce
+        base_url = self._resolve_grvt_private_url()
+        if not base_url:
+            raise RuntimeError("Unable to determine GRVT API endpoint for transfer request")
+        url = f"{base_url}/full/v1/transfer"
+        session = getattr(client, "session", None)
+        http_call = getattr(session, "request", None) if session is not None else None
+        if not callable(http_call):
+            http_call = requests.request
+        headers = {"Content-Type": "application/json"}
+        response = cast(
+            Any,
+            http_call("POST", url, json=transfer_dict, headers=headers, timeout=self._timeout),
+        )
         if hasattr(response, "raise_for_status"):
             response.raise_for_status()
         if hasattr(response, "json"):
