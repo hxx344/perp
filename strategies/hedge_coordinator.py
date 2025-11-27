@@ -1048,7 +1048,7 @@ class CoordinatorApp:
         error_block = ""
         if error:
             error_block = '<div class="error">用户名或密码不正确</div>'
-        html = LOGIN_TEMPLATE.format(error_block=error_block)
+        html = LOGIN_TEMPLATE.replace("{error_block}", error_block)
         return web.Response(text=html, content_type="text/html")
 
     async def handle_login_form(self, request: web.Request) -> web.Response:
