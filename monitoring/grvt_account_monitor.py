@@ -18,6 +18,7 @@ import re
 import sys
 import time
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
@@ -477,7 +478,10 @@ class GrvtAccountMonitor:
         self._default_transfer_direction = str(direction_source).strip().lower()
         self._default_transfer_type = self._canonicalize_transfer_type_key(type_source)
         self._prime_currency_catalog()
-        self._transfer_log_path = self._resolve_transfer_log_path(transfer_log_path, disable_transfer_log)
+        self._transfer_log_path: Optional[Path] = self._resolve_transfer_log_path(
+            transfer_log_path,
+            disable_transfer_log,
+        )
 
     def _build_transfer_route(self, direction: str) -> Optional[Dict[str, str]]:
         direction_normalized = (direction or "").strip().lower()
@@ -1124,8 +1128,57 @@ class GrvtAccountMonitor:
                 sanitized_headers,
                 body_repr,
             )
+            self._append_transfer_log_entry(context, method, url, sanitized_headers, body_repr)
         except Exception:
             LOGGER.debug("Failed to log GRVT transfer request", exc_info=True)
+
+    def _append_transfer_log_entry(
+        self,
+        context: str,
+        method: str,
+        url: str,
+        headers: Mapping[str, Any],
+        body: Any,
+    ) -> None:
+        path = self._transfer_log_path
+        if path is None:
+            return
+        record = {
+            "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "context": context,
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "body": body,
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                json.dump(record, handle, ensure_ascii=False, separators=(",", ":"))
+                handle.write("\n")
+        except Exception:
+            LOGGER.debug("Failed to append GRVT transfer audit log entry", exc_info=True)
+
+    def _resolve_transfer_log_path(
+        self,
+        explicit_path: Optional[str],
+        disable_flag: bool,
+    ) -> Optional[Path]:
+        def _env_true(name: str) -> bool:
+            raw = os.getenv(name)
+            if raw is None:
+                return False
+            return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+        if disable_flag or _env_true("GRVT_DISABLE_TRANSFER_LOG"):
+            return None
+        candidate = explicit_path or os.getenv("GRVT_TRANSFER_LOG_FILE")
+        if candidate:
+            return Path(candidate).expanduser()
+        label_source = self._agent_id or self._session.label or os.getenv("GRVT_ACCOUNT_LABEL") or "grvt-monitor"
+        safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", label_source) or "grvt-monitor"
+        log_dir = Path(os.getenv("GRVT_LOG_DIR", "logs")).expanduser()
+        return log_dir / f"{safe_label}.transfer.log"
 
     def _resolve_raw_env(self, env_candidate: Any) -> Any:
         if RawGrvtEnv is None:  # pragma: no cover - optional dependency guard
@@ -1523,6 +1576,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Optional path to write agent logs (rotating file handler)",
     )
     parser.add_argument(
+        "--transfer-log-file",
+        help="Optional path to append sanitized GRVT transfer POST requests",
+    )
+    parser.add_argument(
         "--log-file-max-bytes",
         type=int,
         default=int(os.getenv("GRVT_LOG_FILE_MAX_BYTES", "5242880")),
@@ -1539,6 +1596,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         default=_env_bool("GRVT_DISABLE_LOG_FILE", False),
         help="Disable file logging even if defaults would enable it",
+    )
+    parser.add_argument(
+        "--no-transfer-log",
+        action="store_true",
+        default=_env_bool("GRVT_DISABLE_TRANSFER_LOG", False),
+        help="Disable writing sanitized transfer request payloads to a log file",
     )
     parser.add_argument(
         "--quiet",
@@ -1636,6 +1699,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         default_transfer_currency=args.default_transfer_currency,
         default_transfer_direction=args.default_transfer_direction,
         default_transfer_type=args.default_transfer_type,
+            transfer_log_path=args.transfer_log_file,
+            disable_transfer_log=args.no_transfer_log,
     )
 
     if args.once:
