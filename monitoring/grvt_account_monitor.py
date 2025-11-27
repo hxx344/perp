@@ -1244,8 +1244,14 @@ class GrvtAccountMonitor:
             "nt": transfer_dict.get("num_tokens"),
         }
         signature_block = transfer_dict.get("signature") or {}
+        signer_value = signature_block.get("signer")
+        signer_matches_from = (
+            signer_value
+            and from_account_id
+            and str(signer_value).strip().lower() == str(from_account_id).strip().lower()
+        )
         lite_signature = {
-            "s": signature_block.get("signer") or from_account_id,
+            "s": signer_value if signer_matches_from else from_account_id,
             "r": signature_block.get("r"),
             "s1": signature_block.get("s"),
             "v": signature_block.get("v"),
