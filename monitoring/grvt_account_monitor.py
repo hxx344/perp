@@ -1201,6 +1201,16 @@ class GrvtAccountMonitor:
             LOGGER.warning("Unknown transfer API variant '%s'; defaulting to lite", candidate)
         return "lite"
 
+    @staticmethod
+    def _is_empty_transfer_value(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value == ""
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value) == 0
+        return False
+
     def _prepare_transfer_payload_for_variant(
         self,
         api_variant: str,
@@ -1238,12 +1248,16 @@ class GrvtAccountMonitor:
             "n": signature_block.get("nonce"),
         }
         chain_id = signature_block.get("chain_id") or transfer_dict.get("chain_id")
-        if chain_id not in {None, ""}:
+        if not self._is_empty_transfer_value(chain_id):
             lite_signature["ci"] = chain_id
-        lite_payload["s"] = {key: value for key, value in lite_signature.items() if value not in {None, ""}}
+        lite_payload["s"] = {
+            key: value
+            for key, value in lite_signature.items()
+            if not self._is_empty_transfer_value(value)
+        }
 
         transfer_type_value = transfer_dict.get("transfer_type")
-        if transfer_type_value not in {None, ""}:
+        if not self._is_empty_transfer_value(transfer_type_value):
             lite_payload["tt"] = transfer_type_value
 
         metadata_payload: Any = metadata_obj
@@ -1252,10 +1266,14 @@ class GrvtAccountMonitor:
                 metadata_payload = json.loads(metadata_text)
             except Exception:
                 metadata_payload = metadata_text
-        if metadata_payload not in (None, "", {}):
+        if not self._is_empty_transfer_value(metadata_payload):
             lite_payload["tm"] = metadata_payload
 
-        return {key: value for key, value in lite_payload.items() if value not in {None, ""}}
+        return {
+            key: value
+            for key, value in lite_payload.items()
+            if not self._is_empty_transfer_value(value)
+        }
 
     def _resolve_raw_env(self, env_candidate: Any) -> Any:
         if RawGrvtEnv is None:  # pragma: no cover - optional dependency guard
