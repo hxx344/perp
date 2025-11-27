@@ -1261,12 +1261,18 @@ class GrvtAccountMonitor:
         if not self._is_empty_transfer_value(transfer_type_value):
             lite_payload["tt"] = transfer_type_value
 
-        metadata_payload: Any = metadata_obj
-        if metadata_payload is None:
-            try:
-                metadata_payload = json.loads(metadata_text)
-            except Exception:
+        metadata_payload: Any = None
+        if isinstance(metadata_text, str):
+            normalized_metadata_text = metadata_text.strip()
+            if normalized_metadata_text and normalized_metadata_text not in {"{}", "[]"}:
                 metadata_payload = metadata_text
+        if metadata_payload is None:
+            metadata_payload = metadata_obj
+            if metadata_payload is None:
+                try:
+                    metadata_payload = json.loads(metadata_text)
+                except Exception:
+                    metadata_payload = metadata_text
         if not self._is_empty_transfer_value(metadata_payload):
             lite_payload["tm"] = metadata_payload
 
