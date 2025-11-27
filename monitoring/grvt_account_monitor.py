@@ -20,7 +20,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
 from logging.handlers import RotatingFileHandler
 
 import requests
@@ -1053,6 +1053,77 @@ class GrvtAccountMonitor:
         except Exception:
             return str(metadata)
 
+    @staticmethod
+    def _sanitize_headers(headers: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+        sanitized: Dict[str, Any] = {}
+        if not headers:
+            return sanitized
+        for key, value in headers.items():
+            if key is None:
+                continue
+            key_lower = str(key).lower()
+            if key_lower in {"authorization", "api-key", "x-api-key"}:
+                sanitized[str(key)] = "***"
+            else:
+                sanitized[str(key)] = value
+        return sanitized
+
+    def _sanitize_transfer_payload(self, payload: Any) -> Any:
+        if isinstance(payload, dict):
+            redacted: Dict[str, Any] = {}
+            for key, value in payload.items():
+                key_lower = str(key).lower()
+                if key_lower in {"private_key", "api_key", "signature", "r", "s", "v"}:
+                    redacted[key] = "***"
+                elif isinstance(value, (dict, list)):
+                    redacted[key] = self._sanitize_transfer_payload(value)
+                else:
+                    redacted[key] = value
+            return redacted
+        if isinstance(payload, list):
+            return [self._sanitize_transfer_payload(item) for item in payload]
+        return payload
+
+    def _log_transfer_request(
+        self,
+        context: str,
+        method: str,
+        url: str,
+        headers: Optional[Mapping[str, Any]] = None,
+        body: Any = None,
+        json_payload: Optional[Any] = None,
+    ) -> None:
+        try:
+            sanitized_headers = self._sanitize_headers(headers)
+            body_repr: Any = None
+            if json_payload is not None:
+                body_repr = self._sanitize_transfer_payload(json_payload)
+            elif body is not None:
+                text: str
+                if isinstance(body, (bytes, bytearray)):
+                    text = body.decode("utf-8", errors="replace")
+                else:
+                    text = str(body)
+                parsed: Any = None
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+                if parsed is not None:
+                    body_repr = self._sanitize_transfer_payload(parsed)
+                else:
+                    body_repr = text[:2048]
+            LOGGER.info(
+                "GRVT transfer request (%s): %s %s headers=%s body=%s",
+                context,
+                method,
+                url,
+                sanitized_headers,
+                body_repr,
+            )
+        except Exception:
+            LOGGER.debug("Failed to log GRVT transfer request", exc_info=True)
+
     def _resolve_raw_env(self, env_candidate: Any) -> Any:
         if RawGrvtEnv is None:  # pragma: no cover - optional dependency guard
             raise RuntimeError("RawGrvtEnv helpers unavailable")
@@ -1139,6 +1210,13 @@ class GrvtAccountMonitor:
         http_call = getattr(session, "request", None) if session is not None else None
         if not callable(http_call):
             http_call = requests.request
+        self._log_transfer_request(
+            "client-sign",
+            method,
+            url,
+            headers,
+            body=body,
+        )
         response = cast(Any, http_call)(method, url, data=body, headers=headers, timeout=self._timeout)
         if hasattr(response, "raise_for_status"):
             response.raise_for_status()
@@ -1225,6 +1303,13 @@ class GrvtAccountMonitor:
         if not callable(http_call):
             http_call = requests.request
         headers = {"Content-Type": "application/json"}
+        self._log_transfer_request(
+            "raw-sign",
+            "POST",
+            url,
+            headers,
+            json_payload=transfer_dict,
+        )
         response = cast(
             Any,
             http_call("POST", url, json=transfer_dict, headers=headers, timeout=self._timeout),
