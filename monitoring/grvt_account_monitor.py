@@ -925,6 +925,13 @@ class GrvtAccountMonitor:
                 return method(payload)
             except Exception as exc:
                 errors.append(f"{method_name} failed: {exc}")
+        # Manual fallback: call the private REST endpoint even if SDK lacks helper
+        request_method = getattr(client, "request", None)
+        if callable(request_method):
+            try:
+                return request_method("full/v1/transfer", "private", "POST", payload)
+            except Exception as exc:
+                errors.append(f"request(full/v1/transfer) failed: {exc}")
         raise RuntimeError(errors[0] if errors else "No transfer endpoint available on GRVT client")
 
     @staticmethod
