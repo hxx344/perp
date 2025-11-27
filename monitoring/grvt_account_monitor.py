@@ -434,6 +434,7 @@ class GrvtAccountMonitor:
         default_transfer_type: Optional[str] = None,
         transfer_log_path: Optional[str] = None,
         disable_transfer_log: bool = False,
+        transfer_api_variant: Optional[str] = None,
     ) -> None:
         self._session = session
         self._coordinator_url = coordinator_url.rstrip("/")
@@ -481,6 +482,11 @@ class GrvtAccountMonitor:
         self._transfer_log_path: Optional[Path] = self._resolve_transfer_log_path(
             transfer_log_path,
             disable_transfer_log,
+        )
+        self._transfer_api_variant = self._resolve_transfer_api_variant(
+            transfer_api_variant
+            or os.getenv("GRVT_TRANSFER_API")
+            or os.getenv("GRVT_TRANSFER_API_VARIANT")
         )
 
     def _build_transfer_route(self, direction: str) -> Optional[Dict[str, str]]:
@@ -1186,6 +1192,71 @@ class GrvtAccountMonitor:
         log_dir = Path(os.getenv("GRVT_LOG_DIR", "logs")).expanduser()
         return log_dir / f"{safe_label}.transfer.log"
 
+    @staticmethod
+    def _resolve_transfer_api_variant(candidate: Optional[str]) -> str:
+        if candidate:
+            text = str(candidate).strip().lower()
+            if text in {"lite", "full"}:
+                return text
+            LOGGER.warning("Unknown transfer API variant '%s'; defaulting to lite", candidate)
+        return "lite"
+
+    def _prepare_transfer_payload_for_variant(
+        self,
+        api_variant: str,
+        transfer_dict: Dict[str, Any],
+        metadata_obj: Any,
+        metadata_text: str,
+    ) -> Tuple[str, Dict[str, Any]]:
+        variant = str(api_variant or "lite").strip().lower()
+        if variant != "full":
+            lite_payload = self._convert_transfer_to_lite_payload(transfer_dict, metadata_obj, metadata_text)
+            return "lite", lite_payload
+        return "full", transfer_dict
+
+    def _convert_transfer_to_lite_payload(
+        self,
+        transfer_dict: Dict[str, Any],
+        metadata_obj: Any,
+        metadata_text: str,
+    ) -> Dict[str, Any]:
+        lite_payload: Dict[str, Any] = {
+            "fa": transfer_dict.get("from_account_id"),
+            "fs": transfer_dict.get("from_sub_account_id"),
+            "ta": transfer_dict.get("to_account_id"),
+            "ts": transfer_dict.get("to_sub_account_id"),
+            "c": transfer_dict.get("currency"),
+            "nt": transfer_dict.get("num_tokens"),
+        }
+        signature_block = transfer_dict.get("signature") or {}
+        lite_signature = {
+            "s": signature_block.get("signer") or transfer_dict.get("from_account_id"),
+            "r": signature_block.get("r"),
+            "s1": signature_block.get("s"),
+            "v": signature_block.get("v"),
+            "e": signature_block.get("expiration"),
+            "n": signature_block.get("nonce"),
+        }
+        chain_id = signature_block.get("chain_id") or transfer_dict.get("chain_id")
+        if chain_id not in {None, ""}:
+            lite_signature["ci"] = chain_id
+        lite_payload["s"] = {key: value for key, value in lite_signature.items() if value not in {None, ""}}
+
+        transfer_type_value = transfer_dict.get("transfer_type")
+        if transfer_type_value not in {None, ""}:
+            lite_payload["tt"] = transfer_type_value
+
+        metadata_payload: Any = metadata_obj
+        if metadata_payload is None:
+            try:
+                metadata_payload = json.loads(metadata_text)
+            except Exception:
+                metadata_payload = metadata_text
+        if metadata_payload not in (None, "", {}):
+            lite_payload["tm"] = metadata_payload
+
+        return {key: value for key, value in lite_payload.items() if value not in {None, ""}}
+
     def _resolve_raw_env(self, env_candidate: Any) -> Any:
         if RawGrvtEnv is None:  # pragma: no cover - optional dependency guard
             raise RuntimeError("RawGrvtEnv helpers unavailable")
@@ -1249,9 +1320,9 @@ class GrvtAccountMonitor:
     def _post_transfer_request(self, payload: Dict[str, Any]) -> Any:
         client = self._session.client
         sign_method = getattr(client, "sign", None)
-        if callable(sign_method):
+        if self._transfer_api_variant == "full" and callable(sign_method):
             return self._post_transfer_via_client_sign(client, sign_method, payload)
-        return self._post_transfer_with_raw_signing(client, payload)
+        return self._post_transfer_with_raw_signing(client, payload, self._transfer_api_variant)
 
     def _post_transfer_via_client_sign(
         self,
@@ -1289,7 +1360,7 @@ class GrvtAccountMonitor:
                 pass
         return getattr(response, "text", response)
 
-    def _post_transfer_with_raw_signing(self, client: Any, payload: Dict[str, Any]) -> Any:
+    def _post_transfer_with_raw_signing(self, client: Any, payload: Dict[str, Any], api_variant: str) -> Any:
         missing_helpers = [
             GrvtTransfer,
             GrvtSignature,
@@ -1323,7 +1394,8 @@ class GrvtAccountMonitor:
             expiration=str(expiration_ns),
             nonce=signature_nonce,
         )
-        metadata_text = self._serialize_transfer_metadata(payload.get("transfer_metadata"))
+        metadata_obj = payload.get("transfer_metadata")
+        metadata_text = self._serialize_transfer_metadata(metadata_obj)
         transfer = GrvtTransfer(  # type: ignore[call-arg]
             from_account_id=str(payload["from_account_id"]),
             from_sub_account_id=str(payload["from_sub_account_id"]),
@@ -1359,7 +1431,13 @@ class GrvtAccountMonitor:
         base_url = self._resolve_grvt_private_url()
         if not base_url:
             raise RuntimeError("Unable to determine GRVT API endpoint for transfer request")
-        url = f"{base_url}/full/v1/transfer"
+        variant_key, request_payload = self._prepare_transfer_payload_for_variant(
+            api_variant,
+            transfer_dict,
+            metadata_obj,
+            metadata_text,
+        )
+        url = f"{base_url}/{variant_key}/v1/transfer"
         session = getattr(client, "session", None)
         http_call = getattr(session, "request", None) if session is not None else None
         if not callable(http_call):
@@ -1370,11 +1448,11 @@ class GrvtAccountMonitor:
             "POST",
             url,
             headers,
-            json_payload=transfer_dict,
+            json_payload=request_payload,
         )
         response = cast(
             Any,
-            http_call("POST", url, json=transfer_dict, headers=headers, timeout=self._timeout),
+            http_call("POST", url, json=request_payload, headers=headers, timeout=self._timeout),
         )
         if hasattr(response, "raise_for_status"):
             response.raise_for_status()
@@ -1575,6 +1653,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--default-transfer-type",
         help="Default GRVT transfer type label (e.g. INTERNAL, WITHDRAWAL)",
     )
+    parser.add_argument(
+        "--transfer-api",
+        choices=["full", "lite"],
+        default=os.getenv("GRVT_TRANSFER_API")
+        or os.getenv("GRVT_TRANSFER_API_VARIANT")
+        or "lite",
+        help="GRVT transfer API variant to target (full or lite). Defaults to lite or GRVT_TRANSFER_API env.",
+    )
     parser.add_argument("--once", action="store_true", help="Collect and push a single snapshot, then exit")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument(
@@ -1707,6 +1793,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         default_transfer_type=args.default_transfer_type,
             transfer_log_path=args.transfer_log_file,
             disable_transfer_log=args.no_transfer_log,
+            transfer_api_variant=args.transfer_api,
     )
 
     if args.once:
