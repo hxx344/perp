@@ -1230,8 +1230,9 @@ class GrvtAccountMonitor:
         metadata_obj: Any,
         metadata_text: str,
     ) -> Dict[str, Any]:
+        from_account_id = transfer_dict.get("from_account_id")
         lite_payload: Dict[str, Any] = {
-            "fa": transfer_dict.get("from_account_id"),
+            "fa": from_account_id,
             "fs": transfer_dict.get("from_sub_account_id"),
             "ta": transfer_dict.get("to_account_id"),
             "ts": transfer_dict.get("to_sub_account_id"),
@@ -1240,7 +1241,7 @@ class GrvtAccountMonitor:
         }
         signature_block = transfer_dict.get("signature") or {}
         lite_signature = {
-            "s": signature_block.get("signer") or transfer_dict.get("from_account_id"),
+            "s": from_account_id,
             "r": signature_block.get("r"),
             "s1": signature_block.get("s"),
             "v": signature_block.get("v"),
