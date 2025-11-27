@@ -507,6 +507,8 @@ class GrvtAccountMonitor:
             or os.getenv("GRVT_TRANSFER_API")
             or os.getenv("GRVT_TRANSFER_API_VARIANT")
         )
+        env_transfer_key = os.getenv("GRVT_TRANSFER_PRIVATE_KEY")
+        self._transfer_private_key = env_transfer_key.strip() if env_transfer_key else None
 
     def _build_transfer_route(self, direction: str) -> Optional[Dict[str, str]]:
         direction_normalized = (direction or "").strip().lower()
@@ -1262,6 +1264,21 @@ class GrvtAccountMonitor:
             LOGGER.warning("Unknown transfer API variant '%s'; defaulting to lite", candidate)
         return "lite"
 
+    def _resolve_transfer_private_key(self, client: Any) -> str:
+        candidate = self._transfer_private_key or os.getenv("GRVT_TRANSFER_PRIVATE_KEY")
+        if candidate:
+            text = candidate.strip()
+            if text:
+                return text
+        dedicated_attr = getattr(client, "_transfer_private_key", None) or getattr(client, "transfer_private_key", None)
+        if dedicated_attr:
+            text = str(dedicated_attr).strip()
+            if text:
+                return text
+        raise RuntimeError(
+            "Missing GRVT_TRANSFER_PRIVATE_KEY; set it in the environment for transfer signing"
+        )
+
     @staticmethod
     def _is_empty_transfer_value(value: Any) -> bool:
         if value is None:
@@ -1491,9 +1508,7 @@ class GrvtAccountMonitor:
             raise RuntimeError(
                 "Raw transfer signing helpers unavailable; please upgrade grvt-pysdk to v0.2.1 or newer"
             )
-        private_key = getattr(client, "_private_key", None) or getattr(client, "private_key", None)
-        if not private_key:
-            raise RuntimeError("GRVT client missing private key; cannot sign transfer payload")
+        private_key = self._resolve_transfer_private_key(client)
         api_key = getattr(client, "_api_key", None) or os.getenv("GRVT_API_KEY")
         trading_account_id = None
         get_account_id = getattr(client, "get_trading_account_id", None)
