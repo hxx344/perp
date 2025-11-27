@@ -923,19 +923,16 @@
         <div class="grvt-transfer-panel hidden" id="grvt-transfer-panel">
           <div class="grvt-adjust-header">
             <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">账户间资金划转</h3>
-            <p class="summary-sub" style="margin: 0;">默认方向：每台 VPS 子账户 → 主账户</p>
+            <p class="summary-sub" style="margin: 0;">默认方向：来源 VPS 主账户 → 目标 VPS 主账户</p>
           </div>
           <div class="grvt-transfer-grid">
             <label>
-              VPS 节点
-              <select id="grvt-transfer-agent"></select>
+              来源 VPS
+              <select id="grvt-transfer-source"></select>
             </label>
             <label>
-              转账方向
-              <select id="grvt-transfer-direction">
-                <option value="sub_to_main">交易子账户 → 主账户</option>
-                <option value="main_to_sub">主账户 → 交易子账户</option>
-              </select>
+              目标 VPS
+              <select id="grvt-transfer-target"></select>
             </label>
             <label>
               数量
@@ -981,7 +978,7 @@
               <thead>
                 <tr>
                   <th>时间</th>
-                  <th>VPS</th>
+                  <th>来源 / 目标</th>
                   <th>方向</th>
                   <th>金额</th>
                   <th>路径</th>
@@ -1192,8 +1189,8 @@
   const grvtAdjustStatus = document.getElementById('grvt-adjust-status');
   const grvtAdjustHistoryBody = document.getElementById('grvt-adjust-history');
   const grvtTransferPanel = document.getElementById('grvt-transfer-panel');
-  const grvtTransferAgentSelect = document.getElementById('grvt-transfer-agent');
-  const grvtTransferDirectionSelect = document.getElementById('grvt-transfer-direction');
+  const grvtTransferSourceSelect = document.getElementById('grvt-transfer-source');
+  const grvtTransferTargetSelect = document.getElementById('grvt-transfer-target');
   const grvtTransferAmountInput = document.getElementById('grvt-transfer-amount');
   const grvtTransferCurrencyInput = document.getElementById('grvt-transfer-currency');
   const grvtTransferTypeInput = document.getElementById('grvt-transfer-type');
@@ -1690,6 +1687,9 @@
         if (normalized === 'sub_to_main') {
           return '子账户 → 主账户';
         }
+        if (normalized === 'main_to_main') {
+          return '主账户 → 主账户';
+        }
         return normalized;
       }
 
@@ -1788,12 +1788,41 @@
         if (!grvtTransferSubmitButton) {
           return;
         }
-        const hasAgent = Boolean(grvtTransferAgentSelect?.value);
-        grvtTransferSubmitButton.disabled = grvtTransferLocked || !hasAgent;
+        const sourceValue = grvtTransferSourceSelect?.value || '';
+        const targetValue = grvtTransferTargetSelect?.value || '';
+        const selectionsReady = Boolean(sourceValue && targetValue && sourceValue !== targetValue);
+        grvtTransferSubmitButton.disabled = grvtTransferLocked || !selectionsReady;
+      }
+
+      function syncGrvtTransferSelectionStatus() {
+        if (grvtTransferLocked) {
+          return;
+        }
+        const sourceOptions = grvtTransferSourceSelect?.options?.length || 0;
+        const targetOptions = grvtTransferTargetSelect?.options?.length || 0;
+        const sourceValue = grvtTransferSourceSelect?.value;
+        const targetValue = grvtTransferTargetSelect?.value;
+        if (!sourceOptions || !targetOptions) {
+          setGrvtTransferStatus('等待 VPS 提供转账参数…');
+          return;
+        }
+        if (Math.min(sourceOptions, targetOptions) < 2) {
+          setGrvtTransferStatus('至少需要两台 VPS 才能执行主账户互转');
+          return;
+        }
+        if (!sourceValue || !targetValue) {
+          setGrvtTransferStatus('请先选择来源和目标 VPS');
+          return;
+        }
+        if (sourceValue === targetValue) {
+          setGrvtTransferStatus('请为来源与目标选择不同的 VPS');
+          return;
+        }
+        setGrvtTransferStatus('等待指令…');
       }
 
       function updateGrvtTransferAgents(options) {
-        if (!grvtTransferPanel || !grvtTransferAgentSelect) {
+        if (!grvtTransferPanel || !grvtTransferSourceSelect || !grvtTransferTargetSelect) {
           return;
         }
         const normalized = Array.isArray(options)
@@ -1812,7 +1841,8 @@
 
         if (!normalized.length) {
           grvtTransferPanel.classList.add('hidden');
-          grvtTransferAgentSelect.innerHTML = '';
+          grvtTransferSourceSelect.innerHTML = '';
+          grvtTransferTargetSelect.innerHTML = '';
           grvtTransferDefaults.clear();
           grvtTransferLocked = false;
           grvtTransferOptionsKey = '';
@@ -1824,75 +1854,114 @@
         const optionsKey = normalized
           .map((option) => `${option.agentId}:${JSON.stringify(option.defaults || {})}`)
           .join('|');
-        const shouldRebuild = optionsKey !== grvtTransferOptionsKey || grvtTransferAgentSelect.options.length !== normalized.length;
+        const shouldRebuild =
+          optionsKey !== grvtTransferOptionsKey ||
+          grvtTransferSourceSelect.options.length !== normalized.length ||
+          grvtTransferTargetSelect.options.length !== normalized.length;
         grvtTransferDefaults.clear();
         for (const option of normalized) {
           grvtTransferDefaults.set(option.agentId, option.defaults || {});
         }
         grvtTransferPanel.classList.remove('hidden');
 
-        if (!shouldRebuild) {
-          updateGrvtTransferButtons();
-          return;
+        if (shouldRebuild) {
+          grvtTransferOptionsKey = optionsKey;
+          const previousSource = grvtTransferSourceSelect.value;
+          const previousTarget = grvtTransferTargetSelect.value;
+          const rebuildSelect = (select, previous) => {
+            select.innerHTML = '';
+            for (const option of normalized) {
+              const element = document.createElement('option');
+              element.value = option.agentId;
+              element.textContent = option.label;
+              select.appendChild(element);
+            }
+            if (previous && normalized.some((option) => option.agentId === previous)) {
+              select.value = previous;
+            } else if (select.options.length) {
+              select.selectedIndex = 0;
+            } else {
+              select.value = '';
+            }
+          };
+          rebuildSelect(grvtTransferSourceSelect, previousSource);
+          rebuildSelect(grvtTransferTargetSelect, previousTarget);
+
+          if (
+            normalized.length > 1 &&
+            grvtTransferSourceSelect.value &&
+            grvtTransferSourceSelect.value === grvtTransferTargetSelect.value
+          ) {
+            const alternative = normalized.find((option) => option.agentId !== grvtTransferSourceSelect.value);
+            if (alternative) {
+              grvtTransferTargetSelect.value = alternative.agentId;
+            }
+          }
         }
 
-        grvtTransferOptionsKey = optionsKey;
-        const previousValue = grvtTransferAgentSelect.value;
-        grvtTransferAgentSelect.innerHTML = '';
-        for (const option of normalized) {
-          const element = document.createElement('option');
-          element.value = option.agentId;
-          element.textContent = option.label;
-          grvtTransferAgentSelect.appendChild(element);
+        const sourceAgent = grvtTransferSourceSelect.value;
+        const targetAgent = grvtTransferTargetSelect.value;
+        if (sourceAgent) {
+          applyGrvtTransferDefaults('source', { forceAll: true });
         }
-        if (previousValue && normalized.some((option) => option.agentId === previousValue)) {
-          grvtTransferAgentSelect.value = previousValue;
-        } else if (grvtTransferAgentSelect.options.length) {
-          grvtTransferAgentSelect.selectedIndex = 0;
+        if (targetAgent) {
+          applyGrvtTransferDefaults('target', { forceAll: true });
         }
-        const selectedAgent = grvtTransferAgentSelect.value;
-        if (selectedAgent) {
-          applyGrvtTransferDefaults(selectedAgent, { forceAll: true });
-        }
+        syncGrvtTransferSelectionStatus();
         updateGrvtTransferButtons();
       }
 
-      function applyGrvtTransferDefaults(agentId, { forceAll = false } = {}) {
+      function applyGrvtTransferDefaults(role, { forceAll = false } = {}) {
+        const select = role === 'target' ? grvtTransferTargetSelect : grvtTransferSourceSelect;
+        const agentId = select?.value;
         if (!agentId) {
           updateGrvtTransferButtons();
           return;
         }
         const defaults = grvtTransferDefaults.get(agentId) || {};
-        const directionValue = String(defaults.direction || 'sub_to_main').toLowerCase();
-        if (grvtTransferDirectionSelect && (forceAll || !grvtTransferDirectionSelect.value)) {
-          grvtTransferDirectionSelect.value = directionValue;
+        if (role === 'source') {
+          if (grvtTransferCurrencyInput && (forceAll || !grvtTransferCurrencyInput.value)) {
+            grvtTransferCurrencyInput.value = (defaults.currency || 'USDT').toUpperCase();
+          }
+          if (grvtTransferTypeInput && (forceAll || !grvtTransferTypeInput.value)) {
+            grvtTransferTypeInput.value = defaults.transfer_type || 'spot';
+          }
         }
-        if (grvtTransferCurrencyInput && (forceAll || !grvtTransferCurrencyInput.value)) {
-          grvtTransferCurrencyInput.value = (defaults.currency || 'USDT').toUpperCase();
-        }
-        if (grvtTransferTypeInput && (forceAll || !grvtTransferTypeInput.value)) {
-          grvtTransferTypeInput.value = defaults.transfer_type || 'spot';
-        }
-        updateGrvtTransferRoute(agentId, { force: true });
+        updateGrvtTransferRoute({ force: true });
         updateGrvtTransferButtons();
       }
 
-      function updateGrvtTransferRoute(agentId, { force = false } = {}) {
-        if (!agentId) {
-          return;
-        }
-        const defaults = grvtTransferDefaults.get(agentId) || {};
-        const direction = String(grvtTransferDirectionSelect?.value || defaults.direction || 'sub_to_main').toLowerCase();
-        let route = null;
-        if (defaults.routes && defaults.routes[direction]) {
-          route = defaults.routes[direction];
-        } else {
-          route = buildTransferRouteFromDefaults(defaults, direction);
-        }
-        const fallbackFromAccount = route?.from_account_id || defaults.main_account_id || defaults.from_account_id || '';
-        const fallbackFromSub = route?.from_sub_account_id || defaults.sub_account_id || defaults.from_sub_account_id || '';
-        const fallbackToAccount = route?.to_account_id || defaults.main_account_id || defaults.to_account_id || '';
-        const fallbackToSub = route?.to_sub_account_id || defaults.main_sub_account_id || defaults.to_sub_account_id || '';
+      function updateGrvtTransferRoute({ force = false } = {}) {
+        const sourceId = grvtTransferSourceSelect?.value;
+        const targetId = grvtTransferTargetSelect?.value;
+        const sourceDefaults = (sourceId && grvtTransferDefaults.get(sourceId)) || {};
+        const targetDefaults = (targetId && grvtTransferDefaults.get(targetId)) || {};
+        const direction = 'main_to_main';
+        const sourceRoute = buildTransferRouteFromDefaults(sourceDefaults, direction) || {};
+        const targetRoute = buildTransferRouteFromDefaults(targetDefaults, direction) || {};
+        const fallbackFromAccount =
+          sourceRoute.from_account_id ||
+          sourceDefaults.main_account_id ||
+          sourceDefaults.from_account_id ||
+          '';
+        const fallbackFromSub =
+          sourceRoute.from_sub_account_id ||
+          sourceDefaults.main_sub_account_id ||
+          sourceDefaults.sub_account_id ||
+          sourceDefaults.from_sub_account_id ||
+          '0';
+        const fallbackToAccount =
+          targetRoute.to_account_id ||
+          targetDefaults.main_account_id ||
+          targetDefaults.to_account_id ||
+          sourceRoute.to_account_id ||
+          '';
+        const fallbackToSub =
+          targetRoute.to_sub_account_id ||
+          targetDefaults.main_sub_account_id ||
+          targetDefaults.to_sub_account_id ||
+          sourceRoute.to_sub_account_id ||
+          '0';
         setInputValue(grvtTransferFromAccountInput, fallbackFromAccount, { force });
         setInputValue(grvtTransferFromSubInput, fallbackFromSub, { force });
         setInputValue(grvtTransferToAccountInput, fallbackToAccount, { force });
@@ -1903,9 +1972,14 @@
         if (grvtTransferLocked) {
           return;
         }
-        const agentId = grvtTransferAgentSelect?.value;
-        if (!agentId) {
-          setGrvtTransferStatus('请选择 VPS 节点');
+        const sourceAgentId = grvtTransferSourceSelect?.value;
+        const targetAgentId = grvtTransferTargetSelect?.value;
+        if (!sourceAgentId || !targetAgentId) {
+          setGrvtTransferStatus('请先选择来源和目标 VPS');
+          return;
+        }
+        if (sourceAgentId === targetAgentId && (grvtTransferSourceSelect?.options?.length || 0) > 1) {
+          setGrvtTransferStatus('来源与目标 VPS 必须不同');
           return;
         }
         const amountValue = parseFloat(getInputValue(grvtTransferAmountInput) || '0');
@@ -1915,10 +1989,11 @@
         }
         const currencyValue = (getInputValue(grvtTransferCurrencyInput) || 'USDT').toUpperCase();
         const payload = {
-          agent_ids: [agentId],
+          agent_ids: [sourceAgentId],
+          target_agent_id: targetAgentId,
           num_tokens: amountValue,
           currency: currencyValue,
-          direction: (grvtTransferDirectionSelect?.value || 'sub_to_main').toLowerCase(),
+          direction: 'main_to_main',
           from_account_id: getInputValue(grvtTransferFromAccountInput),
           from_sub_account_id: getInputValue(grvtTransferFromSubInput),
           to_account_id: getInputValue(grvtTransferToAccountInput),
@@ -1982,6 +2057,13 @@
         const pendingStatuses = ['pending', 'in_progress'];
         let locked = false;
         let statusMessage = '等待指令…';
+        const resolveTargetLabel = (payload) => {
+          if (!payload || typeof payload !== 'object') {
+            return '';
+          }
+          const metadata = payload.transfer_metadata && typeof payload.transfer_metadata === 'object' ? payload.transfer_metadata : {};
+          return metadata.target_agent_label || metadata.target_agent_id || payload.target_agent_id || '';
+        };
 
         const active = summary?.active_request;
         const activeIsTransfer = (active?.action || '').toLowerCase() === 'transfer' && pendingStatuses.includes(normalizeStatus(active?.overall_status));
@@ -1989,7 +2071,9 @@
         if (pendingCandidate) {
           locked = true;
           const targetAgents = Array.isArray(pendingCandidate.target_agents) ? pendingCandidate.target_agents.join(', ') : 'VPS';
-          statusMessage = `等待 ${targetAgents || 'VPS'} ACK…`;
+          const pendingTarget = resolveTargetLabel(pendingCandidate.payload);
+          const targetHint = pendingTarget ? ` → ${pendingTarget}` : '';
+          statusMessage = `等待 ${(targetAgents || 'VPS')}${targetHint} ACK…`;
         } else if (requests.length) {
           const latest = requests[0];
           const latestStatus = normalizeStatus(latest.overall_status);
@@ -2017,7 +2101,8 @@
         for (const request of requests.slice(0, 6)) {
           const createdText = formatTimestamp(request.created_at) ?? '--';
           const payload = request.payload || {};
-          const agents = Array.isArray(request.target_agents) ? request.target_agents.join(', ') : '—';
+          const sourceAgents = Array.isArray(request.target_agents) ? request.target_agents.join(', ') : '—';
+          const targetLabel = resolveTargetLabel(payload) || '—';
           const amountValue = `${numberFormatter.format(toNumber(payload.num_tokens ?? request.magnitude ?? 0))} ${(payload.currency || 'USDT').toUpperCase()}`;
           const routeText = formatTransferRoute(payload);
           const statusText = request.overall_status || 'pending';
@@ -2027,7 +2112,7 @@
           rows.push(`
             <tr>
               <td>${escapeHtml(createdText)}</td>
-              <td>${escapeHtml(agents || '—')}</td>
+              <td>${escapeHtml(`${sourceAgents || '—'} → ${targetLabel || '—'}`)}</td>
               <td>${escapeHtml(directionText)}</td>
               <td>${escapeHtml(amountValue)}</td>
               <td>${escapeHtml(routeText)}</td>
@@ -2037,6 +2122,9 @@
         }
 
         grvtTransferHistoryBody.innerHTML = rows.join('');
+        if (!locked) {
+          syncGrvtTransferSelectionStatus();
+        }
       }
 
       function extractBaseAsset(symbol) {
@@ -3571,21 +3659,36 @@
           sendGrvtTransfer();
         });
       }
-      if (grvtTransferAgentSelect) {
-        grvtTransferAgentSelect.addEventListener('change', (event) => {
-          const agentId = event.target.value;
-          if (agentId) {
-            applyGrvtTransferDefaults(agentId, { forceAll: true });
-            setGrvtTransferStatus('等待指令…');
-          }
+      const selectAlternativeTarget = () => {
+        if (!grvtTransferTargetSelect || !grvtTransferSourceSelect) {
+          return;
+        }
+        if ((grvtTransferTargetSelect.options.length || 0) <= 1) {
+          return;
+        }
+        if (grvtTransferTargetSelect.value !== grvtTransferSourceSelect.value) {
+          return;
+        }
+        const options = Array.from(grvtTransferTargetSelect.options || []);
+        const candidate = options.find((option) => option.value && option.value !== grvtTransferSourceSelect.value);
+        if (candidate) {
+          grvtTransferTargetSelect.value = candidate.value;
+          applyGrvtTransferDefaults('target', { forceAll: true });
+        }
+      };
+      if (grvtTransferSourceSelect) {
+        grvtTransferSourceSelect.addEventListener('change', () => {
+          applyGrvtTransferDefaults('source', { forceAll: true });
+          selectAlternativeTarget();
           updateGrvtTransferButtons();
+          syncGrvtTransferSelectionStatus();
         });
       }
-      if (grvtTransferDirectionSelect) {
-        grvtTransferDirectionSelect.addEventListener('change', () => {
-          if (grvtTransferAgentSelect?.value) {
-            updateGrvtTransferRoute(grvtTransferAgentSelect.value, { force: true });
-          }
+      if (grvtTransferTargetSelect) {
+        grvtTransferTargetSelect.addEventListener('change', () => {
+          applyGrvtTransferDefaults('target', { forceAll: true });
+          updateGrvtTransferButtons();
+          syncGrvtTransferSelectionStatus();
         });
       }
       updateGrvtSymbolOptions([]);

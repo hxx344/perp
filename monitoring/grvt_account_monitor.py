@@ -431,7 +431,7 @@ class GrvtAccountMonitor:
         transfer_direction_env = os.getenv("GRVT_DEFAULT_TRANSFER_DIRECTION") or os.getenv("GRVT_TRANSFER_DIRECTION")
         transfer_type_env = os.getenv("GRVT_DEFAULT_TRANSFER_TYPE") or os.getenv("GRVT_TRANSFER_TYPE")
         currency_source = default_transfer_currency or transfer_currency_env or "USDT"
-        direction_source = default_transfer_direction or transfer_direction_env or "sub_to_main"
+        direction_source = default_transfer_direction or transfer_direction_env or "main_to_main"
         type_source = default_transfer_type or transfer_type_env or "INTERNAL"
         self._default_transfer_currency = str(currency_source).strip().upper()
         self._default_transfer_direction = str(direction_source).strip().lower()
@@ -464,11 +464,18 @@ class GrvtAccountMonitor:
                 "to_account_id": main_account,
                 "to_sub_account_id": trading_sub,
             }
+        if direction_normalized == "main_to_main":
+            return {
+                "from_account_id": main_account,
+                "from_sub_account_id": main_sub,
+                "to_account_id": main_account,
+                "to_sub_account_id": main_sub,
+            }
         return None
 
     def _build_transfer_defaults(self) -> Optional[Dict[str, Any]]:
         routes: Dict[str, Dict[str, str]] = {}
-        for direction in ("sub_to_main", "main_to_sub"):
+        for direction in ("sub_to_main", "main_to_sub", "main_to_main"):
             route = self._build_transfer_route(direction)
             if route:
                 routes[direction] = route

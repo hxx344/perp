@@ -1010,10 +1010,22 @@ class CoordinatorApp:
         if not agent_ids:
             raise web.HTTPBadRequest(text="No agent IDs available for transfer request")
         if len(agent_ids) > 1:
-            raise web.HTTPBadRequest(text="Transfers currently support a single agent per request")
+            raise web.HTTPBadRequest(text="Transfers currently support a single source agent per request")
 
-        target_agent_id = agent_ids[0]
-        transfer_defaults = await self._coordinator.get_agent_transfer_defaults(target_agent_id)
+        source_agent_id = agent_ids[0]
+        target_agent_id = _clean_optional(
+            body.get("target_agent_id")
+            or body.get("destination_agent_id")
+            or body.get("to_agent_id")
+            or body.get("target_agent")
+        )
+
+        transfer_defaults = await self._coordinator.get_agent_transfer_defaults(source_agent_id)
+        target_defaults: Optional[Dict[str, Any]] = None
+        if target_agent_id:
+            target_defaults = await self._coordinator.get_agent_transfer_defaults(target_agent_id)
+            if target_defaults is None:
+                raise web.HTTPBadRequest(text=f"target_agent_id {target_agent_id} has no transfer defaults")
 
         metadata = body.get("transfer_metadata") or {}
         if metadata and not isinstance(metadata, dict):
@@ -1021,13 +1033,25 @@ class CoordinatorApp:
         metadata = dict(metadata or {})
         if body.get("reason") and not metadata.get("reason"):
             metadata["reason"] = str(body["reason"])
-        metadata.setdefault("agent_id", target_agent_id)
+        metadata.setdefault("agent_id", source_agent_id)
         if transfer_defaults and transfer_defaults.get("agent_label"):
             metadata.setdefault("agent_label", str(transfer_defaults["agent_label"]))
+        if target_agent_id:
+            metadata.setdefault("target_agent_id", target_agent_id)
+            if target_defaults and target_defaults.get("agent_label"):
+                metadata.setdefault("target_agent_label", str(target_defaults["agent_label"]))
 
         requested_direction = _clean_optional(body.get("direction"))
         default_direction = _clean_optional((transfer_defaults or {}).get("direction"))
-        direction = (requested_direction or default_direction or "sub_to_main").lower()
+        direction = (requested_direction or default_direction or "main_to_main").lower()
+        allowed_directions = {"sub_to_main", "main_to_sub", "main_to_main"}
+        if direction not in allowed_directions:
+            raise web.HTTPBadRequest(text=f"Unsupported direction '{direction}'")
+        if direction == "main_to_main":
+            if not target_agent_id:
+                raise web.HTTPBadRequest(text="target_agent_id is required for main_to_main transfers")
+            if target_agent_id == source_agent_id:
+                raise web.HTTPBadRequest(text="target_agent_id must differ from the source for main_to_main transfers")
         metadata.setdefault("direction", direction)
 
         routes_block = transfer_defaults.get("routes") if isinstance(transfer_defaults, dict) else None
@@ -1041,9 +1065,11 @@ class CoordinatorApp:
             main_account = _clean_optional(transfer_defaults.get("main_account_id"))
             trading_sub = _clean_optional(transfer_defaults.get("sub_account_id"))
             main_sub = _clean_optional(transfer_defaults.get("main_sub_account_id")) or "0"
-            if not main_account or not trading_sub:
+            if not main_account:
                 return None
             if direction == "sub_to_main":
+                if not trading_sub:
+                    return None
                 return {
                     "from_account_id": main_account,
                     "from_sub_account_id": trading_sub,
@@ -1051,15 +1077,43 @@ class CoordinatorApp:
                     "to_sub_account_id": main_sub,
                 }
             if direction == "main_to_sub":
+                if not trading_sub:
+                    return None
                 return {
                     "from_account_id": main_account,
                     "from_sub_account_id": main_sub,
                     "to_account_id": main_account,
                     "to_sub_account_id": trading_sub,
                 }
+            if direction == "main_to_main":
+                return {
+                    "from_account_id": main_account,
+                    "from_sub_account_id": main_sub,
+                    "to_account_id": main_account,
+                    "to_sub_account_id": main_sub,
+                }
             return None
 
         route_values = _route_from_defaults()
+
+        def _select_from_defaults(defaults: Optional[Dict[str, Any]], keys: Sequence[str]) -> Optional[str]:
+            if not isinstance(defaults, dict):
+                return None
+            for key in keys:
+                candidate = _clean_optional(defaults.get(key))
+                if candidate:
+                    return candidate
+            return None
+
+        if direction == "main_to_main" and target_defaults:
+            if route_values is None:
+                route_values = {}
+            target_account = _select_from_defaults(target_defaults, ["main_account_id", "to_account_id"])
+            target_sub = _select_from_defaults(target_defaults, ["main_sub_account_id", "to_sub_account_id"]) or "0"
+            if target_account:
+                route_values.setdefault("to_account_id", target_account)
+            if target_sub:
+                route_values.setdefault("to_sub_account_id", target_sub)
 
         transfer_payload: Dict[str, Any] = {
             "currency": currency_clean,
@@ -1083,12 +1137,21 @@ class CoordinatorApp:
         if direction == "main_to_sub":
             fallback_map["from_sub_account_id"] = ["main_sub_account_id", "from_sub_account_id", "sub_account_id"]
             fallback_map["to_sub_account_id"] = ["sub_account_id", "to_sub_account_id", "main_sub_account_id"]
+        if direction == "main_to_main":
+            fallback_map["from_sub_account_id"] = ["main_sub_account_id", "from_sub_account_id", "sub_account_id"]
+
+        target_fallback_map = {
+            "to_account_id": ["main_account_id", "to_account_id"],
+            "to_sub_account_id": ["main_sub_account_id", "to_sub_account_id"],
+        }
 
         for field, provided in user_fields.items():
             if provided:
                 transfer_payload[field] = provided
                 continue
             candidate = _clean_optional(route_values.get(field)) if route_values else None
+            if not candidate and direction == "main_to_main" and field in target_fallback_map and target_defaults:
+                candidate = _select_from_defaults(target_defaults, target_fallback_map[field])
             if not candidate and isinstance(transfer_defaults, dict):
                 for key in fallback_map.get(field, []):
                     candidate = _clean_optional(transfer_defaults.get(key))
