@@ -911,55 +911,38 @@ class GrvtAccountMonitor:
                 payload["to_sub_account_id"] = self._home_main_sub_account_id
 
     def _call_transfer_endpoint(self, payload: Dict[str, Any]) -> Any:
+        try:
+            return self._post_transfer_request(payload)
+        except Exception as exc:
+            raise RuntimeError(f"Direct transfer POST failed: {exc}") from exc
+
+    def _post_transfer_request(self, payload: Dict[str, Any]) -> Any:
         client = self._session.client
-        errors: List[str] = []
-        for method_name in (
-            "private_post_full_v1_transfer",
-            "privatePostFullV1Transfer",
-            "transfer",
-        ):
-            method = getattr(client, method_name, None)
-            if method is None:
-                continue
-            try:
-                return method(payload)
-            except Exception as exc:
-                errors.append(f"{method_name} failed: {exc}")
-        # Manual fallback: call the private REST endpoint even if SDK lacks helper
-        request_method = getattr(client, "request", None)
-        if callable(request_method):
-            try:
-                return request_method("full/v1/transfer", "private", "POST", payload)
-            except Exception as exc:
-                errors.append(f"request(full/v1/transfer) failed: {exc}")
         sign_method = getattr(client, "sign", None)
-        if callable(sign_method):
+        if not callable(sign_method):
+            raise RuntimeError("GRVT client does not expose sign(); cannot craft raw transfer request")
+        signed_request = sign_method("full/v1/transfer", "private", "POST", payload)
+        if not isinstance(signed_request, dict):
+            raise RuntimeError("sign() returned unexpected payload")
+        url = signed_request.get("url")
+        method = signed_request.get("method", "POST")
+        body = signed_request.get("body")
+        headers = signed_request.get("headers") or {}
+        if not url:
+            raise RuntimeError("sign() did not provide URL for transfer request")
+        session = getattr(client, "session", None)
+        http_call = getattr(session, "request", None) if session is not None else None
+        if not callable(http_call):
+            http_call = requests.request
+        response = cast(Any, http_call)(method, url, data=body, headers=headers, timeout=self._timeout)
+        if hasattr(response, "raise_for_status"):
+            response.raise_for_status()
+        if hasattr(response, "json"):
             try:
-                signed_request = cast(Dict[str, Any], sign_method("full/v1/transfer", "private", "POST", payload))
-                if not isinstance(signed_request, dict):
-                    raise ValueError("sign() returned unexpected payload")
-                url = signed_request.get("url")
-                method = signed_request.get("method", "POST")
-                body = signed_request.get("body")
-                headers = signed_request.get("headers") or {}
-                if not url:
-                    raise ValueError("sign() did not return a URL for transfer request")
-                session = getattr(client, "session", None)
-                http_call = getattr(session, "request", None) if session is not None else None
-                if not callable(http_call):
-                    http_call = requests.request
-                response = cast(Any, http_call)(method, url, data=body, headers=headers, timeout=self._timeout)
-                if hasattr(response, "raise_for_status"):
-                    response.raise_for_status()
-                if hasattr(response, "json"):
-                    try:
-                        return response.json()
-                    except ValueError:
-                        pass
-                return getattr(response, "text", response)
-            except Exception as exc:
-                errors.append(f"sign(full/v1/transfer) failed: {exc}")
-        raise RuntimeError(errors[0] if errors else "No transfer endpoint available on GRVT client")
+                return response.json()
+            except ValueError:
+                pass
+        return getattr(response, "text", response)
 
     @staticmethod
     def _format_transfer_descriptor(account_id: Optional[str], sub_id: Optional[str]) -> str:
