@@ -1245,7 +1245,7 @@ class GrvtAccountMonitor:
         }
         signature_block = transfer_dict.get("signature") or {}
         lite_signature = {
-            "s": from_account_id,
+            "s": signature_block.get("signer") or from_account_id,
             "r": signature_block.get("r"),
             "s1": signature_block.get("s"),
             "v": signature_block.get("v"),
