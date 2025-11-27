@@ -91,6 +91,13 @@ BALANCE_AVAILABLE_PATHS: Tuple[Tuple[str, ...], ...] = (
 DEFAULT_TRANSFER_CURRENCY = "USDT"
 DEFAULT_TRANSFER_CURRENCY_ID = 3
 SIGNATURE_TTL_SECONDS = 15 * 60
+TRANSFER_TYPE_ALIASES: Dict[str, str] = {
+    "INTERNAL": "STANDARD",
+    "SPOT": "STANDARD",
+    "SPOT_TRANSFER": "STANDARD",
+    "SPOT_INTERNAL": "STANDARD",
+    "DEFAULT": "STANDARD",
+}
 def load_env_files(paths: Sequence[str]) -> None:
     if not paths:
         return
@@ -466,7 +473,7 @@ class GrvtAccountMonitor:
         type_source = default_transfer_type or transfer_type_env or "INTERNAL"
         self._default_transfer_currency = str(currency_source).strip().upper()
         self._default_transfer_direction = str(direction_source).strip().lower()
-        self._default_transfer_type = type_source
+        self._default_transfer_type = self._canonicalize_transfer_type_key(type_source)
         self._prime_currency_catalog()
 
     def _build_transfer_route(self, direction: str) -> Optional[Dict[str, str]]:
@@ -1063,6 +1070,19 @@ class GrvtAccountMonitor:
                 LOGGER.warning("Unknown GRVT environment '%s'; defaulting to PROD", text)
                 return RawGrvtEnv.PROD  # type: ignore[attr-defined]
 
+    @staticmethod
+    def _canonicalize_transfer_type_key(candidate: Any) -> str:
+        text = str(candidate or "").strip()
+        if not text:
+            return "UNSPECIFIED"
+        normalized = re.sub(r"[\s-]+", "_", text)
+        normalized = re.sub(r"_+", "_", normalized)
+        normalized = normalized.strip("_")
+        if not normalized:
+            return "UNSPECIFIED"
+        canonical = normalized.upper()
+        return TRANSFER_TYPE_ALIASES.get(canonical, canonical)
+
     def _normalize_transfer_type(self, transfer_type_value: Any) -> Any:
         if TransferType is None:  # pragma: no cover - optional dependency guard
             raise RuntimeError("TransferType helpers unavailable")
@@ -1070,17 +1090,22 @@ class GrvtAccountMonitor:
             return transfer_type_value
         if transfer_type_value is None:
             transfer_type_value = self._default_transfer_type or "UNSPECIFIED"
-        text = str(transfer_type_value).strip()
-        if not text:
-            text = "UNSPECIFIED"
-        upper_text = text.upper()
+        source_value = transfer_type_value
+        canonical_key = self._canonicalize_transfer_type_key(transfer_type_value)
         try:
-            return TransferType[upper_text]  # type: ignore[index]
+            return TransferType[canonical_key]  # type: ignore[index]
         except Exception:
+            pass
+        raw_text = str(transfer_type_value).strip()
+        if raw_text:
             try:
-                return TransferType(text)  # type: ignore[call-arg]
-            except Exception as exc:
-                raise ValueError(f"Unsupported transfer type '{transfer_type_value}'") from exc
+                return TransferType(raw_text)  # type: ignore[call-arg]
+            except Exception:
+                pass
+        try:
+            return TransferType(canonical_key)  # type: ignore[call-arg]
+        except Exception as exc:
+            raise ValueError(f"Unsupported transfer type '{source_value}'") from exc
 
     def _call_transfer_endpoint(self, payload: Dict[str, Any]) -> Any:
         try:
