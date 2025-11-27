@@ -479,6 +479,10 @@ class GrvtAccountMonitor:
         self._default_transfer_direction = str(direction_source).strip().lower()
         self._default_transfer_type = self._canonicalize_transfer_type_key(type_source)
         self._prime_currency_catalog()
+        lite_metadata_flag = os.getenv("GRVT_LITE_INCLUDE_METADATA")
+        self._lite_include_transfer_metadata = bool(
+            lite_metadata_flag and str(lite_metadata_flag).strip().lower() in {"1", "true", "yes", "on"}
+        )
         self._transfer_log_path: Optional[Path] = self._resolve_transfer_log_path(
             transfer_log_path,
             disable_transfer_log,
@@ -1259,22 +1263,25 @@ class GrvtAccountMonitor:
 
         transfer_type_value = transfer_dict.get("transfer_type")
         if not self._is_empty_transfer_value(transfer_type_value):
-            lite_payload["tt"] = transfer_type_value
+            transfer_type_text = str(transfer_type_value).strip().upper()
+            if transfer_type_text not in {"", "STANDARD", "UNSPECIFIED"}:
+                lite_payload["tt"] = transfer_type_value
 
-        metadata_payload: Any = None
-        if isinstance(metadata_text, str):
-            normalized_metadata_text = metadata_text.strip()
-            if normalized_metadata_text and normalized_metadata_text not in {"{}", "[]"}:
-                metadata_payload = metadata_text
-        if metadata_payload is None:
-            metadata_payload = metadata_obj
-            if metadata_payload is None:
-                try:
-                    metadata_payload = json.loads(metadata_text)
-                except Exception:
+        if getattr(self, "_lite_include_transfer_metadata", False):
+            metadata_payload: Any = None
+            if isinstance(metadata_text, str):
+                normalized_metadata_text = metadata_text.strip()
+                if normalized_metadata_text and normalized_metadata_text not in {"{}", "[]"}:
                     metadata_payload = metadata_text
-        if not self._is_empty_transfer_value(metadata_payload):
-            lite_payload["tm"] = metadata_payload
+            if metadata_payload is None:
+                metadata_payload = metadata_obj
+                if metadata_payload is None:
+                    try:
+                        metadata_payload = json.loads(metadata_text)
+                    except Exception:
+                        metadata_payload = metadata_text
+            if not self._is_empty_transfer_value(metadata_payload):
+                lite_payload["tm"] = metadata_payload
 
         return {
             key: value
