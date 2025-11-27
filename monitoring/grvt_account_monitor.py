@@ -431,6 +431,8 @@ class GrvtAccountMonitor:
         default_transfer_currency: Optional[str] = None,
         default_transfer_direction: Optional[str] = None,
         default_transfer_type: Optional[str] = None,
+        transfer_log_path: Optional[str] = None,
+        disable_transfer_log: bool = False,
     ) -> None:
         self._session = session
         self._coordinator_url = coordinator_url.rstrip("/")
@@ -475,6 +477,7 @@ class GrvtAccountMonitor:
         self._default_transfer_direction = str(direction_source).strip().lower()
         self._default_transfer_type = self._canonicalize_transfer_type_key(type_source)
         self._prime_currency_catalog()
+        self._transfer_log_path = self._resolve_transfer_log_path(transfer_log_path, disable_transfer_log)
 
     def _build_transfer_route(self, direction: str) -> Optional[Dict[str, str]]:
         direction_normalized = (direction or "").strip().lower()
