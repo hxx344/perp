@@ -1104,6 +1104,21 @@
       shadow: '0 8px 18px rgba(200, 29, 37, 0.4)'
     }
   ];
+  const DEFAULT_MARGIN_SCHEDULE = [
+    { maxNotional: 600000, initial: 0.02, maintenance: 0.01 },
+    { maxNotional: 1600000, initial: 0.04, maintenance: 0.02 },
+    { maxNotional: 4000000, initial: 0.05, maintenance: 0.025 },
+    { maxNotional: 10000000, initial: 0.1, maintenance: 0.05 },
+    { maxNotional: 20000000, initial: 0.2, maintenance: 0.1 },
+    { maxNotional: 50000000, initial: 0.25, maintenance: 0.125 },
+    { maxNotional: 80000000, initial: 0.3333, maintenance: 0.1667 },
+    { maxNotional: 101000000, initial: 0.5, maintenance: 0.25 },
+    { maxNotional: Infinity, initial: 1, maintenance: 0.5 }
+  ];
+  const MARGIN_SCHEDULES = {
+    BTC: DEFAULT_MARGIN_SCHEDULE,
+    ETH: DEFAULT_MARGIN_SCHEDULE,
+  };
       let batchBusy = false;
       let lastDefaultPaused = false;
       let selectedSpreadAgent = null;
@@ -1498,6 +1513,80 @@
           return '全部';
         }
         return normalized.join(', ');
+      }
+
+      function extractBaseAsset(symbol) {
+        if (!symbol) {
+          return null;
+        }
+        let text = normalizeSymbolLabel(symbol);
+        if (!text) {
+          return null;
+        }
+        text = text.replace(/[:_\-\s]+/g, '/');
+        const parts = text.split('/').filter(Boolean);
+        let candidate = parts.length ? parts[0] : text;
+        const suffixes = ['PERP', 'FUTURES', 'FUT', 'USD', 'USDT', 'USDC'];
+        let stripped = true;
+        while (stripped && candidate.length > 0) {
+          stripped = false;
+          for (const suffix of suffixes) {
+            if (candidate.endsWith(suffix) && candidate.length > suffix.length) {
+              candidate = candidate.slice(0, -suffix.length);
+              stripped = true;
+              break;
+            }
+          }
+        }
+        const match = candidate.match(/[A-Z]+/);
+        return match ? match[0] : null;
+      }
+
+      function resolveMarginTier(baseAsset, notionalValue) {
+        if (!baseAsset || !Number.isFinite(notionalValue) || notionalValue <= 0) {
+          return null;
+        }
+        const schedule = MARGIN_SCHEDULES[baseAsset];
+        if (!schedule || !schedule.length) {
+          return null;
+        }
+        for (const tier of schedule) {
+          if (notionalValue <= tier.maxNotional) {
+            return tier;
+          }
+        }
+        return schedule[schedule.length - 1] ?? null;
+      }
+
+      function computePositionMargin(position) {
+        if (!position) {
+          return null;
+        }
+        const size = parseDecimal(position.net_size);
+        let price = parseDecimal(position.mark_price);
+        if (!Number.isFinite(price)) {
+          price = parseDecimal(position.entry_price);
+        }
+        if (!Number.isFinite(size) || !Number.isFinite(price)) {
+          return null;
+        }
+        const notional = Math.abs(size * price);
+        if (!Number.isFinite(notional) || notional <= 0) {
+          return null;
+        }
+        const baseAsset = extractBaseAsset(position.symbol);
+        const tier = resolveMarginTier(baseAsset, notional);
+        if (!tier) {
+          return { baseAsset, notional };
+        }
+        return {
+          baseAsset,
+          notional,
+          initialMargin: notional * tier.initial,
+          maintenanceMargin: notional * tier.maintenance,
+          initialRate: tier.initial,
+          maintenanceRate: tier.maintenance,
+        };
       }
 
       function updateGrvtSymbolOptions(symbols) {
@@ -2094,6 +2183,7 @@
             <div><dt>Equity</dt><dd>${escapeHtml(Number.isFinite(equityValue) ? numberFormatter.format(equityValue) : '--')}</dd></div>
             <div><dt>Wallet</dt><dd>${escapeHtml(Number.isFinite(walletValue) ? numberFormatter.format(walletValue) : '--')}</dd></div>
             <div><dt>Total</dt><dd>${escapeHtml(Number.isFinite(entry.totalValue) ? numberFormatter.format(entry.totalValue) : '--')}</dd></div>
+            <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
             <div data-metric="risk"><dt>Risk</dt><dd><span class="risk-pill risk-pill-inline">—</span></dd></div>
           `;
           card.appendChild(metrics);
@@ -2108,6 +2198,9 @@
             const entryRiskRatio = Number.isFinite(entry.riskRatio) ? entry.riskRatio : null;
             applyRiskTone(riskBadge, entryRiskRatio, 'inline');
           }
+
+          const maintenanceBadge = metrics.querySelector('[data-metric="maintenance"] .maintenance-ratio');
+          let maintenanceRequirementTotal = 0;
 
           const positions = Array.isArray(account?.positions)
             ? account.positions
@@ -2131,6 +2224,8 @@
                   <th>Entry</th>
                   <th>Mark</th>
                   <th>PnL</th>
+                  <th>Value</th>
+                  <th>Init Margin</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -2142,6 +2237,16 @@
               const entryText = formatDecimal(position.entry_price, 4);
               const markText = formatDecimal(position.mark_price, 4);
               const pnlText = formatDecimal(position.pnl, 6);
+              const marginInfo = computePositionMargin(position);
+              if (marginInfo && Number.isFinite(marginInfo.maintenanceMargin)) {
+                maintenanceRequirementTotal += marginInfo.maintenanceMargin;
+              }
+              const notionalText = marginInfo && Number.isFinite(marginInfo.notional)
+                ? numberFormatter.format(marginInfo.notional)
+                : '--';
+              const initialMarginText = marginInfo && Number.isFinite(marginInfo.initialMargin)
+                ? numberFormatter.format(marginInfo.initialMargin)
+                : '--';
               const row = document.createElement('tr');
               row.innerHTML = `
                 <td>${escapeHtml(position.symbol ?? '--')}</td>
@@ -2150,6 +2255,8 @@
                 <td>${escapeHtml(entryText)}</td>
                 <td>${escapeHtml(markText)}</td>
                 <td>${escapeHtml(pnlText)}</td>
+                <td>${escapeHtml(notionalText)}</td>
+                <td>${escapeHtml(initialMarginText)}</td>
               `;
               body.appendChild(row);
             }
@@ -2159,6 +2266,22 @@
             empty.className = 'grvt-positions-empty';
             empty.textContent = account ? 'No open positions' : 'Awaiting account snapshot';
             card.appendChild(empty);
+          }
+
+          if (maintenanceBadge) {
+            const ratioBaseValue = Number.isFinite(equityValue) && equityValue > 0
+              ? equityValue
+              : Number.isFinite(walletValue) && walletValue > 0
+                ? walletValue
+                : null;
+            if (ratioBaseValue && Number.isFinite(maintenanceRequirementTotal) && maintenanceRequirementTotal >= 0) {
+              const ratio = maintenanceRequirementTotal / ratioBaseValue;
+              maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
+            } else if (ratioBaseValue) {
+              maintenanceBadge.textContent = formatPercent(0, 2);
+            } else {
+              maintenanceBadge.textContent = '—';
+            }
           }
 
           grvtAccountGrid.appendChild(card);
