@@ -375,17 +375,21 @@ def load_single_account(*, label: str) -> AccountCredentials:
         )
 
     env_name = (_env("ENVIRONMENT") or _env("ENV") or "prod").strip().lower()
-    main_account_id = _env("MAIN_ACCOUNT_ID") or os.getenv("GRVT_MAIN_ACCOUNT_ID")
-    main_sub_account_id = _env("MAIN_SUB_ACCOUNT_ID") or os.getenv("GRVT_MAIN_SUB_ACCOUNT_ID") or "0"
+    main_account_id = (_env("MAIN_ACCOUNT_ID") or os.getenv("GRVT_MAIN_ACCOUNT_ID") or "").strip() or None
+    main_sub_account_raw = _env("MAIN_SUB_ACCOUNT_ID") or os.getenv("GRVT_MAIN_SUB_ACCOUNT_ID") or "0"
+    trading_account_id_clean = trading_account_id.strip()
+    main_sub_account_clean = str(main_sub_account_raw or "").strip()
+    if not main_sub_account_clean or main_sub_account_clean == "0":
+        main_sub_account_clean = trading_account_id_clean
 
     return AccountCredentials(
         label=label_clean,
-        trading_account_id=trading_account_id.strip(),
+        trading_account_id=trading_account_id_clean,
         private_key=private_key.strip(),
         api_key=api_key.strip(),
         environment=env_name,
-        main_account_id=(main_account_id or None),
-        main_sub_account_id=str(main_sub_account_id or "0"),
+        main_account_id=main_account_id,
+        main_sub_account_id=main_sub_account_clean,
     )
 
 
@@ -464,11 +468,17 @@ class GrvtAccountMonitor:
         self._register_symbol_hint(self._default_symbol)
         self._home_main_account_id = session.main_account_id or os.getenv("GRVT_MAIN_ACCOUNT_ID")
         self._home_sub_account_id = session.sub_account_id or os.getenv("GRVT_TRADING_ACCOUNT_ID")
-        self._home_main_sub_account_id = (
+        main_sub_candidate = (
             session.main_sub_account_id
             or os.getenv("GRVT_MAIN_SUB_ACCOUNT_ID")
             or "0"
         )
+        self._home_main_sub_account_id = str(main_sub_candidate or "").strip() or "0"
+        if (
+            (not self._home_main_sub_account_id or self._home_main_sub_account_id == "0")
+            and self._home_sub_account_id
+        ):
+            self._home_main_sub_account_id = str(self._home_sub_account_id).strip()
         transfer_currency_env = os.getenv("GRVT_DEFAULT_TRANSFER_CURRENCY") or os.getenv("GRVT_TRANSFER_CURRENCY")
         transfer_direction_env = os.getenv("GRVT_DEFAULT_TRANSFER_DIRECTION") or os.getenv("GRVT_TRANSFER_DIRECTION")
         transfer_type_env = os.getenv("GRVT_DEFAULT_TRANSFER_TYPE") or os.getenv("GRVT_TRANSFER_TYPE")
