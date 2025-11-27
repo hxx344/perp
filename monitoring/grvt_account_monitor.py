@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, cast
 from logging.handlers import RotatingFileHandler
 
 import requests
@@ -932,6 +932,33 @@ class GrvtAccountMonitor:
                 return request_method("full/v1/transfer", "private", "POST", payload)
             except Exception as exc:
                 errors.append(f"request(full/v1/transfer) failed: {exc}")
+        sign_method = getattr(client, "sign", None)
+        if callable(sign_method):
+            try:
+                signed_request = cast(Dict[str, Any], sign_method("full/v1/transfer", "private", "POST", payload))
+                if not isinstance(signed_request, dict):
+                    raise ValueError("sign() returned unexpected payload")
+                url = signed_request.get("url")
+                method = signed_request.get("method", "POST")
+                body = signed_request.get("body")
+                headers = signed_request.get("headers") or {}
+                if not url:
+                    raise ValueError("sign() did not return a URL for transfer request")
+                session = getattr(client, "session", None)
+                http_call = getattr(session, "request", None) if session is not None else None
+                if not callable(http_call):
+                    http_call = requests.request
+                response = cast(Any, http_call)(method, url, data=body, headers=headers, timeout=self._timeout)
+                if hasattr(response, "raise_for_status"):
+                    response.raise_for_status()
+                if hasattr(response, "json"):
+                    try:
+                        return response.json()
+                    except ValueError:
+                        pass
+                return getattr(response, "text", response)
+            except Exception as exc:
+                errors.append(f"sign(full/v1/transfer) failed: {exc}")
         raise RuntimeError(errors[0] if errors else "No transfer endpoint available on GRVT client")
 
     @staticmethod
