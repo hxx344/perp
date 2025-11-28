@@ -1097,11 +1097,19 @@ class GrvtAccountMonitor:
         sanitized: Dict[str, Any] = {}
         if not headers:
             return sanitized
+        sensitive_keys = {
+            "authorization",
+            "api-key",
+            "x-api-key",
+            "cookie",
+            "set-cookie",
+            "x-grvt-account-id",
+        }
         for key, value in headers.items():
             if key is None:
                 continue
             key_lower = str(key).lower()
-            if key_lower in {"authorization", "api-key", "x-api-key"}:
+            if key_lower in sensitive_keys:
                 sanitized[str(key)] = "***"
             else:
                 sanitized[str(key)] = value
@@ -1592,32 +1600,72 @@ class GrvtAccountMonitor:
             metadata_obj,
             metadata_text,
         )
-        base_url = self._resolve_grvt_private_url()
-        url = f"{base_url}/{variant_key}/v1/transfer" if base_url else f"sdk://{variant_key}/v1/transfer"
-        self._log_transfer_request(
-            "raw-sign",
-            "POST",
-            url,
-            json_payload=request_payload,
-        )
         raw_client = self._get_raw_transfer_client(config)
-        api_request = ApiTransferRequest(  # type: ignore[call-arg]
-            from_account_id=transfer.from_account_id,
-            from_sub_account_id=transfer.from_sub_account_id,
-            to_account_id=transfer.to_account_id,
-            to_sub_account_id=transfer.to_sub_account_id,
-            currency=transfer.currency,
-            num_tokens=transfer.num_tokens,
-            signature=transfer.signature,
-            transfer_type=transfer.transfer_type,
-            transfer_metadata=transfer.transfer_metadata,
-        )
-        response = raw_client.transfer_v1(api_request)
-        if isinstance(response, GrvtError):
-            raise RuntimeError(
-                f"GRVT transfer rejected: code={response.code} status={response.status} message={response.message}"
+        env_trade_endpoint = getattr(getattr(raw_client, "env", None), "trade_data", None)
+        env_trade_url = getattr(env_trade_endpoint, "rpc_endpoint", None)
+        base_url = env_trade_url or self._resolve_grvt_private_url()
+        normalized_base_url = base_url.rstrip("/") if isinstance(base_url, str) and base_url else None
+
+        if variant_key == "lite":
+            if not normalized_base_url:
+                raise RuntimeError("Unable to resolve GRVT trade endpoint for lite transfer requests")
+            session = getattr(raw_client, "_session", None)
+            if session is None:
+                raise RuntimeError("Raw GRVT transfer client session unavailable for lite requests")
+            try:
+                raw_client._refresh_cookie()
+            except Exception as exc:
+                raise RuntimeError(f"Failed to refresh GRVT auth cookie: {exc}") from exc
+            lite_url = f"{normalized_base_url}/lite/v1/transfer"
+            session_headers = getattr(session, "headers", None)
+            self._log_transfer_request(
+                "raw-sign",
+                "POST",
+                lite_url,
+                headers=session_headers,
+                json_payload=request_payload,
             )
-        response_dict = asdict(response)
+            response_obj = session.post(
+                lite_url,
+                json=request_payload,
+                timeout=self._timeout,
+            )
+            if response_obj.status_code >= 400:
+                detail = self._summarize_http_error(response_obj)
+                raise RuntimeError(f"GRVT lite transfer failed: {detail}")
+            try:
+                response_dict = cast(Dict[str, Any], response_obj.json())
+            except ValueError:
+                response_dict = {"raw": getattr(response_obj, "text", "")}
+        else:
+            url = (
+                f"{normalized_base_url}/{variant_key}/v1/transfer"
+                if normalized_base_url
+                else f"sdk://{variant_key}/v1/transfer"
+            )
+            self._log_transfer_request(
+                "raw-sign",
+                "POST",
+                url,
+                json_payload=request_payload,
+            )
+            api_request = ApiTransferRequest(  # type: ignore[call-arg]
+                from_account_id=transfer.from_account_id,
+                from_sub_account_id=transfer.from_sub_account_id,
+                to_account_id=transfer.to_account_id,
+                to_sub_account_id=transfer.to_sub_account_id,
+                currency=transfer.currency,
+                num_tokens=transfer.num_tokens,
+                signature=transfer.signature,
+                transfer_type=transfer.transfer_type,
+                transfer_metadata=transfer.transfer_metadata,
+            )
+            response = raw_client.transfer_v1(api_request)
+            if isinstance(response, GrvtError):
+                raise RuntimeError(
+                    f"GRVT transfer rejected: code={response.code} status={response.status} message={response.message}"
+                )
+            response_dict = asdict(response)
         result_block = response_dict.get("result")
         if isinstance(result_block, dict):
             response_dict.update(result_block)
