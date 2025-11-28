@@ -40,10 +40,11 @@ except ImportError:  # pragma: no cover - allow running without web3
 
 try:  # pragma: no cover - optional dependency wiring
     from pysdk.grvt_fixed_types import Transfer as GrvtTransfer
-    from pysdk.grvt_raw_base import GrvtApiConfig
+    from pysdk.grvt_raw_base import GrvtApiConfig, GrvtError
     from pysdk.grvt_raw_env import GrvtEnv as RawGrvtEnv
     from pysdk.grvt_raw_signing import sign_transfer
-    from pysdk.grvt_raw_types import Signature as GrvtSignature, TransferType
+    from pysdk.grvt_raw_sync import GrvtRawSync
+    from pysdk.grvt_raw_types import ApiTransferRequest, Signature as GrvtSignature, TransferType
     from pysdk.grvt_ccxt_env import GrvtEndpointType, get_grvt_endpoint_domains
     from pysdk.grvt_ccxt_utils import GrvtCurrency
 except ImportError:  # pragma: no cover - fallback guard
@@ -51,6 +52,8 @@ except ImportError:  # pragma: no cover - fallback guard
     GrvtApiConfig = None  # type: ignore
     RawGrvtEnv = None  # type: ignore
     sign_transfer = None  # type: ignore
+    GrvtRawSync = None  # type: ignore
+    ApiTransferRequest = None  # type: ignore
     GrvtSignature = None  # type: ignore
     TransferType = None  # type: ignore
     GrvtEndpointType = None  # type: ignore
@@ -509,6 +512,8 @@ class GrvtAccountMonitor:
         )
         env_transfer_key = os.getenv("GRVT_TRANSFER_PRIVATE_KEY")
         self._transfer_private_key = env_transfer_key.strip() if env_transfer_key else None
+        self._raw_transfer_client: Optional[Any] = None
+        self._raw_transfer_client_config: Optional[Any] = None
 
     def _build_transfer_route(self, direction: str) -> Optional[Dict[str, str]]:
         direction_normalized = (direction or "").strip().lower()
@@ -1264,6 +1269,24 @@ class GrvtAccountMonitor:
             LOGGER.warning("Unknown transfer API variant '%s'; defaulting to lite", candidate)
         return "lite"
 
+    def _get_raw_transfer_client(self, config: Any) -> Any:
+        if GrvtRawSync is None:  # pragma: no cover - optional dependency guard
+            raise RuntimeError("Raw GRVT transfer client unavailable; install grvt-pysdk")
+        cached_config = self._raw_transfer_client_config
+        if (
+            self._raw_transfer_client is not None
+            and cached_config is not None
+            and cached_config.env == config.env
+            and cached_config.trading_account_id == config.trading_account_id
+            and cached_config.private_key == config.private_key
+            and cached_config.api_key == config.api_key
+        ):
+            return self._raw_transfer_client
+        client = GrvtRawSync(config)
+        self._raw_transfer_client = client
+        self._raw_transfer_client_config = config
+        return client
+
     def _resolve_transfer_private_key(self, client: Any) -> str:
         candidate = self._transfer_private_key or os.getenv("GRVT_TRANSFER_PRIVATE_KEY")
         if candidate:
@@ -1503,6 +1526,8 @@ class GrvtAccountMonitor:
             GrvtApiConfig,
             RawGrvtEnv,
             EthAccount,
+            GrvtRawSync,
+            ApiTransferRequest,
         ]
         if any(helper is None for helper in missing_helpers):  # pragma: no cover - import guard
             raise RuntimeError(
@@ -1561,44 +1586,42 @@ class GrvtAccountMonitor:
         if isinstance(signature_block, dict):
             signature_block["expiration"] = str(expiration_ns)
             signature_block["nonce"] = signature_nonce
-        base_url = self._resolve_grvt_private_url()
-        if not base_url:
-            raise RuntimeError("Unable to determine GRVT API endpoint for transfer request")
         variant_key, request_payload = self._prepare_transfer_payload_for_variant(
             api_variant,
             transfer_dict,
             metadata_obj,
             metadata_text,
         )
-        url = f"{base_url}/{variant_key}/v1/transfer"
-        session = getattr(client, "session", None)
-        http_call = getattr(session, "request", None) if session is not None else None
-        if not callable(http_call):
-            http_call = requests.request
-        headers = {"Content-Type": "application/json"}
+        base_url = self._resolve_grvt_private_url()
+        url = f"{base_url}/{variant_key}/v1/transfer" if base_url else f"sdk://{variant_key}/v1/transfer"
         self._log_transfer_request(
             "raw-sign",
             "POST",
             url,
-            headers,
             json_payload=request_payload,
         )
-        response = cast(
-            Any,
-            http_call("POST", url, json=request_payload, headers=headers, timeout=self._timeout),
+        raw_client = self._get_raw_transfer_client(config)
+        api_request = ApiTransferRequest(  # type: ignore[call-arg]
+            from_account_id=transfer.from_account_id,
+            from_sub_account_id=transfer.from_sub_account_id,
+            to_account_id=transfer.to_account_id,
+            to_sub_account_id=transfer.to_sub_account_id,
+            currency=transfer.currency,
+            num_tokens=transfer.num_tokens,
+            signature=transfer.signature,
+            transfer_type=transfer.transfer_type,
+            transfer_metadata=transfer.transfer_metadata,
         )
-        if hasattr(response, "raise_for_status"):
-            try:
-                response.raise_for_status()
-            except Exception as exc:
-                detail = self._summarize_http_error(response)
-                raise RuntimeError(detail) from exc
-        if hasattr(response, "json"):
-            try:
-                return response.json()
-            except ValueError:
-                pass
-        return getattr(response, "text", response)
+        response = raw_client.transfer_v1(api_request)
+        if isinstance(response, GrvtError):
+            raise RuntimeError(
+                f"GRVT transfer rejected: code={response.code} status={response.status} message={response.message}"
+            )
+        response_dict = asdict(response)
+        result_block = response_dict.get("result")
+        if isinstance(result_block, dict):
+            response_dict.update(result_block)
+        return response_dict
 
     @staticmethod
     def _format_transfer_descriptor(account_id: Optional[str], sub_id: Optional[str]) -> str:
