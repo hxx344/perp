@@ -2837,6 +2837,57 @@
         };
       }
 
+      function estimateTransferableFunds(input) {
+        if (!input) {
+          return null;
+        }
+
+        const pickFirstFinite = (...values) => {
+          for (const value of values) {
+            if (Number.isFinite(value)) {
+              return Number(value);
+            }
+          }
+          return null;
+        };
+
+        const wallet = pickFirstFinite(input.walletValue, input.availableBalanceValue);
+        const equity = pickFirstFinite(
+          input.equityValue,
+          input.availableEquityValue,
+          wallet !== null && Number.isFinite(input.unrealizedPnl)
+            ? wallet + Number(input.unrealizedPnl)
+            : null
+        );
+        const initialMargin = Number.isFinite(input.totalInitialMargin) && input.totalInitialMargin > 0
+          ? Number(input.totalInitialMargin)
+          : 0;
+        const unrealized = Number.isFinite(input.unrealizedPnl) && input.unrealizedPnl > 0
+          ? Number(input.unrealizedPnl)
+          : 0;
+
+        let estimated = null;
+        let basis = 'wallet';
+        if (wallet !== null) {
+          estimated = wallet - initialMargin;
+        } else if (equity !== null) {
+          estimated = equity - initialMargin - unrealized;
+          basis = 'equity';
+        }
+
+        if (!Number.isFinite(estimated)) {
+          return null;
+        }
+        const clipped = Math.max(0, estimated);
+        return {
+          raw: estimated,
+          value: clipped,
+          basis,
+          initialMargin,
+          unrealized,
+        };
+      }
+
       function updateGrvtSymbolOptions(symbols) {
         if (!grvtAdjustSymbolsSelect) {
           return;
@@ -3222,12 +3273,22 @@
                 snapshot.balance ??
                 snapshot.available_balance
               );
+              const availableBalanceValue = parseDecimal(
+                account.available_balance ??
+                summary.available_balance ??
+                snapshot.available_balance
+              );
               const equityValue = parseDecimal(
                 account.equity ??
                 account.available_equity ??
                 summary.equity ??
                 summary.available_equity ??
                 snapshot.equity ??
+                snapshot.available_equity
+              );
+              const availableEquityValue = parseDecimal(
+                account.available_equity ??
+                summary.available_equity ??
                 snapshot.available_equity
               );
               const riskBaseValue = Number.isFinite(equityValue) ? equityValue : walletValue;
@@ -3242,6 +3303,8 @@
                 btcValue: accountBtc,
                 equityValue,
                 walletValue,
+                availableBalanceValue,
+                availableEquityValue,
                 riskBaseValue,
                 riskRatio: computeRiskRatio(accountTotal, riskBaseValue),
                 sortKey: buildAccountSortKey(agentId, account, summary),
@@ -3289,6 +3352,14 @@
               snapshot.equity ??
               snapshot.available_equity
             );
+            const fallbackAvailableBalance = parseDecimal(
+              summary.available_balance ??
+              snapshot.available_balance
+            );
+            const fallbackAvailableEquity = parseDecimal(
+              summary.available_equity ??
+              snapshot.available_equity
+            );
             const riskBaseValue = Number.isFinite(fallbackEquity) ? fallbackEquity : fallbackWallet;
             flattenedAccounts.push({
               agentId,
@@ -3300,6 +3371,8 @@
               btcValue: placeholderBtc,
               equityValue: fallbackEquity,
               walletValue: fallbackWallet,
+              availableBalanceValue: fallbackAvailableBalance,
+              availableEquityValue: fallbackAvailableEquity,
               riskBaseValue,
               riskRatio: computeRiskRatio(placeholderTotal, riskBaseValue),
               sortKey: buildAccountSortKey(agentId, null, summary),
@@ -3443,6 +3516,7 @@
             <div><dt>Equity</dt><dd>${escapeHtml(Number.isFinite(equityValue) ? numberFormatter.format(equityValue) : '--')}</dd></div>
             <div><dt>Wallet</dt><dd>${escapeHtml(Number.isFinite(walletValue) ? numberFormatter.format(walletValue) : '--')}</dd></div>
             <div><dt>Total</dt><dd>${escapeHtml(Number.isFinite(entry.totalValue) ? numberFormatter.format(entry.totalValue) : '--')}</dd></div>
+            <div data-metric="transfer"><dt>可转</dt><dd><span class="transfer-amount">—</span></dd></div>
             <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
             <div data-metric="risk"><dt>Risk</dt><dd><span class="risk-pill risk-pill-inline">—</span></dd></div>
           `;
@@ -3461,6 +3535,7 @@
 
           const maintenanceBadge = metrics.querySelector('[data-metric="maintenance"] .maintenance-ratio');
           let maintenanceRequirementTotal = 0;
+          let initialMarginRequirementTotal = 0;
 
           const positions = Array.isArray(account?.positions)
             ? account.positions
@@ -3501,6 +3576,9 @@
               if (marginInfo && Number.isFinite(marginInfo.maintenanceMargin)) {
                 maintenanceRequirementTotal += marginInfo.maintenanceMargin;
               }
+              if (marginInfo && Number.isFinite(marginInfo.initialMargin)) {
+                initialMarginRequirementTotal += marginInfo.initialMargin;
+              }
               const notionalText = marginInfo && Number.isFinite(marginInfo.notional)
                 ? numberFormatter.format(marginInfo.notional)
                 : '--';
@@ -3526,6 +3604,27 @@
             empty.className = 'grvt-positions-empty';
             empty.textContent = account ? 'No open positions' : 'Awaiting account snapshot';
             card.appendChild(empty);
+          }
+
+          const transferBadge = metrics.querySelector('[data-metric="transfer"] .transfer-amount');
+          if (transferBadge) {
+            const transferableEstimate = estimateTransferableFunds({
+              walletValue,
+              equityValue,
+              availableBalanceValue: entry.availableBalanceValue,
+              availableEquityValue: entry.availableEquityValue,
+              totalInitialMargin: initialMarginRequirementTotal,
+              unrealizedPnl: entry.totalValue,
+            });
+            if (transferableEstimate) {
+              transferBadge.textContent = numberFormatter.format(transferableEstimate.value);
+              transferBadge.title = `估算：钱包 - 初始保证金 ≈ ${numberFormatter.format(transferableEstimate.raw)}（数据来源：${transferableEstimate.basis === 'wallet' ? '钱包余额' : '权益'}）`;
+              transferBadge.dataset.state = transferableEstimate.value <= 0 ? 'empty' : 'ok';
+            } else {
+              transferBadge.textContent = '—';
+              transferBadge.title = '缺少必要的账户或仓位数据，无法估算';
+              transferBadge.dataset.state = 'unknown';
+            }
           }
 
           if (maintenanceBadge) {
