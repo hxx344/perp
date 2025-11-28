@@ -1049,15 +1049,15 @@
         <div class="grvt-transfer-panel hidden" id="grvt-transfer-panel">
           <div class="grvt-adjust-header">
             <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">账户间资金划转</h3>
-            <p class="summary-sub" style="margin: 0;">默认方向：来源 VPS 主账户 → 目标 VPS 主账户</p>
+            <p class="summary-sub" style="margin: 0;">默认方向：来源账户 → 目标账户</p>
           </div>
           <div class="grvt-transfer-grid">
             <label>
-              来源 VPS
+              来源账户
               <select id="grvt-transfer-source"></select>
             </label>
             <label>
-              目标 VPS
+              目标账户
               <select id="grvt-transfer-target"></select>
             </label>
             <label>
@@ -1119,22 +1119,22 @@
           <div class="grvt-adjust-header">
             <div>
               <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">自动平衡配置</h3>
-              <p class="summary-sub" style="margin: 0;">当两台 VPS 主账户权益差距超过阈值时自动触发互转</p>
+              <p class="summary-sub" style="margin: 0;">当两个账户权益差距超过阈值时自动触发互转</p>
             </div>
             <span class="grvt-auto-pair" id="grvt-auto-pair">未配置</span>
           </div>
           <div class="grvt-auto-grid">
             <label class="grvt-auto-toggle">
               <span>启用自动平衡</span>
-              <small>开启后根据阈值自动在两台 VPS 之间划转</small>
+              <small>开启后根据阈值自动在两个账户之间划转</small>
               <input type="checkbox" id="grvt-auto-enabled" />
             </label>
             <label>
-              VPS A
+              账户 A
               <select id="grvt-auto-agent-a"></select>
             </label>
             <label>
-              VPS B
+              账户 B
               <select id="grvt-auto-agent-b"></select>
             </label>
             <label>
