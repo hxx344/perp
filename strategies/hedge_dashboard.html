@@ -994,6 +994,11 @@
             <p class="summary-sub" id="grvt-wallet-balance">Wallet --</p>
           </article>
           <article class="card grvt-summary-card">
+            <h3>可转总额</h3>
+            <div class="value" id="grvt-transfer-total">--</div>
+            <p class="summary-sub" id="grvt-transfer-note">估算全部账号</p>
+          </article>
+          <article class="card grvt-summary-card">
             <h3>Risk Level</h3>
             <div class="value risk-pill risk-pill-summary" id="grvt-risk-level">--</div>
             <p class="grvt-risk-detail" id="grvt-risk-detail">Awaiting data…</p>
@@ -1372,6 +1377,8 @@
   const grvtBtcPnl = document.getElementById('grvt-btc-pnl');
   const grvtTotalEquity = document.getElementById('grvt-total-equity');
   const grvtWalletBalance = document.getElementById('grvt-wallet-balance');
+  const grvtTransferableTotal = document.getElementById('grvt-transfer-total');
+  const grvtTransferableNote = document.getElementById('grvt-transfer-note');
   const grvtRiskLevel = document.getElementById('grvt-risk-level');
   const grvtRiskDetail = document.getElementById('grvt-risk-detail');
   const grvtSummaryTime = document.getElementById('grvt-summary-time');
@@ -3177,6 +3184,12 @@
           if (grvtWalletBalance) {
             grvtWalletBalance.textContent = 'Wallet --';
           }
+          if (grvtTransferableTotal) {
+            grvtTransferableTotal.textContent = '--';
+          }
+          if (grvtTransferableNote) {
+            grvtTransferableNote.textContent = 'Awaiting data…';
+          }
           if (grvtRiskLevel) {
             grvtRiskLevel.textContent = '--';
             applyRiskTone(grvtRiskLevel, null, 'summary');
@@ -3286,6 +3299,24 @@
                 summary.available_equity ??
                 snapshot.available_equity
               );
+              const positionsList = Array.isArray(account.positions) ? account.positions : [];
+              let initialMarginTotal = 0;
+              if (positionsList.length) {
+                for (const position of positionsList) {
+                  const marginInfo = computePositionMargin(position);
+                  if (marginInfo && Number.isFinite(marginInfo.initialMargin)) {
+                    initialMarginTotal += marginInfo.initialMargin;
+                  }
+                }
+              }
+              const transferableEstimate = estimateTransferableFunds({
+                walletValue,
+                equityValue,
+                availableBalanceValue,
+                availableEquityValue,
+                totalInitialMargin: initialMarginTotal,
+                unrealizedPnl: accountTotal,
+              });
               const riskBaseValue = Number.isFinite(equityValue) ? equityValue : walletValue;
               const accountTs = Number(account.updated_at ?? snapshotTs);
               flattenedAccounts.push({
@@ -3300,6 +3331,8 @@
                 walletValue,
                 availableBalanceValue,
                 availableEquityValue,
+                initialMarginTotal,
+                transferableEstimate,
                 riskBaseValue,
                 riskRatio: computeRiskRatio(accountTotal, riskBaseValue),
                 sortKey: buildAccountSortKey(agentId, account, summary),
@@ -3355,6 +3388,15 @@
               summary.available_equity ??
               snapshot.available_equity
             );
+            const placeholderInitialMargin = 0;
+            const placeholderTransferable = estimateTransferableFunds({
+              walletValue: fallbackWallet,
+              equityValue: fallbackEquity,
+              availableBalanceValue: fallbackAvailableBalance,
+              availableEquityValue: fallbackAvailableEquity,
+              totalInitialMargin: placeholderInitialMargin,
+              unrealizedPnl: placeholderTotal,
+            });
             const riskBaseValue = Number.isFinite(fallbackEquity) ? fallbackEquity : fallbackWallet;
             flattenedAccounts.push({
               agentId,
@@ -3368,6 +3410,8 @@
               walletValue: fallbackWallet,
               availableBalanceValue: fallbackAvailableBalance,
               availableEquityValue: fallbackAvailableEquity,
+              initialMarginTotal: placeholderInitialMargin,
+              transferableEstimate: placeholderTransferable,
               riskBaseValue,
               riskRatio: computeRiskRatio(placeholderTotal, riskBaseValue),
               sortKey: buildAccountSortKey(agentId, null, summary),
@@ -3377,9 +3421,11 @@
 
         let aggregateEquity = 0;
         let aggregateWallet = 0;
+        let aggregateTransferable = 0;
         let hasEquity = false;
         let hasWallet = false;
-        let worstLoss = null;
+        let hasTransferableValue = false;
+        let worstLossAccount = null;
 
         for (const entry of flattenedAccounts) {
           if (Number.isFinite(entry.equityValue)) {
@@ -3390,15 +3436,21 @@
             aggregateWallet += entry.walletValue;
             hasWallet = true;
           }
-          if (Number.isFinite(entry.riskRatio) && (!worstLoss || entry.riskRatio > worstLoss.ratio)) {
-            worstLoss = {
-              ratio: entry.riskRatio,
-              lossValue: entry.totalValue != null ? Math.abs(entry.totalValue) : 0,
-              baseValue: entry.riskBaseValue,
-              usedEquity: Number.isFinite(entry.equityValue) && entry.equityValue === entry.riskBaseValue,
-              accountName: entry.account?.name ? String(entry.account.name) : null,
-              agentId: entry.agentId ?? 'Source',
-            };
+          const transferableEstimate = entry.transferableEstimate;
+          if (transferableEstimate && Number.isFinite(transferableEstimate.value)) {
+            aggregateTransferable += transferableEstimate.value;
+            hasTransferableValue = true;
+          }
+          const totalValue = Number(entry.totalValue);
+          if (Number.isFinite(totalValue) && totalValue < 0) {
+            const absLoss = Math.abs(totalValue);
+            if (!worstLossAccount || absLoss > worstLossAccount.lossValue) {
+              worstLossAccount = {
+                lossValue: absLoss,
+                accountName: entry.account?.name ? String(entry.account.name) : null,
+                agentId: entry.agentId ?? 'Source',
+              };
+            }
           }
         }
 
@@ -3417,25 +3469,41 @@
             ? `Wallet ${numberFormatter.format(aggregateWallet)}`
             : 'Wallet --';
         }
+        if (grvtTransferableTotal) {
+          grvtTransferableTotal.textContent = hasTransferableValue
+            ? numberFormatter.format(aggregateTransferable)
+            : '--';
+        }
+        if (grvtTransferableNote) {
+          if (hasTransferableValue) {
+            grvtTransferableNote.textContent = `覆盖 ${aggregateAccountCount} 个账户`;
+          } else {
+            grvtTransferableNote.textContent = '缺少可转额度数据';
+          }
+        }
 
         if (grvtRiskLevel && grvtRiskDetail) {
-          const worstRatio = worstLoss && Number.isFinite(worstLoss.ratio) ? worstLoss.ratio : null;
-          if (worstRatio !== null) {
-            grvtRiskLevel.textContent = formatPercent(worstRatio * 100, 2);
-            applyRiskTone(grvtRiskLevel, worstRatio, 'summary');
-            const accountLabelText = worstLoss.accountName
-              ? `${worstLoss.accountName} (${worstLoss.agentId})`
-              : worstLoss.agentId;
-            const lossText = numberFormatter.format(worstLoss.lossValue ?? 0);
-            const balanceText = Number.isFinite(worstLoss.baseValue)
-              ? numberFormatter.format(worstLoss.baseValue)
-              : '--';
-            const baseLabel = worstLoss.usedEquity ? 'equity' : 'wallet';
-            grvtRiskDetail.textContent = `${accountLabelText} loss ${lossText} / ${baseLabel} ${balanceText}`;
+          const denominator = hasTransferableValue && aggregateTransferable > 0
+            ? aggregateTransferable
+            : null;
+          if (worstLossAccount && denominator) {
+            const riskRatio = worstLossAccount.lossValue / denominator;
+            grvtRiskLevel.textContent = formatPercent(riskRatio * 100, 2);
+            applyRiskTone(grvtRiskLevel, riskRatio, 'summary');
+            const accountLabelText = worstLossAccount.accountName
+              ? `${worstLossAccount.accountName} (${worstLossAccount.agentId})`
+              : worstLossAccount.agentId;
+            const lossText = numberFormatter.format(worstLossAccount.lossValue ?? 0);
+            const transferableText = numberFormatter.format(denominator);
+            grvtRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 可转 ${transferableText}`;
+          } else if (worstLossAccount && !denominator) {
+            grvtRiskLevel.textContent = '—';
+            applyRiskTone(grvtRiskLevel, null, 'summary');
+            grvtRiskDetail.textContent = '缺少可转额度数据，无法计算 RISK';
           } else {
             grvtRiskLevel.textContent = '—';
             applyRiskTone(grvtRiskLevel, null, 'summary');
-            grvtRiskDetail.textContent = 'No losses or missing balance data';
+            grvtRiskDetail.textContent = '无亏损或缺少盈亏数据';
           }
         }
 
@@ -3530,7 +3598,9 @@
 
           const maintenanceBadge = metrics.querySelector('[data-metric="maintenance"] .maintenance-ratio');
           let maintenanceRequirementTotal = 0;
-          let initialMarginRequirementTotal = 0;
+          const initialMarginRequirementTotal = Number.isFinite(entry.initialMarginTotal)
+            ? entry.initialMarginTotal
+            : 0;
 
           const positions = Array.isArray(account?.positions)
             ? account.positions
@@ -3571,9 +3641,6 @@
               if (marginInfo && Number.isFinite(marginInfo.maintenanceMargin)) {
                 maintenanceRequirementTotal += marginInfo.maintenanceMargin;
               }
-              if (marginInfo && Number.isFinite(marginInfo.initialMargin)) {
-                initialMarginRequirementTotal += marginInfo.initialMargin;
-              }
               const notionalText = marginInfo && Number.isFinite(marginInfo.notional)
                 ? numberFormatter.format(marginInfo.notional)
                 : '--';
@@ -3603,14 +3670,7 @@
 
           const transferBadge = metrics.querySelector('[data-metric="transfer"] .transfer-amount');
           if (transferBadge) {
-            const transferableEstimate = estimateTransferableFunds({
-              walletValue,
-              equityValue,
-              availableBalanceValue: entry.availableBalanceValue,
-              availableEquityValue: entry.availableEquityValue,
-              totalInitialMargin: initialMarginRequirementTotal,
-              unrealizedPnl: entry.totalValue,
-            });
+            const transferableEstimate = entry.transferableEstimate;
             if (transferableEstimate) {
               transferBadge.textContent = numberFormatter.format(transferableEstimate.value);
               transferBadge.title = `估算：权益 - 初始保证金 - 未实现盈利 ≈ ${numberFormatter.format(transferableEstimate.raw)}`;
