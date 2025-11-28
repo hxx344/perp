@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from enum import Enum
@@ -149,8 +150,11 @@ class TransferMetadataTests(unittest.TestCase):
         }
         metadata_text = monitor._serialize_transfer_metadata(metadata)
         lite_payload = monitor._convert_transfer_to_lite_payload(transfer_dict, metadata, metadata_text)
+        self.assertEqual(lite_payload["tt"], "STANDARD")
         self.assertIn("tm", lite_payload)
-        self.assertEqual(lite_payload["tm"].get("provider"), "XY")
+        self.assertIsInstance(lite_payload["tm"], str)
+        decoded = json.loads(lite_payload["tm"])
+        self.assertEqual(decoded.get("provider"), "XY")
 
     def test_lite_metadata_flag_can_disable(self):
         os.environ["GRVT_LITE_INCLUDE_METADATA"] = "false"

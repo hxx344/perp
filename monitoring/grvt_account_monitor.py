@@ -1523,20 +1523,22 @@ class GrvtAccountMonitor:
         }
 
         transfer_type_value = transfer_dict.get("transfer_type")
+        if self._is_empty_transfer_value(transfer_type_value):
+            transfer_type_value = self._default_transfer_type or "UNSPECIFIED"
         if not self._is_empty_transfer_value(transfer_type_value):
-            transfer_type_text = str(transfer_type_value).strip().upper()
-            if transfer_type_text not in {"", "STANDARD", "UNSPECIFIED"}:
-                lite_payload["tt"] = transfer_type_value
+            lite_payload["tt"] = str(transfer_type_value)
 
         include_metadata = getattr(self, "_lite_include_transfer_metadata", True)
-        metadata_payload: Any = metadata_obj
-        if metadata_payload is None:
+        metadata_string: Optional[str] = None
+        if not self._is_empty_transfer_value(metadata_text):
+            metadata_string = str(metadata_text).strip()
+        elif metadata_obj is not None and not self._is_empty_transfer_value(metadata_obj):
             try:
-                metadata_payload = json.loads(metadata_text)
+                metadata_string = json.dumps(metadata_obj, separators=(",", ":"), sort_keys=True)
             except Exception:
-                metadata_payload = metadata_text
-        if include_metadata and not self._is_empty_transfer_value(metadata_payload):
-            lite_payload["tm"] = metadata_payload
+                metadata_string = str(metadata_obj)
+        if include_metadata and metadata_string and metadata_string not in {"", "{}"}:
+            lite_payload["tm"] = metadata_string
 
         return {
             key: value
