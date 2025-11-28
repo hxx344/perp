@@ -1025,9 +1025,15 @@ class GrvtAccountMonitor:
         return None
 
     def _metadata_matches_expected_schema(self, metadata: Mapping[str, Any]) -> bool:
-        required_keys = ("provider", "direction", "provider_tx_id", "chainid", "endpoint")
-        for key in required_keys:
-            if self._is_empty_transfer_value(metadata.get(key)):
+        required_keys: Tuple[Tuple[str, ...], ...] = (
+            ("provider",),
+            ("direction",),
+            ("provider_tx_id", "providerTxId"),
+            ("chainid", "chainId"),
+            ("endpoint", "endpointAccountId"),
+        )
+        for key_group in required_keys:
+            if not any(not self._is_empty_transfer_value(metadata.get(key)) for key in key_group):
                 return False
         return True
 
@@ -1051,8 +1057,30 @@ class GrvtAccountMonitor:
         if not self._enforce_transfer_metadata_schema:
             return metadata_dict
         if metadata_dict and self._metadata_matches_expected_schema(metadata_dict):
-            return metadata_dict
+            return self._ensure_transfer_metadata_aliases(metadata_dict)
         return self._build_structured_transfer_metadata(metadata_dict, entry, payload)
+
+    def _ensure_transfer_metadata_aliases(self, metadata: Mapping[str, Any]) -> Dict[str, Any]:
+        metadata_dict = dict(metadata or {})
+        alias_groups: Tuple[Tuple[str, ...], ...] = (
+            ("provider_tx_id", "providerTxId"),
+            ("chainid", "chainId"),
+            ("endpoint", "endpointAccountId"),
+        )
+        for group in alias_groups:
+            selected_value: Optional[Any] = None
+            for key in group:
+                current_value = metadata_dict.get(key)
+                if not self._is_empty_transfer_value(current_value):
+                    selected_value = current_value
+                    break
+            if self._is_empty_transfer_value(selected_value):
+                continue
+            text_value = str(selected_value)
+            for key in group:
+                if self._is_empty_transfer_value(metadata_dict.get(key)):
+                    metadata_dict[key] = text_value
+        return metadata_dict
 
     def _build_structured_transfer_metadata(
         self,
@@ -1112,11 +1140,21 @@ class GrvtAccountMonitor:
             "chainid": chain_id_text,
             "endpoint": endpoint_text,
         }
-        return {
-            key: str(value) if value is not None else value
-            for key, value in structured.items()
-            if not self._is_empty_transfer_value(value)
+        aliases = {
+            "provider_tx_id": "providerTxId",
+            "chainid": "chainId",
+            "endpoint": "endpointAccountId",
         }
+        metadata_with_aliases: Dict[str, Any] = {}
+        for key, value in structured.items():
+            if self._is_empty_transfer_value(value):
+                continue
+            text_value = str(value) if value is not None else value
+            metadata_with_aliases[key] = text_value
+            alias = aliases.get(key)
+            if alias and alias not in metadata_with_aliases:
+                metadata_with_aliases[alias] = text_value
+        return metadata_with_aliases
 
     def _prime_currency_catalog(self) -> None:
         if not self._currency_catalog and GrvtCurrency is not None:

@@ -125,7 +125,17 @@ class TransferMetadataTests(unittest.TestCase):
         metadata = payload.get("transfer_metadata")
         self.assertIsInstance(metadata, dict)
         metadata_dict = dict(metadata or {})
-        for key in ("provider", "direction", "provider_tx_id", "chainid", "endpoint"):
+        expected_keys = {
+            "provider",
+            "direction",
+            "provider_tx_id",
+            "providerTxId",
+            "chainid",
+            "chainId",
+            "endpoint",
+            "endpointAccountId",
+        }
+        for key in expected_keys:
             self.assertIn(key, metadata_dict)
             self.assertTrue(metadata_dict[key])
 
@@ -148,13 +158,16 @@ class TransferMetadataTests(unittest.TestCase):
             "chainid": "42161",
             "endpoint": "0xdef",
         }
-        metadata_text = monitor._serialize_transfer_metadata(metadata)
-        lite_payload = monitor._convert_transfer_to_lite_payload(transfer_dict, metadata, metadata_text)
+        metadata_obj = monitor._coerce_transfer_metadata_schema(metadata, {}, transfer_dict)
+        metadata_text = monitor._serialize_transfer_metadata(metadata_obj)
+        lite_payload = monitor._convert_transfer_to_lite_payload(transfer_dict, metadata_obj, metadata_text)
         self.assertEqual(lite_payload["tt"], "STANDARD")
         self.assertIn("tm", lite_payload)
         self.assertIsInstance(lite_payload["tm"], str)
         decoded = json.loads(lite_payload["tm"])
         self.assertEqual(decoded.get("provider"), "XY")
+        self.assertEqual(decoded.get("providerTxId"), "txn1")
+        self.assertEqual(decoded.get("chainId"), "42161")
 
     def test_lite_metadata_flag_can_disable(self):
         os.environ["GRVT_LITE_INCLUDE_METADATA"] = "false"
