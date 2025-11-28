@@ -1535,13 +1535,8 @@ class GrvtAccountMonitor:
             "nt": transfer_dict.get("num_tokens"),
         }
         signature_block = transfer_dict.get("signature") or {}
-        signer_value = signature_block.get("signer")
-        signer_matches_from = (
-            signer_value
-            and from_account_id
-            and str(signer_value).strip().lower() == str(from_account_id).strip().lower()
-        )
-        preferred_signer = signer_value if signer_matches_from else from_account_id
+        signer_value = signature_block.get("signer") or from_account_id
+        preferred_signer = signer_value
         formatted_signer = self._format_checksum_address(preferred_signer) or preferred_signer
         lite_signature = {
             "s": formatted_signer,
