@@ -2851,40 +2851,35 @@
           return null;
         };
 
-        const wallet = pickFirstFinite(input.walletValue, input.availableBalanceValue);
         const equity = pickFirstFinite(
           input.equityValue,
           input.availableEquityValue,
-          wallet !== null && Number.isFinite(input.unrealizedPnl)
-            ? wallet + Number(input.unrealizedPnl)
+          Number.isFinite(input.walletValue) && Number.isFinite(input.unrealizedPnl)
+            ? Number(input.walletValue) + Number(input.unrealizedPnl)
             : null
         );
+        if (equity === null) {
+          return null;
+        }
+
         const initialMargin = Number.isFinite(input.totalInitialMargin) && input.totalInitialMargin > 0
           ? Number(input.totalInitialMargin)
           : 0;
-        const unrealized = Number.isFinite(input.unrealizedPnl) && input.unrealizedPnl > 0
+        const unrealizedProfit = Number.isFinite(input.unrealizedPnl) && input.unrealizedPnl > 0
           ? Number(input.unrealizedPnl)
           : 0;
-
-        let estimated = null;
-        let basis = 'wallet';
-        if (wallet !== null) {
-          estimated = wallet - initialMargin;
-        } else if (equity !== null) {
-          estimated = equity - initialMargin - unrealized;
-          basis = 'equity';
-        }
-
+        const estimated = equity - initialMargin - unrealizedProfit;
         if (!Number.isFinite(estimated)) {
           return null;
         }
+
         const clipped = Math.max(0, estimated);
         return {
           raw: estimated,
           value: clipped,
-          basis,
+          basis: 'equity',
           initialMargin,
-          unrealized,
+          unrealized: unrealizedProfit,
         };
       }
 
@@ -3618,7 +3613,7 @@
             });
             if (transferableEstimate) {
               transferBadge.textContent = numberFormatter.format(transferableEstimate.value);
-              transferBadge.title = `估算：钱包 - 初始保证金 ≈ ${numberFormatter.format(transferableEstimate.raw)}（数据来源：${transferableEstimate.basis === 'wallet' ? '钱包余额' : '权益'}）`;
+              transferBadge.title = `估算：权益 - 初始保证金 - 未实现盈利 ≈ ${numberFormatter.format(transferableEstimate.raw)}`;
               transferBadge.dataset.state = transferableEstimate.value <= 0 ? 'empty' : 'ok';
             } else {
               transferBadge.textContent = '—';
