@@ -1606,6 +1606,38 @@ class GrvtAccountMonitor:
         base_url = env_trade_url or self._resolve_grvt_private_url()
         normalized_base_url = base_url.rstrip("/") if isinstance(base_url, str) and base_url else None
 
+        def _execute_full_transfer() -> Dict[str, Any]:
+            full_url = (
+                f"{normalized_base_url}/full/v1/transfer"
+                if normalized_base_url
+                else "sdk://full/v1/transfer"
+            )
+            self._log_transfer_request(
+                "raw-sign",
+                "POST",
+                full_url,
+                json_payload=request_payload,
+            )
+            api_request = ApiTransferRequest(  # type: ignore[call-arg]
+                from_account_id=transfer.from_account_id,
+                from_sub_account_id=transfer.from_sub_account_id,
+                to_account_id=transfer.to_account_id,
+                to_sub_account_id=transfer.to_sub_account_id,
+                currency=transfer.currency,
+                num_tokens=transfer.num_tokens,
+                signature=transfer.signature,
+                transfer_type=transfer.transfer_type,
+                transfer_metadata=transfer.transfer_metadata,
+            )
+            response_obj = raw_client.transfer_v1(api_request)
+            if isinstance(response_obj, GrvtError):
+                raise RuntimeError(
+                    f"GRVT transfer rejected: code={response_obj.code} status={response_obj.status} message={response_obj.message}"
+                )
+            return asdict(response_obj)
+
+        fallback_to_full = False
+        response_dict: Dict[str, Any]
         if variant_key == "lite":
             if not normalized_base_url:
                 raise RuntimeError("Unable to resolve GRVT trade endpoint for lite transfer requests")
@@ -1632,40 +1664,19 @@ class GrvtAccountMonitor:
             )
             if response_obj.status_code >= 400:
                 detail = self._summarize_http_error(response_obj)
-                raise RuntimeError(f"GRVT lite transfer failed: {detail}")
+                if response_obj.status_code in {401, 403}:
+                    LOGGER.warning("Lite transfer rejected (%s); retrying via full/v1/transfer", detail)
+                    fallback_to_full = True
+                else:
+                    raise RuntimeError(f"GRVT lite transfer failed: {detail}")
             try:
                 response_dict = cast(Dict[str, Any], response_obj.json())
             except ValueError:
                 response_dict = {"raw": getattr(response_obj, "text", "")}
+            if fallback_to_full:
+                response_dict = _execute_full_transfer()
         else:
-            url = (
-                f"{normalized_base_url}/{variant_key}/v1/transfer"
-                if normalized_base_url
-                else f"sdk://{variant_key}/v1/transfer"
-            )
-            self._log_transfer_request(
-                "raw-sign",
-                "POST",
-                url,
-                json_payload=request_payload,
-            )
-            api_request = ApiTransferRequest(  # type: ignore[call-arg]
-                from_account_id=transfer.from_account_id,
-                from_sub_account_id=transfer.from_sub_account_id,
-                to_account_id=transfer.to_account_id,
-                to_sub_account_id=transfer.to_sub_account_id,
-                currency=transfer.currency,
-                num_tokens=transfer.num_tokens,
-                signature=transfer.signature,
-                transfer_type=transfer.transfer_type,
-                transfer_metadata=transfer.transfer_metadata,
-            )
-            response = raw_client.transfer_v1(api_request)
-            if isinstance(response, GrvtError):
-                raise RuntimeError(
-                    f"GRVT transfer rejected: code={response.code} status={response.status} message={response.message}"
-                )
-            response_dict = asdict(response)
+            response_dict = _execute_full_transfer()
         result_block = response_dict.get("result")
         if isinstance(result_block, dict):
             response_dict.update(result_block)
