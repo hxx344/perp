@@ -512,6 +512,27 @@ class GrvtAccountMonitor:
         )
         env_transfer_key = os.getenv("GRVT_TRANSFER_PRIVATE_KEY")
         self._transfer_private_key = env_transfer_key.strip() if env_transfer_key else None
+        self._transfer_metadata_provider = (
+            os.getenv("GRVT_TRANSFER_METADATA_PROVIDER")
+            or os.getenv("GRVT_TRANSFER_PROVIDER")
+            or (session.label if getattr(session, "label", None) else None)
+        )
+        self._transfer_metadata_chain_id = (
+            os.getenv("GRVT_TRANSFER_METADATA_CHAIN_ID")
+            or os.getenv("GRVT_TRANSFER_CHAIN_ID")
+            or os.getenv("GRVT_CHAIN_ID")
+        )
+        self._transfer_metadata_endpoint = os.getenv("GRVT_TRANSFER_METADATA_ENDPOINT")
+        enforce_flag = os.getenv("GRVT_ENFORCE_TRANSFER_METADATA_SCHEMA")
+        if enforce_flag is None:
+            self._enforce_transfer_metadata_schema = True
+        else:
+            self._enforce_transfer_metadata_schema = str(enforce_flag).strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
         self._raw_transfer_client: Optional[Any] = None
         self._raw_transfer_client_config: Optional[Any] = None
 
@@ -963,6 +984,11 @@ class GrvtAccountMonitor:
         for field in required:
             if not payload.get(field):
                 raise ValueError(f"Transfer request missing required field '{field}'")
+        payload["transfer_metadata"] = self._coerce_transfer_metadata_schema(
+            payload.get("transfer_metadata"),
+            entry,
+            payload,
+        )
         return payload
 
     def _apply_default_transfer_targets(self, payload: Dict[str, Any]) -> None:
@@ -972,6 +998,7 @@ class GrvtAccountMonitor:
             or payload.get("direction")
             or self._default_transfer_direction
         ).strip().lower()
+        payload["direction"] = direction
         if not payload.get("from_account_id") and self._home_main_account_id:
             payload["from_account_id"] = self._home_main_account_id
         if not payload.get("from_sub_account_id"):
@@ -986,6 +1013,109 @@ class GrvtAccountMonitor:
                 payload["to_sub_account_id"] = self._home_sub_account_id or self._home_main_sub_account_id
             else:
                 payload["to_sub_account_id"] = self._home_main_sub_account_id
+
+    @staticmethod
+    def _select_metadata_value(metadata: Mapping[str, Any], keys: Sequence[str]) -> Optional[Any]:
+        for key in keys:
+            if key in metadata:
+                value = metadata[key]
+                if not GrvtAccountMonitor._is_empty_transfer_value(value):
+                    return value
+        return None
+
+    def _metadata_matches_expected_schema(self, metadata: Mapping[str, Any]) -> bool:
+        required_keys = ("provider", "direction", "provider_tx_id", "chainid", "endpoint")
+        for key in required_keys:
+            if self._is_empty_transfer_value(metadata.get(key)):
+                return False
+        return True
+
+    def _normalize_transfer_metadata_direction(self, direction: Any) -> str:
+        text = str(direction or "").strip().lower()
+        if text in {"sub_to_main", "withdraw", "withdrawal", "to_main"}:
+            return "WITHDRAWAL"
+        if text in {"main_to_sub", "deposit", "to_sub"}:
+            return "DEPOSIT"
+        if text in {"main_to_main", "internal", "transfer"}:
+            return "INTERNAL"
+        return "INTERNAL"
+
+    def _coerce_transfer_metadata_schema(
+        self,
+        metadata: Optional[Mapping[str, Any]],
+        entry: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        metadata_dict = dict(metadata or {})
+        if not self._enforce_transfer_metadata_schema:
+            return metadata_dict
+        if metadata_dict and self._metadata_matches_expected_schema(metadata_dict):
+            return metadata_dict
+        return self._build_structured_transfer_metadata(metadata_dict, entry, payload)
+
+    def _build_structured_transfer_metadata(
+        self,
+        metadata: Mapping[str, Any],
+        entry: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        metadata_dict = dict(metadata or {})
+        provider = self._select_metadata_value(
+            metadata_dict,
+            ("provider", "transfer_provider", "agent_label", "agent_id"),
+        )
+        if self._is_empty_transfer_value(provider):
+            provider = self._transfer_metadata_provider or self._agent_id or "COORDINATOR"
+        provider_text = str(provider) if provider is not None else "COORDINATOR"
+        request_id = entry.get("request_id") or metadata_dict.get("request_id")
+        provider_tx_id = self._select_metadata_value(
+            metadata_dict,
+            ("provider_tx_id", "providerTxId", "tx_id", "txid", "transfer_id"),
+        )
+        if self._is_empty_transfer_value(provider_tx_id):
+            provider_tx_id = request_id
+        if self._is_empty_transfer_value(provider_tx_id):
+            provider_tx_id = f"{self._agent_id}-{int(time.time() * 1000)}"
+        provider_tx_text = str(provider_tx_id)
+        direction_hint = self._select_metadata_value(
+            metadata_dict,
+            ("direction", "transfer_direction", "flow"),
+        )
+        if self._is_empty_transfer_value(direction_hint):
+            direction_hint = payload.get("direction") or self._default_transfer_direction
+        direction_text = self._normalize_transfer_metadata_direction(direction_hint)
+        chain_id_value = self._select_metadata_value(
+            metadata_dict,
+            ("chainid", "chain_id", "chainId"),
+        )
+        if self._is_empty_transfer_value(chain_id_value):
+            chain_id_value = self._transfer_metadata_chain_id or "42161"
+        chain_id_text = str(chain_id_value) if chain_id_value is not None else "42161"
+        endpoint_value = self._select_metadata_value(
+            metadata_dict,
+            ("endpoint", "funding_account", "to_account_id", "target_account_id"),
+        )
+        if self._is_empty_transfer_value(endpoint_value):
+            endpoint_value = (
+                payload.get("to_account_id")
+                or payload.get("from_account_id")
+                or self._transfer_metadata_endpoint
+                or self._home_main_account_id
+            )
+        endpoint_text = self._format_checksum_address(endpoint_value) or endpoint_value
+        endpoint_text = str(endpoint_text) if endpoint_text is not None else None
+        structured = {
+            "provider": provider_text,
+            "direction": direction_text,
+            "provider_tx_id": provider_tx_text,
+            "chainid": chain_id_text,
+            "endpoint": endpoint_text,
+        }
+        return {
+            key: str(value) if value is not None else value
+            for key, value in structured.items()
+            if not self._is_empty_transfer_value(value)
+        }
 
     def _prime_currency_catalog(self) -> None:
         if not self._currency_catalog and GrvtCurrency is not None:
