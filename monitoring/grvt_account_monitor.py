@@ -498,9 +498,10 @@ class GrvtAccountMonitor:
         self._default_transfer_type = self._canonicalize_transfer_type_key(type_source)
         self._prime_currency_catalog()
         lite_metadata_flag = os.getenv("GRVT_LITE_INCLUDE_METADATA")
-        self._lite_include_transfer_metadata = bool(
-            lite_metadata_flag and str(lite_metadata_flag).strip().lower() in {"1", "true", "yes", "on"}
-        )
+        if lite_metadata_flag is None:
+            self._lite_include_transfer_metadata = True
+        else:
+            self._lite_include_transfer_metadata = str(lite_metadata_flag).strip().lower() in {"1", "true", "yes", "on"}
         self._transfer_log_path: Optional[Path] = self._resolve_transfer_log_path(
             transfer_log_path,
             disable_transfer_log,
@@ -1527,21 +1528,15 @@ class GrvtAccountMonitor:
             if transfer_type_text not in {"", "STANDARD", "UNSPECIFIED"}:
                 lite_payload["tt"] = transfer_type_value
 
-        if getattr(self, "_lite_include_transfer_metadata", False):
-            metadata_payload: Any = None
-            if isinstance(metadata_text, str):
-                normalized_metadata_text = metadata_text.strip()
-                if normalized_metadata_text and normalized_metadata_text not in {"{}", "[]"}:
-                    metadata_payload = metadata_text
-            if metadata_payload is None:
-                metadata_payload = metadata_obj
-                if metadata_payload is None:
-                    try:
-                        metadata_payload = json.loads(metadata_text)
-                    except Exception:
-                        metadata_payload = metadata_text
-            if not self._is_empty_transfer_value(metadata_payload):
-                lite_payload["tm"] = metadata_payload
+        include_metadata = getattr(self, "_lite_include_transfer_metadata", True)
+        metadata_payload: Any = metadata_obj
+        if metadata_payload is None:
+            try:
+                metadata_payload = json.loads(metadata_text)
+            except Exception:
+                metadata_payload = metadata_text
+        if include_metadata and not self._is_empty_transfer_value(metadata_payload):
+            lite_payload["tm"] = metadata_payload
 
         return {
             key: value
@@ -1724,6 +1719,11 @@ class GrvtAccountMonitor:
         if isinstance(signature_block, dict):
             signature_block["expiration"] = str(expiration_ns)
             signature_block["nonce"] = signature_nonce
+        full_request_payload = dict(transfer_dict)
+        try:
+            full_request_payload["transfer_metadata"] = json.loads(metadata_text)
+        except Exception:
+            full_request_payload["transfer_metadata"] = metadata_text
         variant_key, request_payload = self._prepare_transfer_payload_for_variant(
             api_variant,
             transfer_dict,
@@ -1746,7 +1746,7 @@ class GrvtAccountMonitor:
                 "raw-sign",
                 "POST",
                 full_url,
-                json_payload=request_payload,
+                json_payload=full_request_payload,
             )
             api_request = ApiTransferRequest(  # type: ignore[call-arg]
                 from_account_id=transfer.from_account_id,
