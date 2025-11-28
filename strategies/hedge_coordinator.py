@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 from urllib.parse import quote_plus
 
 from aiohttp import ClientSession, ClientTimeout, web
@@ -150,6 +150,24 @@ LOGGER = logging.getLogger("hedge.coordinator")
 MAX_SPREAD_HISTORY = 600
 MAX_STRATEGY_EVENTS = 400
 MAX_STRATEGY_TRADES = 200
+GLOBAL_RISK_ALERT_KEY = "__global_risk__"
+
+DEFAULT_MARGIN_SCHEDULE: Tuple[Tuple[str, str, str], ...] = (
+    ("600000", "0.02", "0.01"),
+    ("1600000", "0.04", "0.02"),
+    ("4000000", "0.05", "0.025"),
+    ("10000000", "0.1", "0.05"),
+    ("20000000", "0.2", "0.1"),
+    ("50000000", "0.25", "0.125"),
+    ("80000000", "0.3333", "0.1667"),
+    ("101000000", "0.5", "0.25"),
+    ("Infinity", "1", "0.5"),
+)
+
+MARGIN_SCHEDULES: Dict[str, Tuple[Tuple[str, str, str], ...]] = {
+    "BTC": DEFAULT_MARGIN_SCHEDULE,
+    "ETH": DEFAULT_MARGIN_SCHEDULE,
+}
 
 
 class BarkNotifier:
@@ -196,6 +214,15 @@ class RiskAlertInfo:
     loss_value: Decimal
     base_value: Decimal
     base_label: str
+
+
+@dataclass(frozen=True)
+class GlobalRiskSnapshot:
+    ratio: Optional[float]
+    total_transferable: Decimal
+    worst_loss_value: Decimal
+    worst_agent_id: Optional[str]
+    worst_account_label: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -452,6 +479,7 @@ class HedgeCoordinator:
         self._risk_alert_cooldown = max(0.0, risk_alert_cooldown)
         self._risk_alert_active: Dict[str, bool] = {}
         self._risk_alert_last_ts: Dict[str, float] = {}
+        self._global_risk_stats: Optional[GlobalRiskSnapshot] = None
 
     @staticmethod
     def _normalize_agent_id(raw: Any) -> str:
@@ -504,6 +532,194 @@ class HedgeCoordinator:
             "controls": controls_payload,
             "paused_agents": paused_agents,
             "default_paused": self._default_paused,
+        }
+
+    def _recalculate_global_risk(self) -> None:
+        self._global_risk_stats = self._calculate_global_risk()
+
+    def _calculate_global_risk(self) -> Optional[GlobalRiskSnapshot]:
+        total_transferable = Decimal("0")
+        worst_loss_value = Decimal("0")
+        worst_agent_id: Optional[str] = None
+        worst_account_label: Optional[str] = None
+
+        for agent_id, state in self._states.items():
+            payload = state.grvt_accounts
+            if not isinstance(payload, dict):
+                continue
+            summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else None
+            for _, account_label, account_payload in self._flatten_grvt_accounts(agent_id, payload):
+                equity_value = self._select_equity_value(account_payload, summary)
+                if equity_value is None or equity_value <= 0:
+                    continue
+                total_pnl = self._decimal_from(account_payload.get("total_pnl"))
+                if total_pnl is None:
+                    total_pnl = self._decimal_from(account_payload.get("total"))
+                initial_margin = self._compute_initial_margin_total(account_payload)
+                transferable = self._compute_transferable_amount(equity_value, initial_margin, total_pnl)
+                if transferable is not None:
+                    total_transferable += transferable
+                if total_pnl is not None and total_pnl < 0:
+                    abs_loss = abs(total_pnl)
+                    if abs_loss > worst_loss_value:
+                        worst_loss_value = abs_loss
+                        worst_agent_id = agent_id
+                        worst_account_label = account_label
+
+        if worst_loss_value <= 0 or total_transferable <= 0:
+            return GlobalRiskSnapshot(
+                ratio=None,
+                total_transferable=total_transferable,
+                worst_loss_value=worst_loss_value,
+                worst_agent_id=worst_agent_id,
+                worst_account_label=worst_account_label,
+            )
+
+        ratio = float(worst_loss_value / total_transferable)
+        return GlobalRiskSnapshot(
+            ratio=ratio,
+            total_transferable=total_transferable,
+            worst_loss_value=worst_loss_value,
+            worst_agent_id=worst_agent_id,
+            worst_account_label=worst_account_label,
+        )
+
+    @staticmethod
+    def _select_equity_value(primary: Dict[str, Any], summary: Optional[Dict[str, Any]]) -> Optional[Decimal]:
+        for source in (primary, summary or {}):
+            if not isinstance(source, dict):
+                continue
+            for field in ("equity", "available_equity"):
+                value = HedgeCoordinator._decimal_from(source.get(field))
+                if value is not None and value > 0:
+                    return value
+        return None
+
+    @staticmethod
+    def _compute_initial_margin_total(account_payload: Dict[str, Any]) -> Decimal:
+        positions = account_payload.get("positions")
+        if not isinstance(positions, list):
+            return Decimal("0")
+        total = Decimal("0")
+        for position in positions:
+            if not isinstance(position, dict):
+                continue
+            margin = HedgeCoordinator._compute_position_initial_margin(position)
+            if margin is not None:
+                total += margin
+        return total
+
+    @staticmethod
+    def _compute_transferable_amount(
+        equity_value: Optional[Decimal],
+        initial_margin: Decimal,
+        total_pnl: Optional[Decimal],
+    ) -> Optional[Decimal]:
+        if equity_value is None:
+            return None
+        unrealized = Decimal("0")
+        if total_pnl is not None and total_pnl > 0:
+            unrealized = total_pnl
+        available = equity_value - initial_margin - unrealized
+        if available <= 0:
+            return Decimal("0")
+        return available
+
+    @staticmethod
+    def _compute_position_initial_margin(position: Dict[str, Any]) -> Optional[Decimal]:
+        size = None
+        for field in ("net_size", "size", "contracts", "amount"):
+            size = HedgeCoordinator._decimal_from(position.get(field))
+            if size is not None:
+                break
+        price = None
+        for field in ("mark_price", "markPrice", "last_price", "entry_price", "entryPrice"):
+            price = HedgeCoordinator._decimal_from(position.get(field))
+            if price is not None:
+                break
+        if size is None or price is None:
+            return None
+        notional = abs(size * price)
+        if notional <= 0:
+            return None
+        base_asset = HedgeCoordinator._extract_base_asset(position.get("symbol"))
+        tier = HedgeCoordinator._resolve_margin_tier(base_asset, notional)
+        if tier is None:
+            return None
+        initial_rate, _ = tier
+        return notional * initial_rate
+
+    @staticmethod
+    def _normalize_symbol_label(value: Any) -> str:
+        if value is None:
+            return ""
+        try:
+            text = str(value).strip().upper()
+        except Exception:
+            return ""
+        for token in ("/", "-", ":", "_", " "):
+            text = text.replace(token, "")
+        return text
+
+    @staticmethod
+    def _extract_base_asset(symbol: Any) -> Optional[str]:
+        if symbol is None:
+            return None
+        try:
+            text = str(symbol).strip().upper()
+        except Exception:
+            return None
+        for token in (":", "-", "_", " "):
+            text = text.replace(token, "/")
+        parts = [part for part in text.split("/") if part]
+        candidate = parts[0] if parts else text
+        suffixes = ("PERP", "FUT", "FUTURES", "USD", "USDT", "USDC")
+        stripped = True
+        while stripped and candidate:
+            stripped = False
+            for suffix in suffixes:
+                if candidate.endswith(suffix) and len(candidate) > len(suffix):
+                    candidate = candidate[: -len(suffix)]
+                    stripped = True
+                    break
+        candidate = "".join(ch for ch in candidate if ch.isalpha())
+        return candidate or None
+
+    @staticmethod
+    def _resolve_margin_schedule(base_asset: Optional[str]) -> Tuple[Tuple[str, str, str], ...]:
+        key = (base_asset or "").upper()
+        return MARGIN_SCHEDULES.get(key, DEFAULT_MARGIN_SCHEDULE)
+
+    @staticmethod
+    def _resolve_margin_tier(
+        base_asset: Optional[str],
+        notional: Decimal,
+    ) -> Optional[Tuple[Decimal, Decimal]]:
+        schedule = HedgeCoordinator._resolve_margin_schedule(base_asset)
+        for max_str, initial_str, maintenance_str in schedule:
+            try:
+                initial_rate = Decimal(initial_str)
+                maintenance_rate = Decimal(maintenance_str)
+            except Exception:
+                continue
+            if max_str == "Infinity":
+                max_value = None
+            else:
+                try:
+                    max_value = Decimal(max_str)
+                except Exception:
+                    continue
+            if max_value is None or notional <= max_value:
+                return initial_rate, maintenance_rate
+        return None
+
+    def _serialize_global_risk(self, stats: GlobalRiskSnapshot) -> Dict[str, Any]:
+        return {
+            "ratio": stats.ratio,
+            "total_transferable": self._format_decimal(stats.total_transferable),
+            "worst_loss": self._format_decimal(stats.worst_loss_value),
+            "worst_agent_id": stats.worst_agent_id,
+            "worst_account_label": stats.worst_account_label,
         }
 
     async def set_all_paused(self, paused: bool) -> Dict[str, Any]:
@@ -592,6 +808,10 @@ class HedgeCoordinator:
         }
         if grvt_map:
             snapshot["grvt_accounts"] = grvt_map
+        if self._global_risk_stats is None:
+            self._recalculate_global_risk()
+        if self._global_risk_stats is not None:
+            snapshot["global_risk"] = self._serialize_global_risk(self._global_risk_stats)
         return snapshot
 
     async def update(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -604,6 +824,7 @@ class HedgeCoordinator:
                 self._states[agent_id] = state
 
             state.update_from_payload(payload)
+            self._recalculate_global_risk()
             alerts = self._prepare_risk_alerts(agent_id, state.grvt_accounts)
 
             now = time.time()
@@ -640,67 +861,44 @@ class HedgeCoordinator:
             return None
 
     def _prepare_risk_alerts(self, agent_id: str, grvt_payload: Optional[Dict[str, Any]]) -> Sequence[RiskAlertInfo]:
+        del grvt_payload  # unused in global risk evaluation
         if self._bark_notifier is None or self._risk_alert_threshold is None:
             return []
-        if not isinstance(grvt_payload, dict):
+
+        stats = self._global_risk_stats
+        if stats is None or stats.ratio is None:
+            self._risk_alert_active.pop(GLOBAL_RISK_ALERT_KEY, None)
             return []
 
         threshold = self._risk_alert_threshold
         reset_ratio = self._risk_alert_reset if self._risk_alert_reset is not None else threshold * 0.7
-        summary = grvt_payload.get("summary") if isinstance(grvt_payload.get("summary"), dict) else None
         now = time.time()
         alerts: List[RiskAlertInfo] = []
-        seen_keys: set[str] = set()
 
-        for entry_key, label, account_payload in self._flatten_grvt_accounts(agent_id, grvt_payload):
-            seen_keys.add(entry_key)
-            total_value = self._decimal_from(account_payload.get("total_pnl"))
-            if total_value is None:
-                total_value = self._decimal_from(account_payload.get("total"))
-            if total_value is None:
-                self._risk_alert_active.pop(entry_key, None)
-                continue
-
-            base_value, base_label = self._select_base_value(account_payload, summary)
-            ratio = self._compute_risk_ratio(total_value, base_value)
-
-            if ratio is None:
-                self._risk_alert_active.pop(entry_key, None)
-                continue
-
-            if ratio >= threshold:
-                already_active = self._risk_alert_active.get(entry_key, False)
-                last_ts = self._risk_alert_last_ts.get(entry_key, 0.0)
-                if not already_active and (now - last_ts) >= self._risk_alert_cooldown:
-                    alerts.append(
-                        RiskAlertInfo(
-                            key=entry_key,
-                            agent_id=agent_id,
-                            account_label=label,
-                            ratio=ratio,
-                            loss_value=abs(total_value),
-                            base_value=base_value if base_value is not None else Decimal("0"),
-                            base_label=base_label or "wallet",
-                        )
+        if (
+            stats.ratio >= threshold
+            and stats.total_transferable > 0
+            and stats.worst_loss_value > 0
+        ):
+            already_active = self._risk_alert_active.get(GLOBAL_RISK_ALERT_KEY, False)
+            last_ts = self._risk_alert_last_ts.get(GLOBAL_RISK_ALERT_KEY, 0.0)
+            if not already_active and (now - last_ts) >= self._risk_alert_cooldown:
+                alerts.append(
+                    RiskAlertInfo(
+                        key=GLOBAL_RISK_ALERT_KEY,
+                        agent_id=stats.worst_agent_id or agent_id,
+                        account_label=stats.worst_account_label or "Global",
+                        ratio=stats.ratio,
+                        loss_value=stats.worst_loss_value,
+                        base_value=stats.total_transferable,
+                        base_label="transferable",
                     )
-                    self._risk_alert_active[entry_key] = True
-                    self._risk_alert_last_ts[entry_key] = now
-                elif already_active:
-                    # keep active flag but no new alert
-                    pass
-            else:
-                if ratio < reset_ratio:
-                    self._risk_alert_active.pop(entry_key, None)
-
-        agent_prefix = f"{agent_id}:"
-        stale_keys = [
-            key
-            for key in self._risk_alert_active
-            if key.startswith(agent_prefix) and key not in seen_keys
-        ]
-        for key in stale_keys:
-            self._risk_alert_active.pop(key, None)
-            self._risk_alert_last_ts.pop(key, None)
+                )
+                self._risk_alert_active[GLOBAL_RISK_ALERT_KEY] = True
+                self._risk_alert_last_ts[GLOBAL_RISK_ALERT_KEY] = now
+        else:
+            if stats.ratio < reset_ratio:
+                self._risk_alert_active.pop(GLOBAL_RISK_ALERT_KEY, None)
 
         return alerts
 

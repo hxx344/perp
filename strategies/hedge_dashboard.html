@@ -1481,6 +1481,37 @@
       shadow: '0 8px 18px rgba(200, 29, 37, 0.4)'
     }
   ];
+  const GLOBAL_RISK_GRADIENTS = [
+    {
+      max: 0.2,
+      label: 'low',
+      gradient: 'linear-gradient(135deg, #34e89e, #0f9d58)',
+      color: '#041b11',
+      shadow: '0 8px 18px rgba(15, 157, 88, 0.35)'
+    },
+    {
+      max: 0.4,
+      label: 'guarded',
+      gradient: 'linear-gradient(135deg, #f9f871, #f7b267)',
+      color: '#2b1d02',
+      shadow: '0 8px 18px rgba(247, 178, 103, 0.35)'
+    },
+    {
+      max: 0.7,
+      label: 'elevated',
+      gradient: 'linear-gradient(135deg, #f79d65, #f05a28)',
+      color: '#2a0a02',
+      shadow: '0 8px 18px rgba(240, 90, 40, 0.35)'
+    },
+    {
+      max: Infinity,
+      label: 'critical',
+      gradient: 'linear-gradient(135deg, #ff4e50, #c81d25)',
+      color: '#ffeef2',
+      shadow: '0 8px 18px rgba(200, 29, 37, 0.4)'
+    }
+  ];
+  const GLOBAL_RISK_THRESHOLD_TEXT = '阈值 20% / 40% / 70%';
   const DEFAULT_MARGIN_SCHEDULE = [
     { maxNotional: 600000, initial: 0.02, maintenance: 0.01 },
     { maxNotional: 1600000, initial: 0.04, maintenance: 0.02 },
@@ -3102,19 +3133,20 @@
         return Math.abs(totalValue) / balanceValue;
       }
 
-      function resolveRiskBand(ratio) {
+      function resolveRiskBand(ratio, bands = RISK_GRADIENTS) {
         if (!Number.isFinite(ratio) || ratio < 0) {
           return null;
         }
-        for (const band of RISK_GRADIENTS) {
+        const targetBands = Array.isArray(bands) && bands.length ? bands : RISK_GRADIENTS;
+        for (const band of targetBands) {
           if (ratio <= band.max) {
             return band;
           }
         }
-        return RISK_GRADIENTS[RISK_GRADIENTS.length - 1];
+        return targetBands[targetBands.length - 1];
       }
 
-      function applyRiskTone(element, ratio, variant = 'summary') {
+      function applyRiskTone(element, ratio, { variant = 'summary', bands = RISK_GRADIENTS } = {}) {
         if (!element) {
           return;
         }
@@ -3128,7 +3160,8 @@
           element.dataset.riskLevel = 'unknown';
           return;
         }
-        const band = resolveRiskBand(ratio) ?? RISK_GRADIENTS[RISK_GRADIENTS.length - 1];
+  const activeBands = Array.isArray(bands) && bands.length ? bands : RISK_GRADIENTS;
+  const band = resolveRiskBand(ratio, activeBands) ?? activeBands[activeBands.length - 1];
         element.style.background = band.gradient;
         element.style.color = band.color;
         element.style.boxShadow = band.shadow;
@@ -3192,7 +3225,7 @@
           }
           if (grvtRiskLevel) {
             grvtRiskLevel.textContent = '--';
-            applyRiskTone(grvtRiskLevel, null, 'summary');
+            applyRiskTone(grvtRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
           }
           if (grvtRiskDetail) {
             grvtRiskDetail.textContent = 'Awaiting data…';
@@ -3489,20 +3522,20 @@
           if (worstLossAccount && denominator) {
             const riskRatio = worstLossAccount.lossValue / denominator;
             grvtRiskLevel.textContent = formatPercent(riskRatio * 100, 2);
-            applyRiskTone(grvtRiskLevel, riskRatio, 'summary');
+            applyRiskTone(grvtRiskLevel, riskRatio, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
             const accountLabelText = worstLossAccount.accountName
               ? `${worstLossAccount.accountName} (${worstLossAccount.agentId})`
               : worstLossAccount.agentId;
             const lossText = numberFormatter.format(worstLossAccount.lossValue ?? 0);
             const transferableText = numberFormatter.format(denominator);
-            grvtRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 可转 ${transferableText}`;
+            grvtRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 可转 ${transferableText} · ${GLOBAL_RISK_THRESHOLD_TEXT}`;
           } else if (worstLossAccount && !denominator) {
             grvtRiskLevel.textContent = '—';
-            applyRiskTone(grvtRiskLevel, null, 'summary');
+            applyRiskTone(grvtRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
             grvtRiskDetail.textContent = '缺少可转额度数据，无法计算 RISK';
           } else {
             grvtRiskLevel.textContent = '—';
-            applyRiskTone(grvtRiskLevel, null, 'summary');
+            applyRiskTone(grvtRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
             grvtRiskDetail.textContent = '无亏损或缺少盈亏数据';
           }
         }
@@ -3593,7 +3626,7 @@
               riskBadge.textContent = '—';
             }
             const entryRiskRatio = Number.isFinite(entry.riskRatio) ? entry.riskRatio : null;
-            applyRiskTone(riskBadge, entryRiskRatio, 'inline');
+            applyRiskTone(riskBadge, entryRiskRatio, { variant: 'inline' });
           }
 
           const maintenanceBadge = metrics.querySelector('[data-metric="maintenance"] .maintenance-ratio');
