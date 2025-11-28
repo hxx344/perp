@@ -1216,9 +1216,9 @@ class CoordinatorApp:
             target_account = _select_from_defaults(target_defaults, ["main_account_id", "to_account_id"])
             target_sub = _select_from_defaults(target_defaults, ["main_sub_account_id", "to_sub_account_id"]) or "0"
             if target_account:
-                route_values.setdefault("to_account_id", target_account)
+                route_values["to_account_id"] = target_account
             if target_sub:
-                route_values.setdefault("to_sub_account_id", target_sub)
+                route_values["to_sub_account_id"] = target_sub
 
         transfer_payload: Dict[str, Any] = {
             "currency": currency_clean,
