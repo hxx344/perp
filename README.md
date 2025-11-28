@@ -341,6 +341,38 @@ python strategies/hedge_coordinator.py --host 0.0.0.0 --port 8899
 - CLI 工具或脚本也可继续使用 HTTP Basic 头部访问受保护接口（与旧版本兼容）。
 - 退出登录可点击页面中的退出按钮（若需自定义可直接 POST `/logout`）。
 
+#### 自动平衡（Auto Balance）
+
+如果两个 VPS 的 GRVT Equity 长期分叉，可以让协调机在后台自动触发面板里已有的转账流程。现在的配置入口完全通过面板/接口完成：
+
+- `GET /auto_balance/config`：查看当前配置与最近一次触发状态，需要面板登录权限。
+- `POST /auto_balance/config`：提交 JSON 配置或 `{"enabled": false}` 关闭自动平衡。
+
+示例请求（Windows PowerShell）：
+
+```powershell
+Invoke-RestMethod -Method Post `
+   -Uri http://<host>:8899/auto_balance/config `
+   -Headers @{ Authorization = "Basic <base64>" } `
+   -ContentType 'application/json' `
+   -Body (@{
+      agent_a = 'vps-grvt-1'
+      agent_b = 'vps-grvt-2'
+      threshold_ratio = 0.08
+      min_transfer = 800
+      max_transfer = 3000
+      cooldown_seconds = 900
+      currency = 'USDT'
+      use_available_equity = $false
+   } | ConvertTo-Json)
+```
+
+- 阈值按比例计算：`|equity_A - equity_B| / max(equity_A, equity_B)`，例如 `0.08` 表示差异超过 8% 才会触发。
+- 触发后会在 Equity 较高的 VPS 上创建一次 `main_to_main` 转账请求，目标为另一台 VPS，金额默认为两者差值的一半，可通过 `max_transfer` 为单次自动转账设定上限。
+- `min_transfer` 控制最小转账金额（USDT），避免频繁的小额搬砖；`cooldown_seconds` 则限制两次自动触发的间隔（秒）。
+- `currency` 默认为 `USDT`，若想优先对比可用资金可把 `use_available_equity` 设为 `true`，自动改用 `available_equity/available_balance` 计算差值。
+- 转账请求依旧走 `/grvt/transfer` 接口，因此需要两台 VPS 都正确上报 `grvt_accounts.transfer_defaults`，所有自动触发也会在面板和日志里显示对应的 request_id、方向与原因，方便复查。
+
 ## GRVT-Lighter 对冲循环
 
 如果想实现与 Aster 类似的流程，但将 Maker 端替换为 GRVT，可使用 `strategies/grvt_lighter_cycle.py`：
