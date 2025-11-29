@@ -69,6 +69,124 @@
         box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
       }
 
+      .vol-section {
+        margin-top: 2.5rem;
+      }
+
+      .vol-card {
+        background: #121621;
+        border-radius: 16px;
+        padding: 1.5rem;
+        box-shadow: 0 22px 46px rgba(0, 0, 0, 0.4);
+        border: 1px solid rgba(255, 255, 255, 0.04);
+      }
+
+      .vol-symbol-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 1.25rem;
+      }
+
+      .vol-symbol-card {
+        background: #171c2b;
+        border-radius: 14px;
+        padding: 1.1rem 1.25rem;
+        border: 1px solid rgba(255, 255, 255, 0.04);
+      }
+
+      .vol-symbol-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 1rem;
+        margin-bottom: 0.85rem;
+      }
+
+      .vol-symbol-label {
+        margin: 0;
+        font-size: 0.85rem;
+        letter-spacing: 0.08em;
+        color: #7f8fa9;
+        text-transform: uppercase;
+      }
+
+      .vol-price {
+        margin: 0.2rem 0 0;
+        font-size: 1.4rem;
+        font-weight: 600;
+        color: #f5f7fb;
+      }
+
+      .vol-updated-note {
+        margin: 0;
+        font-size: 0.8rem;
+        color: #8a94a6;
+        text-align: right;
+      }
+
+      .vol-metric-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.82rem;
+      }
+
+      .vol-metric-table th,
+      .vol-metric-table td {
+        padding: 0.4rem 0.45rem;
+        text-align: center;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        white-space: nowrap;
+      }
+
+      .vol-metric-table th:first-child,
+      .vol-metric-table td:first-child {
+        text-align: left;
+      }
+
+      .vol-positive {
+        color: #7ee787;
+      }
+
+      .vol-negative {
+        color: #ff8787;
+      }
+
+      .vol-neutral {
+        color: #c7d2e8;
+      }
+
+      .vol-hedge-card {
+        margin-top: 1.5rem;
+        padding: 1.2rem 1.35rem;
+        border-radius: 14px;
+        background: #141a28;
+        border: 1px solid rgba(255, 255, 255, 0.04);
+      }
+
+      .vol-hedge-card h3 {
+        margin: 0 0 0.35rem;
+        font-size: 1rem;
+      }
+
+      .vol-hedge-pair {
+        margin: 0 0 0.75rem;
+        font-size: 0.9rem;
+        color: #8a94a6;
+      }
+
+      .vol-badge {
+        background: #1e2535;
+        padding: 0.2rem 0.55rem;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .vol-alert {
+        color: #ffb3c1;
+      }
+
       .grvt-summary-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -963,6 +1081,45 @@
       </form>
     </div>
 
+    <section class="vol-section">
+      <div class="section-header">
+        <div class="section-header-info">
+          <h2>BTC / ETH Volatility Signals</h2>
+          <div class="badge-group">
+            <span class="badge badge-muted" id="vol-updated">等待行情…</span>
+            <span class="badge badge-info hidden" id="vol-source-badge">Source —</span>
+          </div>
+        </div>
+        <div class="section-header-controls">
+          <span class="badge badge-warn hidden" id="vol-error-badge"></span>
+        </div>
+      </div>
+      <p class="empty" id="vol-empty">Waiting for volatility feed…</p>
+      <div class="vol-card hidden" id="vol-card">
+        <div class="vol-symbol-grid" id="vol-symbol-grid"></div>
+        <div class="vol-hedge-card">
+          <h3>Hedge Guidance</h3>
+          <p class="vol-hedge-pair" id="vol-hedge-pair">—</p>
+          <table class="vol-metric-table">
+            <thead>
+              <tr>
+                <th>Window</th>
+                <th>Corr</th>
+                <th>Vol Ratio</th>
+                <th>Beta</th>
+                <th>Δ Return</th>
+              </tr>
+            </thead>
+            <tbody id="vol-hedge-body">
+              <tr>
+                <td colspan="5">Waiting for correlation window…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section class="grvt-section">
       <div class="section-header">
         <div class="section-header-info">
@@ -1448,6 +1605,14 @@
     const strategyLastDecision = document.getElementById('strategy-last-decision');
     const strategyLastDecisionTime = document.getElementById('strategy-last-decision-time');
     const strategyEventsBody = document.getElementById('strategy-events-body');
+    const volCard = document.getElementById('vol-card');
+    const volEmpty = document.getElementById('vol-empty');
+    const volUpdated = document.getElementById('vol-updated');
+    const volSourceBadge = document.getElementById('vol-source-badge');
+    const volSymbolGrid = document.getElementById('vol-symbol-grid');
+    const volErrorBadge = document.getElementById('vol-error-badge');
+    const volHedgePair = document.getElementById('vol-hedge-pair');
+    const volHedgeBody = document.getElementById('vol-hedge-body');
   const MAX_SPREAD_HISTORY_POINTS = 1800;
     const MAX_STRATEGY_EVENTS = 120;
   const MAX_GRVT_POSITIONS = 12;
@@ -1586,6 +1751,39 @@
           return '—';
         }
         return `${value.toFixed(digits)}%`;
+      }
+
+      function formatSignedPercent(value, digits = 2) {
+        if (!Number.isFinite(value)) {
+          return '—';
+        }
+        const prefix = value > 0 ? '+' : '';
+        return `${prefix}${value.toFixed(digits)}%`;
+      }
+
+      function percentClass(value) {
+        if (!Number.isFinite(value) || Math.abs(value) < 1e-9) {
+          return 'vol-neutral';
+        }
+        return value > 0 ? 'vol-positive' : 'vol-negative';
+      }
+
+      function formatMultiplier(value, digits = 2) {
+        if (!Number.isFinite(value)) {
+          return '—';
+        }
+        return `${value.toFixed(digits)}x`;
+      }
+
+      function extractNumeric(bucket, key) {
+        if (!bucket) {
+          return null;
+        }
+        const value = bucket[key];
+        if (typeof value === 'number') {
+          return Number.isFinite(value) ? value : null;
+        }
+        return parseDecimal(value);
       }
 
       function getSeriesBounds(...seriesList) {
@@ -4398,6 +4596,179 @@
         }
       }
 
+      function renderVolatility(data) {
+        if (!volCard || !volEmpty) {
+          return;
+        }
+        const block = data?.volatility;
+        if (!block || !block.symbols || !Object.keys(block.symbols).length) {
+          volCard.classList.add('hidden');
+          volEmpty.classList.remove('hidden');
+          if (volUpdated) {
+            volUpdated.textContent = '等待行情…';
+          }
+          if (volSourceBadge) {
+            volSourceBadge.classList.add('hidden');
+          }
+          if (volErrorBadge) {
+            volErrorBadge.classList.add('hidden');
+            volErrorBadge.textContent = '';
+          }
+          return;
+        }
+
+        volEmpty.classList.add('hidden');
+        volCard.classList.remove('hidden');
+        const updatedTs = parseDecimal(block.updated_at);
+        if (volUpdated) {
+          if (Number.isFinite(updatedTs) && updatedTs > 0) {
+            volUpdated.textContent = `Updated ${new Date(updatedTs * 1000).toLocaleString()}`;
+          } else {
+            volUpdated.textContent = 'Updated —';
+          }
+        }
+        if (volSourceBadge) {
+          const sourceText = (block.source || 'market').toUpperCase();
+          volSourceBadge.textContent = sourceText;
+          volSourceBadge.classList.remove('hidden');
+        }
+        if (volErrorBadge) {
+          if (block.last_error) {
+            volErrorBadge.textContent = block.last_error;
+            volErrorBadge.classList.remove('hidden');
+          } else {
+            volErrorBadge.textContent = '';
+            volErrorBadge.classList.add('hidden');
+          }
+        }
+
+        const timeframeOrder = Array.isArray(block.timeframes) && block.timeframes.length
+          ? block.timeframes
+          : Object.keys(Object.values(block.symbols)[0]?.timeframes || {});
+        buildVolSymbolCards(block.symbols, timeframeOrder);
+        buildVolHedgeTable(block.hedge_guidance, timeframeOrder);
+      }
+
+      function buildVolSymbolCards(symbols, timeframeOrder) {
+        if (!volSymbolGrid) {
+          return;
+        }
+        volSymbolGrid.innerHTML = '';
+        const entries = Object.values(symbols || {});
+        if (!entries.length) {
+          volSymbolGrid.innerHTML = '<p class="empty">等待行情…</p>';
+          return;
+        }
+        const order = Array.isArray(timeframeOrder) && timeframeOrder.length
+          ? timeframeOrder
+          : Object.keys(entries[0]?.timeframes || {});
+        entries.sort((a, b) => {
+          const labelA = (a.label || a.symbol || '').toString();
+          const labelB = (b.label || b.symbol || '').toString();
+          return labelA.localeCompare(labelB);
+        });
+        for (const entry of entries) {
+          const card = document.createElement('article');
+          card.className = 'vol-symbol-card';
+          const priceText = formatDecimal(entry.last_price, 2);
+          const updatedEpoch = parseDecimal(entry.last_updated);
+          const updatedText = Number.isFinite(updatedEpoch)
+            ? new Date(updatedEpoch * 1000).toLocaleTimeString()
+            : '—';
+          card.innerHTML = `
+            <div class="vol-symbol-header">
+              <div>
+                <p class="vol-symbol-label">${escapeHtml(entry.label || entry.symbol || '—')}</p>
+                <p class="vol-price">${escapeHtml(priceText)}</p>
+              </div>
+              <p class="vol-updated-note">${escapeHtml(updatedText)}</p>
+            </div>
+            ${buildVolTable(entry.timeframes || {}, order)}
+          `;
+          volSymbolGrid.appendChild(card);
+        }
+      }
+
+      function buildVolTable(timeframes, order) {
+        const timeline = Array.isArray(order) && order.length ? order : Object.keys(timeframes || {});
+        if (!timeline.length) {
+          return '<p class="empty">等待窗口数据…</p>';
+        }
+        const metrics = [
+          { key: 'return_pct', label: 'Δ Price', format: (value) => formatSignedPercent(value, 2), className: percentClass },
+          { key: 'realized_vol_pct', label: 'Realized Vol', format: (value) => formatPercent(value, 1) },
+          { key: 'atr_pct', label: 'ATR %', format: (value) => formatPercent(value, 2) },
+          { key: 'atr_abs', label: 'ATR (abs)', format: (value) => formatDecimal(value, 2) },
+          { key: 'amplitude_pct', label: 'Range %', format: (value) => formatPercent(value, 2) },
+        ];
+        let header = '<table class="vol-metric-table"><thead><tr><th>Metric</th>';
+        for (const label of timeline) {
+          header += `<th>${escapeHtml(label)}</th>`;
+        }
+        header += '</tr></thead><tbody>';
+        let body = '';
+        for (const metric of metrics) {
+          body += `<tr><td>${metric.label}</td>`;
+          for (const label of timeline) {
+            const bucket = timeframes?.[label];
+            const rawValue = extractNumeric(bucket, metric.key);
+            const display = metric.format(rawValue);
+            const cellClass = metric.className ? metric.className(rawValue) : '';
+            const classAttr = cellClass ? ` class="${cellClass}"` : '';
+            body += `<td${classAttr}>${escapeHtml(display)}</td>`;
+          }
+          body += '</tr>';
+        }
+        body += '</tbody></table>';
+        return header + body;
+      }
+
+      function buildVolHedgeTable(guidance, timeframeOrder) {
+        if (!volHedgeBody || !volHedgePair) {
+          return;
+        }
+        if (!guidance || !guidance.timeframes) {
+          volHedgePair.textContent = '等待对冲统计…';
+          volHedgeBody.innerHTML = '<tr><td colspan="5">等待对冲统计…</td></tr>';
+          return;
+        }
+        const label = guidance.pair || `${guidance.quote_symbol || ''}/${guidance.base_symbol || ''}`;
+        volHedgePair.textContent = label ? `Pair ${label}` : 'Pair —';
+        const entries = guidance.timeframes || {};
+        const order = Array.isArray(timeframeOrder) && timeframeOrder.length
+          ? timeframeOrder.filter((item) => entries[item])
+          : Object.keys(entries);
+        if (!order.length) {
+          volHedgeBody.innerHTML = '<tr><td colspan="5">等待对冲统计…</td></tr>';
+          return;
+        }
+        volHedgeBody.innerHTML = '';
+        for (const windowLabel of order) {
+          const stats = entries[windowLabel];
+          if (!stats) {
+            continue;
+          }
+          const corrText = Number.isFinite(stats.corr) ? formatPercent(stats.corr * 100, 1) : '—';
+          const volRatioText = formatMultiplier(stats.vol_ratio, 2);
+          const betaText = formatMultiplier(stats.beta, 2);
+          const spreadValue = extractNumeric(stats, 'return_spread_pct');
+          const spreadText = formatSignedPercent(spreadValue, 2);
+          const spreadClass = percentClass(spreadValue);
+          const row = document.createElement('tr');
+          row.innerHTML = `
+            <td>${escapeHtml(windowLabel)}</td>
+            <td>${escapeHtml(corrText)}</td>
+            <td>${escapeHtml(volRatioText)}</td>
+            <td>${escapeHtml(betaText)}</td>
+            <td class="${spreadClass}">${escapeHtml(spreadText)}</td>
+          `;
+          volHedgeBody.appendChild(row);
+        }
+        if (!volHedgeBody.children.length) {
+          volHedgeBody.innerHTML = '<tr><td colspan="5">等待对冲统计…</td></tr>';
+        }
+      }
+
       async function refreshMetrics() {
         try {
           const response = await fetch('/metrics', { cache: 'no-store' });
@@ -4409,6 +4780,7 @@
           const data = await response.json();
           lastMetricsSnapshot = data;
           renderAggregate(data);
+          renderVolatility(data);
           renderAgents(data);
           renderGrvt(data);
           renderGrvtAdjustments(data?.grvt_adjustments);
@@ -4441,6 +4813,20 @@
           if (strategyEmpty) {
             strategyEmpty.classList.remove('hidden');
             strategyEmpty.textContent = 'Unable to load strategy data at the moment.';
+          }
+          if (volCard) {
+            volCard.classList.add('hidden');
+          }
+          if (volEmpty) {
+            volEmpty.classList.remove('hidden');
+            volEmpty.textContent = 'Unable to load volatility feed at the moment.';
+          }
+          if (volSourceBadge) {
+            volSourceBadge.classList.add('hidden');
+          }
+          if (volErrorBadge) {
+            volErrorBadge.classList.add('hidden');
+            volErrorBadge.textContent = '';
           }
         }
       }
