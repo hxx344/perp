@@ -282,6 +282,7 @@ class VolatilityMonitor:
         ("15m", 15),
         ("1h", 60),
         ("4h", 240),
+        ("24h", 1440),
     )
 
     def __init__(
@@ -289,7 +290,7 @@ class VolatilityMonitor:
         *,
         symbols: Optional[Sequence[str]] = None,
         poll_interval: float = 60.0,
-        history_limit: int = 720,
+        history_limit: int = 1800,
         timeout: float = 10.0,
     ) -> None:
         cleaned_symbols: List[str] = []
@@ -312,7 +313,14 @@ class VolatilityMonitor:
         self._timeframes: Tuple[Tuple[str, int], ...] = self._DEFAULT_TIMEFRAMES
         max_minutes = max(minutes for _, minutes in self._timeframes)
         history_floor = max_minutes + 5
-        self._history_limit = max(history_floor, min(int(history_limit), 1000))
+        history_cap = max(history_floor, 2500)
+        try:
+            requested_history = int(history_limit)
+        except (TypeError, ValueError):
+            requested_history = history_floor
+        if requested_history <= 0:
+            requested_history = history_floor
+        self._history_limit = max(history_floor, min(requested_history, history_cap))
         self._poll_interval = max(float(poll_interval), 20.0)
         self._timeout = max(float(timeout), 3.0)
         self._session: Optional[ClientSession] = None
@@ -1375,6 +1383,7 @@ class CoordinatorApp:
         enable_volatility_monitor: bool = True,
         volatility_symbols: Optional[Sequence[str]] = None,
         volatility_poll_interval: float = 60.0,
+        volatility_history_limit: int = 1800,
     ) -> None:
         self._coordinator = HedgeCoordinator(
             bark_notifier=bark_notifier,
@@ -1387,6 +1396,7 @@ class CoordinatorApp:
             VolatilityMonitor(
                 symbols=volatility_symbols,
                 poll_interval=volatility_poll_interval,
+                history_limit=volatility_history_limit,
             )
             if enable_volatility_monitor
             else None
@@ -2373,6 +2383,7 @@ async def _run_app(args: argparse.Namespace) -> None:
         enable_volatility_monitor=enable_vol_monitor,
         volatility_symbols=volatility_symbols,
         volatility_poll_interval=max(getattr(args, "volatility_poll_interval", 60.0), 20.0),
+        volatility_history_limit=max(getattr(args, "volatility_history_limit", 1800), 100),
     )
 
     if (args.dashboard_username or "") or (args.dashboard_password or ""):
@@ -2498,6 +2509,12 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=_env_float("VOLATILITY_POLL_INTERVAL", 60.0),
         help="Seconds between volatility updates (min 20s).",
+    )
+    parser.add_argument(
+        "--volatility-history-limit",
+        type=int,
+        default=int(os.getenv("VOLATILITY_HISTORY_LIMIT", "1800")),
+        help="Number of 1m candles to keep for volatility stats (must exceed largest window).",
     )
     return parser.parse_args()
 
