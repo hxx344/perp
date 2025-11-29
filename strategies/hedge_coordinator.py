@@ -398,34 +398,68 @@ class VolatilityMonitor:
 
     async def _fetch_symbol(self, symbol: str) -> None:
         session = self._ensure_session()
-        params = {"symbol": symbol, "interval": "1m", "limit": str(self._history_limit)}
-        async with session.get(self._ENDPOINT, params=params) as response:
-            if response.status != 200:
-                body_preview = (await response.text())[:200]
-                raise RuntimeError(f"HTTP {response.status} {body_preview}")
-            payload = await response.json()
-        if not isinstance(payload, list):
-            raise RuntimeError("Unexpected payload type from Binance")
+        target = self._history_limit
+        if target <= 0:
+            target = 500
+        collected: List[Dict[str, float]] = []
+        end_time_ms: Optional[int] = None
+        api_limit = 1000
 
-        candles: Deque[Dict[str, float]] = deque(maxlen=self._history_limit)
-        for entry in payload:
+        while len(collected) < target:
+            batch_size = min(api_limit, target - len(collected))
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "interval": "1m",
+                "limit": str(batch_size),
+            }
+            if end_time_ms is not None:
+                params["endTime"] = end_time_ms
+            async with session.get(self._ENDPOINT, params=params) as response:
+                if response.status != 200:
+                    body_preview = (await response.text())[:200]
+                    raise RuntimeError(f"HTTP {response.status} {body_preview}")
+                payload = await response.json()
+            if not isinstance(payload, list):
+                raise RuntimeError("Unexpected payload type from Binance")
+            if not payload:
+                break
+
+            chunk: List[Dict[str, float]] = []
+            for entry in payload:
+                try:
+                    open_time = float(entry[0]) / 1000.0
+                    close_time = float(entry[6]) / 1000.0
+                    chunk.append(
+                        {
+                            "open_time": open_time,
+                            "close_time": close_time,
+                            "open": float(entry[1]),
+                            "high": float(entry[2]),
+                            "low": float(entry[3]),
+                            "close": float(entry[4]),
+                        }
+                    )
+                except (IndexError, TypeError, ValueError):
+                    continue
+            if not chunk:
+                break
+
+            # prepend older chunk so the list stays chronological
+            collected = chunk + collected
+
+            first_open = payload[0][0]
             try:
-                open_time = float(entry[0]) / 1000.0
-                close_time = float(entry[6]) / 1000.0
-                candles.append(
-                    {
-                        "open_time": open_time,
-                        "close_time": close_time,
-                        "open": float(entry[1]),
-                        "high": float(entry[2]),
-                        "low": float(entry[3]),
-                        "close": float(entry[4]),
-                    }
-                )
-            except (IndexError, TypeError, ValueError):
-                continue
-        if candles:
-            self._histories[symbol] = candles
+                end_time_ms = int(first_open) - 1
+            except (TypeError, ValueError):
+                end_time_ms = None
+            if len(payload) < batch_size:
+                break
+
+        if not collected:
+            return
+        if len(collected) > target:
+            collected = collected[-target:]
+        self._histories[symbol] = deque(collected, maxlen=self._history_limit)
 
     async def _update_snapshot(self) -> None:
         snapshot = self._build_snapshot()
