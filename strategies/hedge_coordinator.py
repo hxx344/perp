@@ -156,6 +156,7 @@ MAX_STRATEGY_EVENTS = 400
 MAX_STRATEGY_TRADES = 200
 GLOBAL_RISK_ALERT_KEY = "__global_risk__"
 TRANSFERABLE_HISTORY_LIMIT = 720
+TRANSFERABLE_HISTORY_MERGE_SECONDS = 20.0
 
 DEFAULT_MARGIN_SCHEDULE: Tuple[Tuple[str, str, str], ...] = (
     ("600000", "0.02", "0.01"),
@@ -1033,8 +1034,13 @@ class HedgeCoordinator:
     def _record_transferable_history(self, total_value: Decimal) -> None:
         if total_value is None or total_value <= 0:
             return
-        entry = (time.time(), total_value)
-        self._transferable_history.append(entry)
+        now = time.time()
+        if self._transferable_history:
+            last_ts, _ = self._transferable_history[-1]
+            if now - last_ts <= TRANSFERABLE_HISTORY_MERGE_SECONDS:
+                self._transferable_history[-1] = (now, total_value)
+                return
+        self._transferable_history.append((now, total_value))
 
     def _serialize_transferable_history(self) -> List[Dict[str, Any]]:
         if not self._transferable_history:
