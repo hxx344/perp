@@ -261,6 +261,10 @@
         background: linear-gradient(135deg, #c084fc, #8b5cf6);
       }
 
+      .legend-diff {
+        background: linear-gradient(135deg, #7dd3fc, #38bdf8);
+      }
+
       .grvt-summary-card h3 {
         margin: 0 0 0.35rem;
         font-size: 0.9rem;
@@ -1251,6 +1255,10 @@
               <span class="summary-sub" id="grvt-transfer-chart-note">等待数据…</span>
             </div>
             <canvas id="grvt-transfer-chart"></canvas>
+            <div class="chart-legend" id="grvt-transfer-chart-legend">
+              <span><span class="legend-dot legend-transfer"></span>可转总额</span>
+              <span><span class="legend-dot legend-diff"></span>BTC-ETH Δ%</span>
+            </div>
           </div>
         </div>
         <div class="grvt-adjust-panel" id="grvt-adjust-panel">
@@ -1630,6 +1638,7 @@
   const grvtTransferChartWrapper = document.getElementById('grvt-transfer-chart-wrapper');
   const grvtTransferChartCanvas = document.getElementById('grvt-transfer-chart');
   const grvtTransferChartNote = document.getElementById('grvt-transfer-chart-note');
+  const grvtTransferChartLegend = document.getElementById('grvt-transfer-chart-legend');
   const grvtRiskLevel = document.getElementById('grvt-risk-level');
   const grvtRiskDetail = document.getElementById('grvt-risk-detail');
   const grvtSummaryTime = document.getElementById('grvt-summary-time');
@@ -1774,6 +1783,7 @@
   const BTC_LINE_COLOR = '#f6c177';
   const ETH_LINE_COLOR = '#4cc9f0';
   const TRANSFER_LINE_COLOR = '#c084fc';
+  const PRICE_DIFF_LINE_COLOR = '#7dd3fc';
   const DEFAULT_MARGIN_SCHEDULE = [
     { maxNotional: 600000, initial: 0.02, maintenance: 0.01 },
     { maxNotional: 1600000, initial: 0.04, maintenance: 0.02 },
@@ -3505,6 +3515,115 @@
           .filter((point) => point && Number.isFinite(point.value));
       }
 
+      function collectPercentPriceSeries(data) {
+        const priceSeriesBlock = data?.volatility?.price_series;
+        const priceEntries = priceSeriesBlock && typeof priceSeriesBlock === 'object'
+          ? Object.values(priceSeriesBlock)
+          : [];
+        const rawSeries = [];
+        const btcEntry = pickPriceEntry(priceEntries, 'BTC');
+        const btcPoints = btcEntry ? normalizePriceSeriesEntry(btcEntry) : [];
+        if (btcEntry && btcPoints.length) {
+          rawSeries.push({
+            label: btcEntry.label || btcEntry.symbol || 'BTC',
+            symbol: btcEntry.symbol,
+            color: BTC_LINE_COLOR,
+            data: btcPoints,
+          });
+        }
+        const ethEntry = pickPriceEntry(priceEntries, 'ETH', btcEntry?.symbol);
+        const ethPoints = ethEntry ? normalizePriceSeriesEntry(ethEntry) : [];
+        if (ethEntry && ethPoints.length) {
+          rawSeries.push({
+            label: ethEntry.label || ethEntry.symbol || 'ETH',
+            symbol: ethEntry.symbol,
+            color: ETH_LINE_COLOR,
+            data: ethPoints,
+          });
+        }
+        if (!rawSeries.length && priceEntries.length) {
+          const fallback = priceEntries[0];
+          const fallbackPoints = normalizePriceSeriesEntry(fallback);
+          if (fallbackPoints.length) {
+            rawSeries.push({
+              label: fallback.label || fallback.symbol || 'Price',
+              symbol: fallback.symbol,
+              color: BTC_LINE_COLOR,
+              data: fallbackPoints,
+            });
+          }
+        }
+        const percentSeries = rawSeries
+          .map((series) => {
+            const normalized = normalizePercentChangeSeries(series.data);
+            if (!normalized.length) {
+              return null;
+            }
+            return { ...series, data: normalized };
+          })
+          .filter(Boolean);
+        const diffSeries = buildPriceDiffSeries(percentSeries);
+        return { percentSeries, diffSeries };
+      }
+
+      function buildPriceDiffSeries(seriesList) {
+        if (!Array.isArray(seriesList) || seriesList.length < 2) {
+          return null;
+        }
+        const matchSeries = (keyword) => seriesList.find((series) => {
+          const text = `${String(series.label || '')} ${String(series.symbol || '')}`.toUpperCase();
+          return text.includes(keyword);
+        });
+        const btcSeries = matchSeries('BTC');
+        const ethSeries = matchSeries('ETH');
+        if (!btcSeries || !ethSeries) {
+          return null;
+        }
+        const btcData = Array.isArray(btcSeries.data) ? btcSeries.data : [];
+        const ethData = Array.isArray(ethSeries.data) ? ethSeries.data : [];
+        if (!btcData.length || !ethData.length) {
+          return null;
+        }
+        const diffPoints = [];
+        let i = 0;
+        let j = 0;
+        while (i < btcData.length && j < ethData.length) {
+          const btcPoint = btcData[i];
+          const ethPoint = ethData[j];
+          const btcTs = Number(btcPoint?.ts);
+          const ethTs = Number(ethPoint?.ts);
+          if (!Number.isFinite(btcTs)) {
+            i += 1;
+            continue;
+          }
+          if (!Number.isFinite(ethTs)) {
+            j += 1;
+            continue;
+          }
+          if (btcTs === ethTs) {
+            const btcVal = Number(btcPoint?.value);
+            const ethVal = Number(ethPoint?.value);
+            if (Number.isFinite(btcVal) && Number.isFinite(ethVal)) {
+              diffPoints.push({ ts: btcTs, value: btcVal - ethVal });
+            }
+            i += 1;
+            j += 1;
+          } else if (btcTs < ethTs) {
+            i += 1;
+          } else {
+            j += 1;
+          }
+        }
+        if (diffPoints.length < 2) {
+          return null;
+        }
+        return {
+          label: 'BTC-ETH Δ%',
+          color: PRICE_DIFF_LINE_COLOR,
+          data: diffPoints,
+        };
+      }
+
       function pickPriceEntry(entries, keyword, excludeSymbol = null) {
         if (!Array.isArray(entries)) {
           return null;
@@ -3566,49 +3685,7 @@
         if (!grvtPriceChartWrapper || !grvtPriceChartCanvas) {
           return;
         }
-        const priceSeriesBlock = data?.volatility?.price_series;
-        const priceEntries = priceSeriesBlock && typeof priceSeriesBlock === 'object'
-          ? Object.values(priceSeriesBlock)
-          : [];
-        const seriesList = [];
-        const btcEntry = pickPriceEntry(priceEntries, 'BTC');
-        const btcPoints = btcEntry ? normalizePriceSeriesEntry(btcEntry) : [];
-        if (btcEntry && btcPoints.length) {
-          seriesList.push({
-            label: btcEntry.label || btcEntry.symbol || 'BTC',
-            color: BTC_LINE_COLOR,
-            data: btcPoints,
-          });
-        }
-        const ethEntry = pickPriceEntry(priceEntries, 'ETH', btcEntry?.symbol);
-        const ethPoints = ethEntry ? normalizePriceSeriesEntry(ethEntry) : [];
-        if (ethEntry && ethPoints.length) {
-          seriesList.push({
-            label: ethEntry.label || ethEntry.symbol || 'ETH',
-            color: ETH_LINE_COLOR,
-            data: ethPoints,
-          });
-        }
-        if (!seriesList.length && priceEntries.length) {
-          const fallback = priceEntries[0];
-          const fallbackPoints = normalizePriceSeriesEntry(fallback);
-          if (fallbackPoints.length) {
-            seriesList.push({
-              label: fallback.label || fallback.symbol || 'Price',
-              color: BTC_LINE_COLOR,
-              data: fallbackPoints,
-            });
-          }
-        }
-        const percentSeries = seriesList
-          .map((series) => {
-            const normalized = normalizePercentChangeSeries(series.data);
-            if (!normalized.length) {
-              return null;
-            }
-            return { ...series, data: normalized };
-          })
-          .filter(Boolean);
+        const { percentSeries } = collectPercentPriceSeries(data);
         if (!percentSeries.length) {
           grvtPriceChartWrapper.classList.add('hidden');
           if (grvtPriceChartNote) {
@@ -3732,7 +3809,26 @@
         if (!grvtTransferChartWrapper || !grvtTransferChartCanvas) {
           return;
         }
+        const { diffSeries } = collectPercentPriceSeries(data);
+        const activeDiffSeries = diffSeries && Array.isArray(diffSeries.data) && diffSeries.data.length >= 2
+          ? diffSeries
+          : null;
+        const updateLegend = () => {
+          if (!grvtTransferChartLegend) {
+            return;
+          }
+          const entries = [
+            '<span><span class="legend-dot legend-transfer"></span>可转总额</span>',
+          ];
+          if (activeDiffSeries) {
+            entries.push(
+              `<span><span class="legend-dot legend-diff"></span>${escapeHtml(activeDiffSeries.label || 'BTC-ETH Δ%')}</span>`
+            );
+          }
+          grvtTransferChartLegend.innerHTML = entries.join('');
+        };
         const transferPoints = normalizeTransferableSeries(data?.transferable_history);
+        updateLegend();
         if (!transferPoints.length) {
           grvtTransferChartWrapper.classList.add('hidden');
           if (grvtTransferChartNote) {
@@ -3740,7 +3836,7 @@
           }
           return;
         }
-        const chartResult = renderTransferableCanvas(transferPoints);
+        const chartResult = renderTransferableCanvas(transferPoints, activeDiffSeries);
         if (!chartResult) {
           grvtTransferChartWrapper.classList.add('hidden');
           if (grvtTransferChartNote) {
@@ -3755,7 +3851,7 @@
         }
       }
 
-      function renderTransferableCanvas(transferPoints) {
+      function renderTransferableCanvas(transferPoints, diffSeries = null) {
         if (!grvtTransferChartCanvas) {
           return null;
         }
@@ -3770,6 +3866,7 @@
         let minTs = Infinity;
         let maxTs = -Infinity;
         const values = [];
+        const diffValues = [];
         for (const point of transferPoints) {
           const ts = Number(point?.ts);
           const value = Number(point?.value);
@@ -3794,12 +3891,27 @@
         if (!bounds) {
           return null;
         }
+        if (diffSeries && Array.isArray(diffSeries.data)) {
+          for (const point of diffSeries.data) {
+            const value = Number(point?.value);
+            if (Number.isFinite(value)) {
+              diffValues.push(value);
+            }
+          }
+        }
+        const diffBounds = diffValues.length ? computeNumericBounds(diffValues) : null;
         const rangeX = maxTs - minTs;
         const mapX = (ts) => layout.left + ((ts - minTs) / rangeX) * innerWidth;
         const mapY = (value) => {
           const ratio = (value - bounds.min) / (bounds.max - bounds.min);
           return layout.top + (1 - ratio) * innerHeight;
         };
+        const mapDiffY = diffBounds
+          ? (value) => {
+              const ratio = (value - diffBounds.min) / (diffBounds.max - diffBounds.min);
+              return layout.top + (1 - ratio) * innerHeight;
+            }
+          : null;
         ctx.strokeStyle = 'rgba(255,255,255,0.08)';
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -3820,11 +3932,37 @@
           ctx.stroke();
         }
         drawTimedSeries(ctx, transferPoints, mapX, mapY, TRANSFER_LINE_COLOR, 2.8);
+        if (diffSeries && diffBounds && mapDiffY) {
+          const zeroDiffY = mapDiffY(0);
+          if (zeroDiffY >= layout.top && zeroDiffY <= layout.top + innerHeight) {
+            ctx.strokeStyle = 'rgba(125, 211, 252, 0.35)';
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(layout.left, zeroDiffY);
+            ctx.lineTo(width - layout.right, zeroDiffY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+          drawTimedSeries(
+            ctx,
+            diffSeries.data,
+            mapX,
+            mapDiffY,
+            diffSeries.color || PRICE_DIFF_LINE_COLOR,
+            2.2,
+          );
+        }
         ctx.fillStyle = '#8a94a6';
         ctx.font = '12px "Segoe UI", system-ui, sans-serif';
         ctx.textAlign = 'right';
         ctx.fillText(numberFormatter.format(bounds.max), layout.left - 8, layout.top + 12);
         ctx.fillText(numberFormatter.format(bounds.min), layout.left - 8, layout.top + innerHeight + 2);
+        if (diffBounds && mapDiffY) {
+          ctx.textAlign = 'left';
+          const rightAxisX = width - layout.right + 8;
+          ctx.fillText(formatSignedPercent(diffBounds.max, 2), rightAxisX, layout.top + 12);
+          ctx.fillText(formatSignedPercent(diffBounds.min, 2), rightAxisX, layout.top + innerHeight + 2);
+        }
         return { minTs, maxTs };
       }
 
