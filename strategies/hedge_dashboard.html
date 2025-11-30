@@ -194,6 +194,67 @@
         margin-bottom: 1.75rem;
       }
 
+      .grvt-transfer-chart {
+        margin-top: 1.5rem;
+        padding: 1.25rem 1.5rem 1.1rem;
+        border-radius: 16px;
+        background: #101522;
+        border: 1px solid rgba(255, 255, 255, 0.04);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+      }
+
+      .grvt-transfer-chart-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 1rem;
+        margin-bottom: 0.75rem;
+      }
+
+      .grvt-transfer-chart-header h3 {
+        margin: 0;
+        font-size: 1rem;
+      }
+
+      #grvt-transfer-chart {
+        width: 100%;
+        height: 320px;
+      }
+
+      .transfer-chart-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1.25rem;
+        margin-top: 0.85rem;
+        font-size: 0.82rem;
+        color: #8a94a6;
+      }
+
+      .transfer-chart-legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+      }
+
+      .legend-dot {
+        width: 0.65rem;
+        height: 0.65rem;
+        border-radius: 999px;
+        display: inline-flex;
+      }
+
+      .legend-btc {
+        background: linear-gradient(135deg, #f6c177, #f4b453);
+      }
+
+      .legend-eth {
+        background: linear-gradient(135deg, #7fe9ff, #4cc9f0);
+      }
+
+      .legend-transfer {
+        background: linear-gradient(135deg, #c084fc, #8b5cf6);
+      }
+
       .grvt-summary-card h3 {
         margin: 0 0 0.35rem;
         font-size: 0.9rem;
@@ -1166,6 +1227,18 @@
             <p class="grvt-summary-updated" id="grvt-summary-updated">Updated —</p>
           </article>
         </div>
+        <div class="grvt-transfer-chart hidden" id="grvt-transfer-chart-wrapper">
+          <div class="grvt-transfer-chart-header">
+            <h3>可转总额 · BTC / ETH 价格</h3>
+            <span class="summary-sub" id="grvt-transfer-chart-note">等待数据…</span>
+          </div>
+          <canvas id="grvt-transfer-chart"></canvas>
+          <div class="transfer-chart-legend">
+            <span><span class="legend-dot legend-transfer"></span>可转总额</span>
+            <span><span class="legend-dot legend-btc"></span>BTC 价格</span>
+            <span><span class="legend-dot legend-eth"></span>ETH 价格</span>
+          </div>
+        </div>
         <div class="grvt-adjust-panel" id="grvt-adjust-panel">
           <div class="grvt-adjust-header">
             <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Global Position Adjustments</h3>
@@ -1536,6 +1609,9 @@
   const grvtWalletBalance = document.getElementById('grvt-wallet-balance');
   const grvtTransferableTotal = document.getElementById('grvt-transfer-total');
   const grvtTransferableNote = document.getElementById('grvt-transfer-note');
+  const grvtTransferChartWrapper = document.getElementById('grvt-transfer-chart-wrapper');
+  const grvtTransferChartCanvas = document.getElementById('grvt-transfer-chart');
+  const grvtTransferChartNote = document.getElementById('grvt-transfer-chart-note');
   const grvtRiskLevel = document.getElementById('grvt-risk-level');
   const grvtRiskDetail = document.getElementById('grvt-risk-detail');
   const grvtSummaryTime = document.getElementById('grvt-summary-time');
@@ -1677,6 +1753,9 @@
     }
   ];
   const GLOBAL_RISK_THRESHOLD_TEXT = '阈值 20% / 40% / 70%';
+  const BTC_LINE_COLOR = '#f6c177';
+  const ETH_LINE_COLOR = '#4cc9f0';
+  const TRANSFER_LINE_COLOR = '#c084fc';
   const DEFAULT_MARGIN_SCHEDULE = [
     { maxNotional: 600000, initial: 0.02, maintenance: 0.01 },
     { maxNotional: 1600000, initial: 0.04, maintenance: 0.02 },
@@ -1872,6 +1951,34 @@
 
         ctx.strokeStyle = color;
         ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+
+      function drawTimedSeries(ctx, points, mapX, mapY, color, width = 2) {
+        ctx.beginPath();
+        let started = false;
+        for (const point of points) {
+          const ts = Number(point.ts);
+          const value = Number(point.value);
+          if (!Number.isFinite(ts) || !Number.isFinite(value)) {
+            started = false;
+            continue;
+          }
+          const x = mapX(ts);
+          const y = mapY(value);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            started = false;
+            continue;
+          }
+          if (!started) {
+            ctx.moveTo(x, y);
+            started = true;
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
         ctx.stroke();
       }
 
@@ -3319,6 +3426,250 @@
           grvtAdjustHistoryBody.innerHTML = historyRows.join('');
         }
         renderGrvtTransferHistory(summary);
+      }
+
+      function normalizeTransferableSeries(history, limit = 720) {
+        if (!Array.isArray(history)) {
+          return [];
+        }
+        const points = history
+          .map((entry) => ({
+            ts: Number(entry?.ts ?? entry?.timestamp),
+            value: parseDecimal(entry?.total ?? entry?.value),
+          }))
+          .filter((point) => Number.isFinite(point.ts) && Number.isFinite(point.value));
+        if (points.length > limit) {
+          return points.slice(points.length - limit);
+        }
+        return points;
+      }
+
+      function normalizePriceSeriesEntry(entry, limit = 720) {
+        if (!entry || !Array.isArray(entry.series)) {
+          return [];
+        }
+        const series = entry.series.length > limit
+          ? entry.series.slice(entry.series.length - limit)
+          : entry.series;
+        return series
+          .map((point) => ({
+            ts: Number(point?.ts ?? point?.time ?? point?.close_time),
+            value: parseDecimal(point?.price ?? point?.close ?? point?.value),
+          }))
+          .filter((point) => Number.isFinite(point.ts) && Number.isFinite(point.value));
+      }
+
+      function pickPriceEntry(entries, keyword, excludeSymbol = null) {
+        if (!Array.isArray(entries)) {
+          return null;
+        }
+        const upperKeyword = keyword ? keyword.toUpperCase() : null;
+        for (const entry of entries) {
+          const symbol = String(entry?.symbol || '').toUpperCase();
+          if (excludeSymbol && symbol === String(excludeSymbol || '').toUpperCase()) {
+            continue;
+          }
+          if (!upperKeyword) {
+            return entry;
+          }
+          const label = `${symbol}${String(entry?.label || '').toUpperCase()}`;
+          if (label.includes(upperKeyword)) {
+            return entry;
+          }
+        }
+        return null;
+      }
+
+      function computeNumericBounds(values) {
+        let min = Infinity;
+        let max = -Infinity;
+        for (const value of values) {
+          if (!Number.isFinite(value)) {
+            continue;
+          }
+          if (value < min) {
+            min = value;
+          }
+          if (value > max) {
+            max = value;
+          }
+        }
+        if (!Number.isFinite(min) || !Number.isFinite(max)) {
+          return null;
+        }
+        if (min === max) {
+          const epsilon = Math.abs(min) * 0.05 || 1;
+          min -= epsilon;
+          max += epsilon;
+        }
+        return { min, max };
+      }
+
+      function formatRangeLabel(minTs, maxTs) {
+        if (!Number.isFinite(minTs) || !Number.isFinite(maxTs) || maxTs <= minTs) {
+          return null;
+        }
+        const seconds = maxTs - minTs;
+        if (seconds >= 3600) {
+          return `覆盖约 ${(seconds / 3600).toFixed(1)} 小时`;
+        }
+        return `覆盖约 ${(seconds / 60).toFixed(0)} 分钟`;
+      }
+
+      function renderTransferableOverlay(data) {
+        if (!grvtTransferChartWrapper || !grvtTransferChartCanvas) {
+          return;
+        }
+        const transferPoints = normalizeTransferableSeries(data?.transferable_history);
+        const priceSeriesBlock = data?.volatility?.price_series;
+        const priceEntries = priceSeriesBlock && typeof priceSeriesBlock === 'object'
+          ? Object.values(priceSeriesBlock)
+          : [];
+        const priceSeries = [];
+        const btcEntry = pickPriceEntry(priceEntries, 'BTC');
+        const btcPoints = btcEntry ? normalizePriceSeriesEntry(btcEntry) : [];
+        if (btcEntry && btcPoints.length) {
+          priceSeries.push({
+            label: btcEntry.label || btcEntry.symbol || 'BTC',
+            color: BTC_LINE_COLOR,
+            data: btcPoints,
+          });
+        }
+        const ethEntry = pickPriceEntry(priceEntries, 'ETH', btcEntry?.symbol);
+        const ethPoints = ethEntry ? normalizePriceSeriesEntry(ethEntry) : [];
+        if (ethEntry && ethPoints.length) {
+          priceSeries.push({
+            label: ethEntry.label || ethEntry.symbol || 'ETH',
+            color: ETH_LINE_COLOR,
+            data: ethPoints,
+          });
+        }
+        if (!priceSeries.length && priceEntries.length) {
+          const fallback = priceEntries[0];
+          const fallbackPoints = normalizePriceSeriesEntry(fallback);
+          if (fallbackPoints.length) {
+            priceSeries.push({
+              label: fallback.label || fallback.symbol || 'Price',
+              color: BTC_LINE_COLOR,
+              data: fallbackPoints,
+            });
+          }
+        }
+        if (!transferPoints.length || !priceSeries.length) {
+          grvtTransferChartWrapper.classList.add('hidden');
+          if (grvtTransferChartNote) {
+            grvtTransferChartNote.textContent = '等待数据…';
+          }
+          return;
+        }
+        const chartResult = renderTransferableCanvas(transferPoints, priceSeries);
+        if (!chartResult) {
+          grvtTransferChartWrapper.classList.add('hidden');
+          if (grvtTransferChartNote) {
+            grvtTransferChartNote.textContent = '等待数据…';
+          }
+          return;
+        }
+        grvtTransferChartWrapper.classList.remove('hidden');
+        if (grvtTransferChartNote) {
+          const rangeText = formatRangeLabel(chartResult.minTs, chartResult.maxTs);
+          grvtTransferChartNote.textContent = rangeText || '最新数据';
+        }
+      }
+
+      function renderTransferableCanvas(transferPoints, priceSeries) {
+        if (!grvtTransferChartCanvas) {
+          return null;
+        }
+        const setup = prepareCanvas(grvtTransferChartCanvas);
+        if (!setup) {
+          return null;
+        }
+        const { ctx, width, height } = setup;
+        const layout = { top: 30, right: 70, bottom: 36, left: 70 };
+        const innerWidth = Math.max(10, width - layout.left - layout.right);
+        const innerHeight = Math.max(10, height - layout.top - layout.bottom);
+        let minTs = Infinity;
+        let maxTs = -Infinity;
+        const extendTs = (points) => {
+          for (const point of points) {
+            const ts = Number(point?.ts);
+            if (!Number.isFinite(ts)) {
+              continue;
+            }
+            if (ts < minTs) {
+              minTs = ts;
+            }
+            if (ts > maxTs) {
+              maxTs = ts;
+            }
+          }
+        };
+        extendTs(transferPoints);
+        for (const series of priceSeries) {
+          extendTs(series.data);
+        }
+        if (!Number.isFinite(minTs) || !Number.isFinite(maxTs)) {
+          return null;
+        }
+        if (maxTs - minTs < 60) {
+          maxTs = minTs + 60;
+        }
+        const priceValues = [];
+        for (const series of priceSeries) {
+          for (const point of series.data) {
+            priceValues.push(Number(point.value));
+          }
+        }
+        const priceBounds = computeNumericBounds(priceValues);
+        const transferValues = transferPoints.map((point) => Number(point.value));
+        const transferBounds = computeNumericBounds(transferValues);
+        if (!priceBounds || !transferBounds) {
+          return null;
+        }
+        const rangeX = maxTs - minTs;
+        const mapX = (ts) => layout.left + ((ts - minTs) / rangeX) * innerWidth;
+        const mapPriceY = (value) => {
+          const ratio = (value - priceBounds.min) / (priceBounds.max - priceBounds.min);
+          return layout.top + (1 - ratio) * innerHeight;
+        };
+        const mapTransferY = (value) => {
+          const ratio = (value - transferBounds.min) / (transferBounds.max - transferBounds.min);
+          return layout.top + (1 - ratio) * innerHeight;
+        };
+        ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(layout.left, layout.top);
+        ctx.lineTo(layout.left, layout.top + innerHeight);
+        ctx.moveTo(width - layout.right, layout.top);
+        ctx.lineTo(width - layout.right, layout.top + innerHeight);
+        ctx.moveTo(layout.left, layout.top + innerHeight);
+        ctx.lineTo(width - layout.right, layout.top + innerHeight);
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+        const gridLines = 4;
+        for (let index = 1; index < gridLines; index += 1) {
+          const y = layout.top + (innerHeight / gridLines) * index;
+          ctx.beginPath();
+          ctx.moveTo(layout.left, y);
+          ctx.lineTo(width - layout.right, y);
+          ctx.stroke();
+        }
+        for (const series of priceSeries) {
+          drawTimedSeries(ctx, series.data, mapX, mapPriceY, series.color, 2);
+        }
+        drawTimedSeries(ctx, transferPoints, mapX, mapTransferY, TRANSFER_LINE_COLOR, 2.5);
+        ctx.fillStyle = '#8a94a6';
+        ctx.font = '12px "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(numberFormatter.format(priceBounds.max), layout.left - 8, layout.top + 12);
+        ctx.fillText(numberFormatter.format(priceBounds.min), layout.left - 8, layout.top + innerHeight + 2);
+        ctx.textAlign = 'left';
+        const rightAxisX = width - layout.right + 8;
+        ctx.fillText(numberFormatter.format(transferBounds.max), rightAxisX, layout.top + 12);
+        ctx.fillText(numberFormatter.format(transferBounds.min), rightAxisX, layout.top + innerHeight + 2);
+        return { minTs, maxTs };
       }
 
       function computeRiskRatio(totalValue, balanceValue) {
@@ -4781,6 +5132,7 @@
           lastMetricsSnapshot = data;
           renderAggregate(data);
           renderVolatility(data);
+          renderTransferableOverlay(data);
           renderAgents(data);
           renderGrvt(data);
           renderGrvtAdjustments(data?.grvt_adjustments);

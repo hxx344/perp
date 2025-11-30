@@ -155,6 +155,7 @@ MAX_SPREAD_HISTORY = 600
 MAX_STRATEGY_EVENTS = 400
 MAX_STRATEGY_TRADES = 200
 GLOBAL_RISK_ALERT_KEY = "__global_risk__"
+TRANSFERABLE_HISTORY_LIMIT = 720
 
 DEFAULT_MARGIN_SCHEDULE: Tuple[Tuple[str, str, str], ...] = (
     ("600000", "0.02", "0.01"),
@@ -284,6 +285,7 @@ class VolatilityMonitor:
         ("4h", 240),
         ("24h", 1440),
     )
+    _PRICE_SERIES_LIMIT = 720
 
     def __init__(
         self,
@@ -329,6 +331,7 @@ class VolatilityMonitor:
         self._histories: Dict[str, Deque[Dict[str, float]]] = {
             symbol: deque(maxlen=self._history_limit) for symbol in self._symbols
         }
+        self._chart_history_points = min(self._history_limit, self._PRICE_SERIES_LIMIT)
         self._snapshot: Optional[Dict[str, Any]] = None
         self._lock = asyncio.Lock()
         self._last_error: Optional[str] = None
@@ -468,10 +471,18 @@ class VolatilityMonitor:
 
     def _build_snapshot(self) -> Optional[Dict[str, Any]]:
         symbols_payload: Dict[str, Any] = {}
+        price_series_payload: Dict[str, Any] = {}
         for symbol in self._symbols:
             payload = self._compute_symbol_metrics(symbol)
             if payload:
                 symbols_payload[symbol] = payload
+            series = self._serialize_price_series(symbol)
+            if series:
+                price_series_payload[symbol] = {
+                    "symbol": symbol,
+                    "label": self._symbol_labels.get(symbol, symbol),
+                    "series": series,
+                }
         if not symbols_payload:
             return None
         snapshot: Dict[str, Any] = {
@@ -480,6 +491,8 @@ class VolatilityMonitor:
             "symbols": symbols_payload,
             "timeframes": [label for label, _ in self._timeframes],
         }
+        if price_series_payload:
+            snapshot["price_series"] = price_series_payload
         guidance = self._compute_pair_guidance(symbols_payload)
         if guidance:
             snapshot["hedge_guidance"] = guidance
@@ -535,6 +548,23 @@ class VolatilityMonitor:
         if amplitude_pct is not None:
             payload["amplitude_pct"] = amplitude_pct
         return payload
+
+    def _serialize_price_series(self, symbol: str) -> Optional[List[Dict[str, float]]]:
+        history = self._histories.get(symbol)
+        if not history:
+            return None
+        window = list(history)[-self._chart_history_points :]
+        if len(window) < 2:
+            return None
+        series: List[Dict[str, float]] = []
+        for candle in window:
+            ts = candle.get("close_time")
+            price = candle.get("close")
+            if isinstance(ts, (int, float)) and isinstance(price, (int, float)):
+                series.append({"ts": ts, "price": price})
+        if len(series) < 2:
+            return None
+        return series
 
     def _compute_atr(self, symbol: str, minutes: int) -> Optional[Dict[str, Any]]:
         window = self._window_candles(symbol, minutes)
@@ -876,6 +906,7 @@ class HedgeCoordinator:
         self._eviction_seconds = 6 * 3600  # prune entries idle for 6 hours
         self._stale_warning_seconds = 5 * 60  # tag agents as stale after 5 minutes
         self._last_agent_id: Optional[str] = None
+        self._transferable_history: Deque[tuple[float, Decimal]] = deque(maxlen=TRANSFERABLE_HISTORY_LIMIT)
         self._controls: Dict[str, Dict[str, Any]] = {}
         self._default_paused: bool = False
         self._bark_notifier = bark_notifier
@@ -978,22 +1009,47 @@ class HedgeCoordinator:
                         worst_account_label = account_label
 
         if worst_loss_value <= 0 or total_transferable <= 0:
-            return GlobalRiskSnapshot(
+            snapshot = GlobalRiskSnapshot(
                 ratio=None,
                 total_transferable=total_transferable,
                 worst_loss_value=worst_loss_value,
                 worst_agent_id=worst_agent_id,
                 worst_account_label=worst_account_label,
             )
+            self._record_transferable_history(snapshot.total_transferable)
+            return snapshot
 
         ratio = float(worst_loss_value / total_transferable)
-        return GlobalRiskSnapshot(
+        snapshot = GlobalRiskSnapshot(
             ratio=ratio,
             total_transferable=total_transferable,
             worst_loss_value=worst_loss_value,
             worst_agent_id=worst_agent_id,
             worst_account_label=worst_account_label,
         )
+        self._record_transferable_history(snapshot.total_transferable)
+        return snapshot
+
+    def _record_transferable_history(self, total_value: Decimal) -> None:
+        if total_value is None or total_value <= 0:
+            return
+        entry = (time.time(), total_value)
+        self._transferable_history.append(entry)
+
+    def _serialize_transferable_history(self) -> List[Dict[str, Any]]:
+        if not self._transferable_history:
+            return []
+        payload: List[Dict[str, Any]] = []
+        for ts, value in self._transferable_history:
+            try:
+                total_text = format(value, "f")
+            except Exception:
+                total_text = str(value)
+            payload.append({
+                "ts": ts,
+                "total": total_text,
+            })
+        return payload
 
     def _compute_transferable_for_agent(
         self,
@@ -1260,6 +1316,9 @@ class HedgeCoordinator:
             self._recalculate_global_risk()
         if self._global_risk_stats is not None:
             snapshot["global_risk"] = self._serialize_global_risk(self._global_risk_stats)
+            transferable_history = self._serialize_transferable_history()
+            if transferable_history:
+                snapshot["transferable_history"] = transferable_history
         return snapshot
 
     async def update(self, payload: Dict[str, Any]) -> Dict[str, Any]:
