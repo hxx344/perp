@@ -3865,8 +3865,9 @@
         const innerHeight = Math.max(10, height - layout.top - layout.bottom);
         let minTs = Infinity;
         let maxTs = -Infinity;
-        const values = [];
-        const diffValues = [];
+  const values = [];
+  const diffValues = [];
+  let filteredDiffPoints = null;
         for (const point of transferPoints) {
           const ts = Number(point?.ts);
           const value = Number(point?.value);
@@ -3892,11 +3893,21 @@
           return null;
         }
         if (diffSeries && Array.isArray(diffSeries.data)) {
+          const withinRange = [];
           for (const point of diffSeries.data) {
+            const ts = Number(point?.ts);
             const value = Number(point?.value);
-            if (Number.isFinite(value)) {
-              diffValues.push(value);
+            if (!Number.isFinite(ts) || !Number.isFinite(value)) {
+              continue;
             }
+            if (ts < minTs || ts > maxTs) {
+              continue;
+            }
+            withinRange.push({ ts, value });
+            diffValues.push(value);
+          }
+          if (withinRange.length >= 2) {
+            filteredDiffPoints = withinRange;
           }
         }
         const diffBounds = diffValues.length ? computeNumericBounds(diffValues) : null;
@@ -3932,10 +3943,10 @@
           ctx.stroke();
         }
         drawTimedSeries(ctx, transferPoints, mapX, mapY, TRANSFER_LINE_COLOR, 2.8);
-        if (diffSeries && diffBounds && mapDiffY) {
+        if (filteredDiffPoints && diffBounds && mapDiffY) {
           const zeroDiffY = mapDiffY(0);
           if (zeroDiffY >= layout.top && zeroDiffY <= layout.top + innerHeight) {
-            ctx.strokeStyle = 'rgba(125, 211, 252, 0.35)';
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
             ctx.setLineDash([4, 4]);
             ctx.beginPath();
             ctx.moveTo(layout.left, zeroDiffY);
@@ -3945,7 +3956,7 @@
           }
           drawTimedSeries(
             ctx,
-            diffSeries.data,
+            filteredDiffPoints,
             mapX,
             mapDiffY,
             diffSeries.color || PRICE_DIFF_LINE_COLOR,
@@ -3957,7 +3968,7 @@
         ctx.textAlign = 'right';
         ctx.fillText(numberFormatter.format(bounds.max), layout.left - 8, layout.top + 12);
         ctx.fillText(numberFormatter.format(bounds.min), layout.left - 8, layout.top + innerHeight + 2);
-        if (diffBounds && mapDiffY) {
+        if (filteredDiffPoints && diffBounds && mapDiffY) {
           ctx.textAlign = 'left';
           const rightAxisX = width - layout.right + 8;
           ctx.fillText(formatSignedPercent(diffBounds.max, 2), rightAxisX, layout.top + 12);
