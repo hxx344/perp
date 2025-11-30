@@ -1038,7 +1038,7 @@ class HedgeCoordinator:
         if self._transferable_history:
             last_ts, _ = self._transferable_history[-1]
             if now - last_ts <= TRANSFERABLE_HISTORY_MERGE_SECONDS:
-                self._transferable_history[-1] = (now, total_value)
+                self._transferable_history[-1] = (last_ts, total_value)
                 return
         self._transferable_history.append((now, total_value))
 
