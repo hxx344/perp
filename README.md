@@ -370,7 +370,7 @@ Invoke-RestMethod -Method Post `
 - 阈值按比例计算：`|equity_A - equity_B| / max(equity_A, equity_B)`，例如 `0.08` 表示差异超过 8% 才会触发。
 - 触发后会在 Equity 较高的 VPS 上创建一次 `main_to_main` 转账请求，目标为另一台 VPS，金额默认为两者差值的一半，可通过 `max_transfer` 为单次自动转账设定上限。
 - `min_transfer` 控制最小转账金额（USDT），避免频繁的小额搬砖；`cooldown_seconds` 则限制两次自动触发的间隔（秒）。
-- `currency` 默认为 `USDT`，若想优先对比可用资金可把 `use_available_equity` 设为 `true`，自动改用 `available_equity/available_balance` 计算差值。
+- `currency` 默认为 `USDT`，若想优先对比可划转余额可把 `use_available_equity` 设为 `true`，此时会优先使用“transferable balance”（即 `equity - initial_margin - max(total_pnl, 0)` 的近似值）计算差值。
 - 转账请求依旧走 `/grvt/transfer` 接口，因此需要两台 VPS 都正确上报 `grvt_accounts.transfer_defaults`，所有自动触发也会在面板和日志里显示对应的 request_id、方向与原因，方便复查。
 
 ## GRVT-Lighter 对冲循环

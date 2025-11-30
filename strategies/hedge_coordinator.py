@@ -995,6 +995,34 @@ class HedgeCoordinator:
             worst_account_label=worst_account_label,
         )
 
+    def _compute_transferable_for_agent(
+        self,
+        agent_id: str,
+        grvt_payload: Optional[Dict[str, Any]],
+    ) -> Optional[Decimal]:
+        if not isinstance(grvt_payload, dict):
+            return None
+        summary = grvt_payload.get("summary")
+        summary_block = summary if isinstance(summary, dict) else None
+        total = Decimal("0")
+        has_value = False
+        for _, _, account_payload in self._flatten_grvt_accounts(agent_id, grvt_payload):
+            equity_value = self._select_equity_value(account_payload, summary_block)
+            if equity_value is None or equity_value <= 0:
+                continue
+            total_pnl = self._decimal_from(account_payload.get("total_pnl"))
+            if total_pnl is None:
+                total_pnl = self._decimal_from(account_payload.get("total"))
+            initial_margin = self._compute_initial_margin_total(account_payload)
+            transferable = self._compute_transferable_amount(equity_value, initial_margin, total_pnl)
+            if transferable is None:
+                continue
+            total += transferable
+            has_value = True
+        if not has_value:
+            return None
+        return total
+
     @staticmethod
     def _select_equity_value(primary: Dict[str, Any], summary: Optional[Dict[str, Any]]) -> Optional[Decimal]:
         for source in (primary, summary or {}):
@@ -1177,7 +1205,16 @@ class HedgeCoordinator:
 
     def _build_snapshot(self, now: float) -> Dict[str, Any]:
         aggregate = HedgeState.aggregate(self._states)
-        agents_payload = {agent_id: state.serialize() for agent_id, state in self._states.items()}
+        agents_payload: Dict[str, Dict[str, Any]] = {}
+        for agent_id, state in self._states.items():
+            payload = state.serialize()
+            transferable = self._compute_transferable_for_agent(agent_id, state.grvt_accounts)
+            if transferable is not None:
+                try:
+                    payload["grvt_transferable_balance"] = format(transferable, "f")
+                except Exception:
+                    payload["grvt_transferable_balance"] = str(transferable)
+            agents_payload[agent_id] = payload
 
         for agent_id, payload in agents_payload.items():
             control = self._controls.get(agent_id)
@@ -2067,17 +2104,31 @@ class CoordinatorApp:
         if not isinstance(grvt_block, dict):
             return None
         summary = grvt_block.get("summary")
-        if not isinstance(summary, dict):
+        summary_block = summary if isinstance(summary, dict) else None
+        if prefer_available:
+            transferable = self._decimal_from_snapshot(agent_payload.get("grvt_transferable_balance"))
+            if transferable is not None:
+                return transferable
+        if summary_block is None:
             return None
         if prefer_available:
             fields = ("available_equity", "available_balance", "equity", "balance")
         else:
             fields = ("equity", "balance", "available_equity", "available_balance")
         for field in fields:
-            value = HedgeCoordinator._decimal_from(summary.get(field))
+            value = HedgeCoordinator._decimal_from(summary_block.get(field))
             if value is not None:
                 return value
         return None
+
+    @staticmethod
+    def _decimal_from_snapshot(value: Any) -> Optional[Decimal]:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None
 
     @staticmethod
     def _decimal_to_str(value: Decimal) -> str:
