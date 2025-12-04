@@ -400,6 +400,143 @@
         transform: scale(1.2);
       }
 
+      .grvt-risk-panel {
+        margin-top: 1.5rem;
+        padding: 1rem 1.25rem 1.25rem;
+        border-radius: 14px;
+        background: #101522;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .risk-status-pill {
+        padding: 0.35rem 0.8rem;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        background: rgba(123, 140, 255, 0.15);
+        color: #bcd0ff;
+      }
+
+      .risk-settings-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 1rem;
+        margin-top: 1rem;
+      }
+
+      .risk-settings-card {
+        background: #0d111a;
+        border-radius: 12px;
+        padding: 1rem 1.1rem 1.2rem;
+        border: 1px solid rgba(255, 255, 255, 0.04);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+      }
+
+      .risk-slider-label {
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: #cfd6ea;
+        display: inline-flex;
+        justify-content: space-between;
+        width: 100%;
+      }
+
+      .risk-slider {
+        margin-top: 0.75rem;
+      }
+
+      .risk-slider input[type="range"] {
+        width: 100%;
+        accent-color: #7a62ff;
+      }
+
+      .risk-slider-scale {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.7rem;
+        color: #6d768f;
+        margin-top: 0.35rem;
+      }
+
+      .risk-inline-inputs {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 0.85rem;
+        margin-top: 1rem;
+      }
+
+      .risk-inline-inputs label,
+      .risk-bark-grid label {
+        font-size: 0.78rem;
+        color: #8a94a6;
+        display: flex;
+        flex-direction: column;
+        gap: 0.3rem;
+      }
+
+      .risk-inline-inputs input,
+      .risk-bark-grid input,
+      .risk-bark-grid textarea {
+        background: #090d14;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 8px;
+        padding: 0.45rem 0.6rem;
+        color: #f5f7fb;
+        font-size: 0.9rem;
+      }
+
+      .risk-bark-grid textarea {
+        min-height: 68px;
+        resize: vertical;
+      }
+
+      .risk-bark-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 0.85rem;
+      }
+
+      .risk-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.9rem;
+        color: #e2e6f3;
+      }
+
+      .risk-toggle input {
+        width: 1rem;
+        height: 1rem;
+      }
+
+      .risk-settings-actions {
+        margin-top: 1rem;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.85rem;
+      }
+
+      .risk-actions-left {
+        display: flex;
+        gap: 0.65rem;
+        flex-wrap: wrap;
+      }
+
+      .risk-settings-message {
+        margin: 0;
+        font-size: 0.85rem;
+        color: #8a94a6;
+      }
+
+      .risk-meta {
+        margin: 0.85rem 0 0;
+        font-size: 0.82rem;
+        color: #8a94a6;
+      }
+
       .grvt-auto-checkbox {
         display: flex;
         align-items: center;
@@ -1237,6 +1374,84 @@
             <p class="grvt-summary-updated" id="grvt-summary-updated">Updated —</p>
           </article>
         </div>
+        <div class="grvt-risk-panel" id="grvt-risk-panel">
+          <div class="grvt-adjust-header">
+            <div>
+              <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Bark 风险告警</h3>
+              <p class="summary-sub" style="margin: 0;">将原 CLI 阈值迁移到面板，实时调节风险和推送模板</p>
+            </div>
+            <div class="risk-status-pill" id="risk-settings-status">加载中…</div>
+          </div>
+          <div class="risk-settings-grid">
+            <section class="risk-settings-card">
+              <div class="risk-toggle">
+                <input type="checkbox" id="risk-alert-enabled" />
+                <span>启用风险告警</span>
+              </div>
+              <div class="risk-slider">
+                <label class="risk-slider-label" for="risk-threshold-slider">
+                  <span id="risk-threshold-label">阈值 --%</span>
+                </label>
+                <input type="range" id="risk-threshold-slider" min="5" max="90" step="0.5" value="30" />
+                <div class="risk-slider-scale">
+                  <span>5%</span>
+                  <span>25%</span>
+                  <span>50%</span>
+                  <span>90%</span>
+                </div>
+              </div>
+              <div class="risk-inline-inputs">
+                <label>
+                  触发阈值 (%)
+                  <input type="number" id="risk-threshold-input" min="1" max="90" step="0.5" />
+                </label>
+                <label>
+                  重置阈值 (%)
+                  <input type="number" id="risk-reset-input" min="1" max="90" step="0.5" />
+                </label>
+                <label>
+                  冷却 (分钟)
+                  <input type="number" id="risk-cooldown-input" min="0" max="360" step="1" />
+                </label>
+              </div>
+              <p class="risk-meta" id="risk-ratio-meta">等待风险数据…</p>
+            </section>
+            <section class="risk-settings-card">
+              <div class="risk-bark-grid">
+                <label>
+                  Bark URL
+                  <input type="text" id="risk-bark-url" placeholder="https://api.day.app/xxxxx/%7Btitle%7D/%7Bbody%7D" />
+                </label>
+                <label class="risk-toggle">
+                  <input type="checkbox" id="risk-bark-append" checked />
+                  <span>缺少 {title}/{body} 时自动附加</span>
+                </label>
+                <label>
+                  请求超时 (秒)
+                  <input type="number" id="risk-bark-timeout" min="1" max="60" step="0.5" />
+                </label>
+                <label>
+                  标题模板
+                  <textarea id="risk-title-template" rows="2"></textarea>
+                </label>
+                <label>
+                  正文模板
+                  <textarea id="risk-body-template" rows="3"></textarea>
+                </label>
+              </div>
+            </section>
+          </div>
+          <div class="risk-settings-actions">
+            <div class="risk-actions-left">
+              <button type="button" id="risk-settings-save">保存配置</button>
+              <button type="button" class="button-success" id="risk-settings-test">测试 Bark</button>
+              <button type="button" class="button-ghost" id="risk-settings-refresh">重新读取</button>
+              <button type="button" class="button-danger" id="risk-settings-disable">关闭告警</button>
+            </div>
+            <p class="risk-settings-message" id="risk-settings-message">未加载</p>
+            <p class="risk-settings-message" id="risk-test-message"></p>
+          </div>
+        </div>
         <div class="grvt-chart-grid">
           <div class="grvt-chart-card hidden" id="grvt-price-chart-wrapper">
             <div class="grvt-chart-header">
@@ -1645,6 +1860,25 @@
   const grvtSummaryUpdated = document.getElementById('grvt-summary-updated');
   const grvtAccountGrid = document.getElementById('grvt-account-grid');
   const grvtAccountsEmpty = document.getElementById('grvt-accounts-empty');
+  const grvtRiskPanel = document.getElementById('grvt-risk-panel');
+  const riskSettingsStatus = document.getElementById('risk-settings-status');
+  const riskSettingsMessage = document.getElementById('risk-settings-message');
+  const riskAlertEnabledInput = document.getElementById('risk-alert-enabled');
+  const riskThresholdSlider = document.getElementById('risk-threshold-slider');
+  const riskThresholdInput = document.getElementById('risk-threshold-input');
+  const riskResetInput = document.getElementById('risk-reset-input');
+  const riskCooldownInput = document.getElementById('risk-cooldown-input');
+  const riskThresholdLabel = document.getElementById('risk-threshold-label');
+  const riskMeta = document.getElementById('risk-ratio-meta');
+  const riskBarkUrlInput = document.getElementById('risk-bark-url');
+  const riskBarkAppendInput = document.getElementById('risk-bark-append');
+  const riskBarkTimeoutInput = document.getElementById('risk-bark-timeout');
+  const riskTitleTemplateInput = document.getElementById('risk-title-template');
+  const riskBodyTemplateInput = document.getElementById('risk-body-template');
+  const riskSaveButton = document.getElementById('risk-settings-save');
+  const riskTestButton = document.getElementById('risk-settings-test');
+  const riskDisableButton = document.getElementById('risk-settings-disable');
+  const riskRefreshButton = document.getElementById('risk-settings-refresh');
   const grvtAdjustPanel = document.getElementById('grvt-adjust-panel');
   const grvtAdjustSizeInput = document.getElementById('grvt-adjust-size');
   const grvtAdjustSymbolsSelect = document.getElementById('grvt-adjust-symbols');
@@ -1816,6 +2050,11 @@
   let autoBalanceBusy = false;
   let autoBalanceDirty = false;
   let autoBalanceLastConfig = null;
+  let riskSettingsBusy = false;
+  let riskSettingsDirty = false;
+  let riskSettingsSnapshot = null;
+  let riskTestBusy = false;
+  let latestGlobalRiskRatio = null;
 
       const numberFormatter = new Intl.NumberFormat(undefined, {
         minimumFractionDigits: 2,
@@ -1829,6 +2068,19 @@
         }
         const numeric = Number(value);
         return Number.isFinite(numeric) ? numeric : 0;
+      }
+
+      function clamp(value, min, max) {
+        if (!Number.isFinite(value)) {
+          return min;
+        }
+        if (value < min) {
+          return min;
+        }
+        if (value > max) {
+          return max;
+        }
+        return value;
       }
 
       function parseDecimal(value) {
@@ -3134,6 +3386,318 @@
         }
       }
 
+      function getRiskThresholdSummary() {
+        if (!riskSettingsSnapshot) {
+          return GLOBAL_RISK_THRESHOLD_TEXT;
+        }
+        const parts = [];
+        const thresholdPercent = Number(riskSettingsSnapshot.threshold_percent);
+        if (Number.isFinite(thresholdPercent) && thresholdPercent > 0) {
+          parts.push(`阈值 ${thresholdPercent.toFixed(1)}%`);
+        }
+        const resetPercent = Number(riskSettingsSnapshot.reset_ratio_percent);
+        if (Number.isFinite(resetPercent) && resetPercent > 0) {
+          parts.push(`重置 ${resetPercent.toFixed(1)}%`);
+        }
+        const cooldownSeconds = Number(riskSettingsSnapshot.cooldown);
+        if (Number.isFinite(cooldownSeconds) && cooldownSeconds > 0) {
+          if (cooldownSeconds >= 60) {
+            const minutes = cooldownSeconds / 60;
+            parts.push(`冷却 ${minutes >= 10 ? minutes.toFixed(0) : minutes.toFixed(1)}m`);
+          } else {
+            parts.push(`冷却 ${cooldownSeconds.toFixed(0)}s`);
+          }
+        }
+        return parts.length ? parts.join(' / ') : GLOBAL_RISK_THRESHOLD_TEXT;
+      }
+
+      function updateRiskThresholdLabel(value) {
+        if (!riskThresholdLabel) {
+          return;
+        }
+        if (Number.isFinite(value)) {
+          riskThresholdLabel.textContent = `阈值 ${value.toFixed(1)}%`;
+        } else {
+          riskThresholdLabel.textContent = '阈值 --%';
+        }
+      }
+
+      function updateRiskMeta() {
+        if (!riskMeta) {
+          return;
+        }
+        const parts = [];
+        if (Number.isFinite(latestGlobalRiskRatio)) {
+          parts.push(`当前风险 ${(latestGlobalRiskRatio * 100).toFixed(2)}%`);
+        }
+        const thresholdSummary = getRiskThresholdSummary();
+        if (thresholdSummary) {
+          parts.push(thresholdSummary);
+        }
+        const lastAlertTs = Number(riskSettingsSnapshot?.last_alert_at);
+        if (Number.isFinite(lastAlertTs) && lastAlertTs > 0) {
+          parts.push(`上次推送 ${formatTimestamp(lastAlertTs) || '—'}`);
+        }
+        const cooldownRemaining = Number(riskSettingsSnapshot?.cooldown_remaining);
+        if (Number.isFinite(cooldownRemaining) && cooldownRemaining > 0.5) {
+          parts.push(`冷却剩余 ${formatDuration(cooldownRemaining)}`);
+        }
+        riskMeta.textContent = parts.length ? parts.join(' · ') : '等待风险数据…';
+      }
+
+      function setRiskStatusMessage(message) {
+        if (riskSettingsMessage) {
+          riskSettingsMessage.textContent = message || '';
+        }
+      }
+
+      function setRiskTestMessage(message) {
+        const element = document.getElementById('risk-test-message');
+        if (element) {
+          element.textContent = message || '';
+        }
+      }
+
+      function updateRiskInputsState() {
+        const enabled = Boolean(riskAlertEnabledInput?.checked);
+        const disableThreshold = riskSettingsBusy || !enabled;
+        [riskThresholdSlider, riskThresholdInput, riskResetInput, riskCooldownInput].forEach((input) => {
+          if (input) {
+            input.disabled = disableThreshold && input !== riskAlertEnabledInput;
+          }
+        });
+        [riskBarkUrlInput, riskBarkTimeoutInput, riskTitleTemplateInput, riskBodyTemplateInput, riskBarkAppendInput].forEach((input) => {
+          if (input) {
+            input.disabled = riskSettingsBusy;
+          }
+        });
+      }
+
+      function updateRiskButtons() {
+        const disabled = riskSettingsBusy;
+        [riskSaveButton, riskRefreshButton].forEach((button) => {
+          if (button) {
+            button.disabled = disabled;
+          }
+        });
+        if (riskDisableButton) {
+          const enabled = Boolean(riskAlertEnabledInput?.checked);
+          riskDisableButton.disabled = disabled || !enabled;
+        }
+        if (riskTestButton) {
+          const hasDestination = Boolean(riskSettingsSnapshot?.bark_url);
+          riskTestButton.disabled = riskSettingsBusy || riskTestBusy || !hasDestination;
+          riskTestButton.textContent = riskTestBusy ? '测试中…' : '测试 Bark';
+        }
+        updateRiskInputsState();
+      }
+
+      function markRiskSettingsDirty() {
+        if (riskSettingsBusy) {
+          return;
+        }
+        riskSettingsDirty = true;
+        setRiskStatusMessage('配置未保存');
+      }
+
+      function applyRiskSettings(settings, { markClean = false } = {}) {
+        riskSettingsSnapshot = settings ? { ...settings } : null;
+        const enabled = Boolean(riskSettingsSnapshot?.enabled && riskSettingsSnapshot?.threshold);
+        if (riskAlertEnabledInput) {
+          riskAlertEnabledInput.checked = enabled;
+        }
+        const thresholdPercent = Number(riskSettingsSnapshot?.threshold_percent ?? (riskSettingsSnapshot?.threshold ?? 0) * 100);
+        const resetPercent = Number(riskSettingsSnapshot?.reset_ratio_percent ?? (riskSettingsSnapshot?.reset_ratio ?? 0) * 100);
+        const cooldownMinutes = Number(riskSettingsSnapshot?.cooldown)
+          ? Number(riskSettingsSnapshot.cooldown) / 60
+          : 0;
+
+        if (riskThresholdSlider) {
+          const sliderValue = Number.isFinite(thresholdPercent) ? clamp(thresholdPercent, 5, 90) : 30;
+          riskThresholdSlider.value = sliderValue;
+        }
+        if (riskThresholdInput) {
+          riskThresholdInput.value = Number.isFinite(thresholdPercent) ? thresholdPercent.toFixed(1) : '';
+        }
+        if (riskResetInput) {
+          riskResetInput.value = Number.isFinite(resetPercent) ? resetPercent.toFixed(1) : '';
+        }
+        if (riskCooldownInput) {
+          riskCooldownInput.value = Number.isFinite(cooldownMinutes) ? Math.max(0, cooldownMinutes).toFixed(1) : '';
+        }
+        if (riskBarkUrlInput) {
+          riskBarkUrlInput.value = riskSettingsSnapshot?.bark_url ?? '';
+        }
+        if (riskBarkAppendInput) {
+          riskBarkAppendInput.checked = Boolean(riskSettingsSnapshot?.bark_append_payload ?? true);
+        }
+        if (riskBarkTimeoutInput) {
+          riskBarkTimeoutInput.value = riskSettingsSnapshot?.bark_timeout ?? '';
+        }
+        if (riskTitleTemplateInput) {
+          riskTitleTemplateInput.value = riskSettingsSnapshot?.title_template ?? '';
+        }
+        if (riskBodyTemplateInput) {
+          riskBodyTemplateInput.value = riskSettingsSnapshot?.body_template ?? '';
+        }
+        updateRiskThresholdLabel(thresholdPercent);
+        if (markClean) {
+          riskSettingsDirty = false;
+          setRiskStatusMessage('配置已同步');
+        }
+        if (riskSettingsStatus) {
+          riskSettingsStatus.textContent = enabled ? `已启用 · ${getRiskThresholdSummary()}` : '未启用';
+        }
+        updateRiskButtons();
+        updateRiskMeta();
+      }
+
+      function buildRiskSettingsPayload({ enabledOverride } = {}) {
+        const payload = {};
+        const enabled = enabledOverride !== undefined ? enabledOverride : Boolean(riskAlertEnabledInput?.checked);
+        payload.enabled = enabled;
+        const thresholdPercent = Number(getInputValue(riskThresholdInput));
+        if (enabled) {
+          if (!Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
+            throw new Error('请设置大于 0 的触发阈值');
+          }
+          payload.threshold_percent = thresholdPercent;
+          const resetPercent = Number(getInputValue(riskResetInput));
+          if (Number.isFinite(resetPercent) && resetPercent > 0) {
+            payload.reset_ratio_percent = resetPercent;
+          }
+        }
+        const cooldownMinutes = Number(getInputValue(riskCooldownInput));
+        if (Number.isFinite(cooldownMinutes) && cooldownMinutes >= 0) {
+          payload.cooldown_minutes = cooldownMinutes;
+        }
+        const barkUrl = getInputValue(riskBarkUrlInput);
+        if (barkUrl) {
+          payload.bark_url = barkUrl;
+        }
+        if (riskBarkAppendInput) {
+          payload.bark_append_payload = Boolean(riskBarkAppendInput.checked);
+        }
+        const barkTimeout = Number(getInputValue(riskBarkTimeoutInput));
+        if (Number.isFinite(barkTimeout) && barkTimeout > 0) {
+          payload.bark_timeout = barkTimeout;
+        }
+        const titleTemplate = getInputValue(riskTitleTemplateInput);
+        if (titleTemplate) {
+          payload.title_template = titleTemplate;
+        }
+        const bodyTemplate = getInputValue(riskBodyTemplateInput);
+        if (bodyTemplate) {
+          payload.body_template = bodyTemplate;
+        }
+        return payload;
+      }
+
+      async function loadRiskSettings({ silent = false } = {}) {
+        if (!grvtRiskPanel || riskSettingsBusy) {
+          return;
+        }
+        riskSettingsBusy = true;
+        updateRiskButtons();
+        if (!silent) {
+          setRiskStatusMessage('读取风险配置…');
+        }
+        try {
+          const response = await fetch('/risk_alert/settings', { cache: 'no-store' });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          applyRiskSettings(result.settings, { markClean: true });
+          if (!silent) {
+            setRiskStatusMessage('配置已同步');
+          }
+        } catch (error) {
+          setRiskStatusMessage(`读取失败：${error}`);
+        } finally {
+          riskSettingsBusy = false;
+          updateRiskButtons();
+        }
+      }
+
+      async function saveRiskSettings({ enabledOverride } = {}) {
+        if (!grvtRiskPanel || riskSettingsBusy) {
+          return;
+        }
+        let payload;
+        try {
+          payload = buildRiskSettingsPayload({ enabledOverride });
+        } catch (error) {
+          setRiskStatusMessage(error.message || String(error));
+          return;
+        }
+  riskSettingsBusy = true;
+        updateRiskButtons();
+        setRiskStatusMessage('保存风险配置…');
+        try {
+          const response = await fetch('/risk_alert/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          applyRiskSettings(result.settings, { markClean: true });
+          setRiskStatusMessage('配置已保存');
+          await refreshMetrics();
+        } catch (error) {
+          setRiskStatusMessage(`保存失败：${error}`);
+        } finally {
+          riskSettingsBusy = false;
+          updateRiskButtons();
+        }
+      }
+
+      async function disableRiskAlerts() {
+        await saveRiskSettings({ enabledOverride: false });
+      }
+
+      async function triggerRiskTest() {
+        if (!riskTestButton || riskTestBusy) {
+          return;
+        }
+        riskTestBusy = true;
+        updateRiskButtons();
+        setRiskTestMessage('推送测试通知…');
+        try {
+          const payload = {};
+          if (Number.isFinite(latestGlobalRiskRatio) && latestGlobalRiskRatio > 0) {
+            payload.ratio = latestGlobalRiskRatio;
+          }
+          const response = await fetch('/risk_alert/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          const alert = result?.alert || {};
+          const ratioPercent = Number(alert.ratio_percent);
+          const ratioText = Number.isFinite(ratioPercent) ? `${ratioPercent.toFixed(1)}%` : '--%';
+          setRiskTestMessage(`推送成功 · 风险 ${ratioText}`);
+        } catch (error) {
+          setRiskTestMessage(`推送失败：${error}`);
+        } finally {
+          riskTestBusy = false;
+          updateRiskButtons();
+        }
+      }
+
       function extractBaseAsset(symbol) {
         if (!symbol) {
           return null;
@@ -4375,6 +4939,7 @@
             : null;
           if (worstLossAccount && denominator) {
             const riskRatio = worstLossAccount.lossValue / denominator;
+            latestGlobalRiskRatio = riskRatio;
             grvtRiskLevel.textContent = formatPercent(riskRatio * 100, 2);
             applyRiskTone(grvtRiskLevel, riskRatio, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
             const accountLabelText = worstLossAccount.accountName
@@ -4382,16 +4947,19 @@
               : worstLossAccount.agentId;
             const lossText = numberFormatter.format(worstLossAccount.lossValue ?? 0);
             const transferableText = numberFormatter.format(denominator);
-            grvtRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 可转 ${transferableText} · ${GLOBAL_RISK_THRESHOLD_TEXT}`;
+            grvtRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 可转 ${transferableText} · ${getRiskThresholdSummary()}`;
           } else if (worstLossAccount && !denominator) {
+            latestGlobalRiskRatio = null;
             grvtRiskLevel.textContent = '—';
             applyRiskTone(grvtRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
             grvtRiskDetail.textContent = '缺少可转额度数据，无法计算 RISK';
           } else {
+            latestGlobalRiskRatio = null;
             grvtRiskLevel.textContent = '—';
             applyRiskTone(grvtRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
             grvtRiskDetail.textContent = '无亏损或缺少盈亏数据';
           }
+          updateRiskMeta();
         }
 
         const updatedText = formatTimestamp(latestUpdate);
@@ -5592,10 +6160,74 @@
         input.addEventListener('input', markAutoBalanceDirty);
         input.addEventListener('change', markAutoBalanceDirty);
       });
+      if (riskSaveButton) {
+        riskSaveButton.addEventListener('click', () => {
+          saveRiskSettings();
+        });
+      }
+      if (riskDisableButton) {
+        riskDisableButton.addEventListener('click', () => {
+          disableRiskAlerts();
+        });
+      }
+      if (riskTestButton) {
+        riskTestButton.addEventListener('click', () => {
+          triggerRiskTest();
+        });
+      }
+      if (riskRefreshButton) {
+        riskRefreshButton.addEventListener('click', () => {
+          loadRiskSettings({ silent: false });
+        });
+      }
+      if (riskAlertEnabledInput) {
+        riskAlertEnabledInput.addEventListener('change', () => {
+          updateRiskInputsState();
+          markRiskSettingsDirty();
+        });
+      }
+      if (riskThresholdSlider) {
+        riskThresholdSlider.addEventListener('input', (event) => {
+          const value = clamp(Number(event.target.value), 5, 90);
+          if (riskThresholdInput) {
+            riskThresholdInput.value = value.toFixed(1);
+          }
+          updateRiskThresholdLabel(value);
+          markRiskSettingsDirty();
+        });
+      }
+      if (riskThresholdInput) {
+        riskThresholdInput.addEventListener('input', () => {
+          const value = clamp(Number(riskThresholdInput.value), 1, 90);
+          if (Number.isFinite(value) && riskThresholdSlider) {
+            riskThresholdSlider.value = value;
+          }
+          updateRiskThresholdLabel(value);
+          markRiskSettingsDirty();
+        });
+      }
+      [
+        riskResetInput,
+        riskCooldownInput,
+        riskBarkUrlInput,
+        riskBarkTimeoutInput,
+        riskTitleTemplateInput,
+        riskBodyTemplateInput,
+      ].forEach((input) => {
+        if (!input) {
+          return;
+        }
+        input.addEventListener('input', markRiskSettingsDirty);
+      });
+      if (riskBarkAppendInput) {
+        riskBarkAppendInput.addEventListener('change', markRiskSettingsDirty);
+      }
       updateGrvtSymbolOptions([]);
       updateGrvtTransferButtons();
       updateAutoBalanceButtons();
+      updateRiskButtons();
       loadAutoBalanceConfig({ silent: true });
+      loadRiskSettings({ silent: true });
       refreshMetrics();
       setInterval(refreshMetrics, 2000);
     </script>

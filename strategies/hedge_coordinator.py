@@ -40,7 +40,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple, cast
+from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import quote_plus
 
 from aiohttp import ClientSession, ClientTimeout, web
@@ -229,6 +229,84 @@ class GlobalRiskSnapshot:
     worst_loss_value: Decimal
     worst_agent_id: Optional[str]
     worst_account_label: Optional[str]
+
+
+@dataclass
+class RiskAlertSettings:
+    threshold: Optional[float] = None
+    reset_ratio: Optional[float] = None
+    cooldown: float = 900.0
+    bark_url: Optional[str] = None
+    bark_append_payload: bool = True
+    bark_timeout: float = 10.0
+    title_template: str = "GRVT Risk {ratio_percent:.1f}%"
+    body_template: str = (
+        "{account_label} ({agent_id}) loss {loss_value} / {base_label} {base_value}"
+    )
+
+    def normalized(self) -> "RiskAlertSettings":
+        def _clean_ratio(value: Optional[float]) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                ratio = float(value)
+            except (TypeError, ValueError):
+                return None
+            if ratio > 1.0:
+                ratio = ratio / 100.0
+            if ratio <= 0 or not math.isfinite(ratio):
+                return None
+            return min(max(ratio, 0.0), 1.0)
+
+        threshold = _clean_ratio(self.threshold)
+        reset_ratio = _clean_ratio(self.reset_ratio)
+        if threshold is None:
+            reset_ratio = None
+        elif reset_ratio is None:
+            reset_ratio = threshold * 0.7
+        else:
+            reset_ratio = min(reset_ratio, threshold)
+
+        cooldown = max(float(self.cooldown or 0), 0.0)
+        timeout = max(float(self.bark_timeout or 0), 1.0)
+        url = (self.bark_url or "").strip() or None
+        title = (self.title_template or "GRVT Risk {ratio_percent:.1f}%").strip()
+        body = (
+            self.body_template
+            or "{account_label} ({agent_id}) loss {loss_value} / {base_label} {base_value}"
+        ).strip()
+        return RiskAlertSettings(
+            threshold=threshold,
+            reset_ratio=reset_ratio,
+            cooldown=cooldown,
+            bark_url=url,
+            bark_append_payload=bool(self.bark_append_payload),
+            bark_timeout=timeout,
+            title_template=title,
+            body_template=body,
+        )
+
+    def to_payload(self) -> Dict[str, Any]:
+        normalized = self.normalized()
+        threshold_percent = (
+            normalized.threshold * 100 if normalized.threshold is not None else None
+        )
+        reset_percent = (
+            normalized.reset_ratio * 100 if normalized.reset_ratio is not None else None
+        )
+        return {
+            "enabled": bool(normalized.threshold),
+            "threshold": normalized.threshold,
+            "threshold_percent": threshold_percent,
+            "reset_ratio": normalized.reset_ratio,
+            "reset_ratio_percent": reset_percent,
+            "cooldown": normalized.cooldown,
+            "bark_url": normalized.bark_url,
+            "bark_append_payload": normalized.bark_append_payload,
+            "bark_timeout": normalized.bark_timeout,
+            "title_template": normalized.title_template,
+            "body_template": normalized.body_template,
+        }
 
 
 @dataclass(frozen=True)
@@ -897,10 +975,7 @@ class HedgeCoordinator:
     def __init__(
         self,
         *,
-        bark_notifier: Optional[BarkNotifier] = None,
-        risk_alert_threshold: Optional[float] = None,
-        risk_alert_reset: Optional[float] = None,
-        risk_alert_cooldown: float = 900.0,
+        alert_settings: Optional[RiskAlertSettings] = None,
     ) -> None:
         self._states: Dict[str, HedgeState] = {}
         self._lock = asyncio.Lock()
@@ -910,19 +985,61 @@ class HedgeCoordinator:
         self._transferable_history: Deque[tuple[float, Decimal]] = deque(maxlen=TRANSFERABLE_HISTORY_LIMIT)
         self._controls: Dict[str, Dict[str, Any]] = {}
         self._default_paused: bool = False
-        self._bark_notifier = bark_notifier
-        self._risk_alert_threshold = risk_alert_threshold if risk_alert_threshold and risk_alert_threshold > 0 else None
-        if self._risk_alert_threshold is not None:
-            if risk_alert_reset is not None and 0 < risk_alert_reset < self._risk_alert_threshold:
-                self._risk_alert_reset = risk_alert_reset
-            else:
-                self._risk_alert_reset = self._risk_alert_threshold * 0.7
-        else:
-            self._risk_alert_reset = None
-        self._risk_alert_cooldown = max(0.0, risk_alert_cooldown)
+        self._alert_settings = (alert_settings or RiskAlertSettings()).normalized()
+        self._alert_settings_updated_at = time.time()
+        self._bark_notifier: Optional[BarkNotifier] = None
+        self._risk_alert_threshold: Optional[float] = None
+        self._risk_alert_reset: Optional[float] = None
+        self._risk_alert_cooldown: float = 0.0
+        self._apply_alert_settings()
         self._risk_alert_active: Dict[str, bool] = {}
         self._risk_alert_last_ts: Dict[str, float] = {}
         self._global_risk_stats: Optional[GlobalRiskSnapshot] = None
+
+    def _apply_alert_settings(self, settings: Optional[RiskAlertSettings] = None) -> None:
+        if settings is not None:
+            self._alert_settings = settings.normalized()
+            self._alert_settings_updated_at = time.time()
+        config = self._alert_settings
+        self._risk_alert_threshold = config.threshold
+        self._risk_alert_reset = config.reset_ratio
+        self._risk_alert_cooldown = config.cooldown
+        if config.bark_url:
+            self._bark_notifier = BarkNotifier(
+                config.bark_url,
+                append_payload=config.bark_append_payload,
+                timeout=config.bark_timeout,
+            )
+        else:
+            self._bark_notifier = None
+
+    def _alert_settings_payload(self, now: Optional[float] = None) -> Dict[str, Any]:
+        payload = self._alert_settings.to_payload()
+        payload["updated_at"] = self._alert_settings_updated_at
+        payload["active"] = bool(self._risk_alert_active.get(GLOBAL_RISK_ALERT_KEY))
+        last_alert = self._risk_alert_last_ts.get(GLOBAL_RISK_ALERT_KEY)
+        payload["last_alert_at"] = last_alert
+        cooldown = self._risk_alert_cooldown or 0.0
+        if last_alert is not None and cooldown > 0:
+            ready_at = last_alert + cooldown
+            payload["cooldown_ready_at"] = ready_at
+            current = now if now is not None else time.time()
+            payload["cooldown_remaining"] = max(0.0, ready_at - current)
+        else:
+            payload["cooldown_ready_at"] = None
+            payload["cooldown_remaining"] = 0.0
+        return payload
+
+    async def alert_settings_snapshot(self) -> Dict[str, Any]:
+        async with self._lock:
+            return self._alert_settings_payload()
+
+    async def apply_alert_settings(self, settings: RiskAlertSettings) -> Dict[str, Any]:
+        async with self._lock:
+            self._apply_alert_settings(settings)
+            self._risk_alert_active.clear()
+            self._risk_alert_last_ts.clear()
+            return self._alert_settings_payload()
 
     @staticmethod
     def _normalize_agent_id(raw: Any) -> str:
@@ -1504,6 +1621,61 @@ class HedgeCoordinator:
         )
         await self._bark_notifier.send(title=title, body=body)
 
+    async def trigger_test_alert(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        overrides = overrides or {}
+        async with self._lock:
+            notifier = self._bark_notifier
+            threshold = self._risk_alert_threshold
+            if notifier is None or threshold is None:
+                raise RuntimeError("Bark risk alerts are not enabled; configure Bark URL and threshold first.")
+            stats = self._global_risk_stats
+            ratio = overrides.get("ratio")
+            if ratio is None and stats and stats.ratio:
+                ratio = stats.ratio
+            if ratio is None:
+                ratio = threshold
+            try:
+                ratio = float(ratio)
+            except (TypeError, ValueError):
+                ratio = threshold
+            if ratio <= 0:
+                ratio = threshold
+            base_value_raw = overrides.get("base_value")
+            base_value = self._decimal_from(base_value_raw)
+            if base_value is None and stats and stats.total_transferable:
+                base_value = stats.total_transferable
+            if base_value is None:
+                base_value = Decimal("100000")
+            loss_value_raw = overrides.get("loss_value")
+            loss_value = self._decimal_from(loss_value_raw)
+            if loss_value is None:
+                try:
+                    loss_value = Decimal(str(ratio)) * base_value
+                except Exception:
+                    loss_value = Decimal("50000")
+            agent_id = (overrides.get("agent_id") or (stats.worst_agent_id if stats else None) or "test-agent")
+            account_label = overrides.get("account_label") or (stats.worst_account_label if stats else None) or "Test Account"
+            alert = RiskAlertInfo(
+                key=f"test::{agent_id}",
+                agent_id=agent_id,
+                account_label=account_label,
+                ratio=ratio,
+                loss_value=loss_value,
+                base_value=base_value,
+                base_label="transferable",
+            )
+
+        await self._send_risk_alert(alert)
+        return {
+            "agent_id": alert.agent_id,
+            "account_label": alert.account_label,
+            "ratio": alert.ratio,
+            "ratio_percent": alert.ratio * 100.0,
+            "loss_value": self._format_decimal(alert.loss_value),
+            "base_value": self._format_decimal(alert.base_value),
+            "base_label": alert.base_label,
+        }
+
 
 class CoordinatorApp:
     def __init__(
@@ -1512,21 +1684,13 @@ class CoordinatorApp:
         dashboard_username: Optional[str] = None,
         dashboard_password: Optional[str] = None,
         dashboard_session_ttl: float = 12 * 3600,
-        bark_notifier: Optional[BarkNotifier] = None,
-        risk_alert_threshold: Optional[float] = None,
-        risk_alert_reset: Optional[float] = None,
-        risk_alert_cooldown: float = 900.0,
+        alert_settings: Optional[RiskAlertSettings] = None,
         enable_volatility_monitor: bool = True,
         volatility_symbols: Optional[Sequence[str]] = None,
         volatility_poll_interval: float = 60.0,
         volatility_history_limit: int = 1800,
     ) -> None:
-        self._coordinator = HedgeCoordinator(
-            bark_notifier=bark_notifier,
-            risk_alert_threshold=risk_alert_threshold,
-            risk_alert_reset=risk_alert_reset,
-            risk_alert_cooldown=risk_alert_cooldown,
-        )
+        self._coordinator = HedgeCoordinator(alert_settings=alert_settings)
         self._adjustments = GrvtAdjustmentManager()
         self._vol_monitor = (
             VolatilityMonitor(
@@ -1571,6 +1735,9 @@ class CoordinatorApp:
                 web.post("/control", self.handle_control_update),
                 web.get("/auto_balance/config", self.handle_auto_balance_get),
                 web.post("/auto_balance/config", self.handle_auto_balance_update),
+                web.get("/risk_alert/settings", self.handle_risk_alert_settings),
+                web.post("/risk_alert/settings", self.handle_risk_alert_update),
+                web.post("/risk_alert/test", self.handle_risk_alert_test),
                 web.get("/grvt/adjustments", self.handle_grvt_adjustments),
                 web.post("/grvt/adjust", self.handle_grvt_adjust),
                 web.post("/grvt/transfer", self.handle_grvt_transfer),
@@ -1729,6 +1896,74 @@ class CoordinatorApp:
             "config": self._auto_balance_config_as_payload(),
             "status": self._auto_balance_status_snapshot(),
         })
+
+    async def handle_risk_alert_settings(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        payload = await self._coordinator.alert_settings_snapshot()
+        return web.json_response({"settings": payload})
+
+    async def handle_risk_alert_update(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="risk settings payload must be JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="risk settings payload must be an object")
+        try:
+            settings = await self._build_risk_alert_settings(body)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        payload = await self._coordinator.apply_alert_settings(settings)
+        LOGGER.info("Risk alert settings updated via dashboard")
+        return web.json_response({"settings": payload})
+
+    async def handle_risk_alert_test(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        if request.can_read_body and (request.content_length or 0) > 0:
+            try:
+                body = await request.json()
+            except Exception:
+                raise web.HTTPBadRequest(text="test payload must be JSON")
+            if not isinstance(body, dict):
+                raise web.HTTPBadRequest(text="test payload must be an object")
+        else:
+            body = {}
+        ratio = self._extract_numeric_field(body, ["ratio"], field_name="ratio") if body else None
+        ratio_percent = self._extract_numeric_field(
+            body,
+            ["ratio_percent", "ratio_percentage"],
+            field_name="ratio_percent",
+            scale=0.01,
+        ) if body else None
+        overrides: Dict[str, Any] = {}
+        if ratio is not None:
+            overrides["ratio"] = ratio
+        elif ratio_percent is not None:
+            overrides["ratio"] = ratio_percent
+        base_candidate = body.get("base_value") if body else None
+        if base_candidate is None and body:
+            base_candidate = body.get("base") or body.get("transferable")
+        if base_candidate is not None:
+            overrides["base_value"] = base_candidate
+        loss_candidate = body.get("loss_value") if body else None
+        if loss_candidate is None and body:
+            loss_candidate = body.get("loss")
+        if loss_candidate is not None:
+            overrides["loss_value"] = loss_candidate
+        if body:
+            agent_id = self._clean_optional_string(body.get("agent_id"))
+            account_label = self._clean_optional_string(body.get("account_label"))
+            if agent_id:
+                overrides["agent_id"] = agent_id
+            if account_label:
+                overrides["account_label"] = account_label
+        try:
+            payload = await self._coordinator.trigger_test_alert(overrides)
+        except RuntimeError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        LOGGER.info("Risk alert test triggered for Bark destination")
+        return web.json_response({"alert": payload})
 
     async def handle_grvt_adjustments(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
@@ -2336,6 +2571,131 @@ class CoordinatorApp:
             return False
         return bool(value)
 
+    @staticmethod
+    def _clean_optional_string(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            text = str(value).strip()
+        except Exception:
+            return None
+        return text or None
+
+    def _extract_numeric_field(
+        self,
+        payload: Mapping[str, Any],
+        keys: Sequence[str],
+        *,
+        field_name: str,
+        scale: float = 1.0,
+    ) -> Optional[float]:
+        for key in keys:
+            if key not in payload:
+                continue
+            value = payload[key]
+            if value is None:
+                return None
+            if isinstance(value, str):
+                value = value.strip()
+                if not value:
+                    return None
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{field_name} must be numeric")
+            return number * scale
+        return None
+
+    async def _build_risk_alert_settings(self, payload: Mapping[str, Any]) -> RiskAlertSettings:
+        snapshot = await self._coordinator.alert_settings_snapshot()
+        base = RiskAlertSettings()
+        base.threshold = snapshot.get("threshold")
+        base.reset_ratio = snapshot.get("reset_ratio")
+        base.cooldown = snapshot.get("cooldown", base.cooldown)
+        base.bark_url = snapshot.get("bark_url")
+        base.bark_append_payload = snapshot.get("bark_append_payload", base.bark_append_payload)
+        base.bark_timeout = snapshot.get("bark_timeout", base.bark_timeout)
+        base.title_template = snapshot.get("title_template", base.title_template)
+        base.body_template = snapshot.get("body_template", base.body_template)
+
+        enabled_flag = snapshot.get("enabled", bool(base.threshold))
+        if "enabled" in payload:
+            enabled_flag = self._interpret_bool(payload.get("enabled"))
+
+        threshold_value = self._extract_numeric_field(payload, ["threshold", "threshold_ratio"], field_name="threshold")
+        threshold_percent = self._extract_numeric_field(
+            payload,
+            ["threshold_percent", "threshold_percentage"],
+            field_name="threshold_percent",
+            scale=0.01,
+        )
+        if threshold_percent is not None:
+            threshold_value = threshold_percent
+        if threshold_value is not None:
+            base.threshold = threshold_value
+            enabled_flag = True
+
+        reset_value = self._extract_numeric_field(payload, ["reset_ratio", "reset"], field_name="reset_ratio")
+        reset_percent = self._extract_numeric_field(
+            payload,
+            ["reset_ratio_percent", "reset_percent"],
+            field_name="reset_ratio_percent",
+            scale=0.01,
+        )
+        if reset_percent is not None:
+            reset_value = reset_percent
+        if reset_value is not None:
+            base.reset_ratio = reset_value
+
+        cooldown_value = self._extract_numeric_field(
+            payload,
+            ["cooldown", "cooldown_seconds"],
+            field_name="cooldown",
+        )
+        cooldown_minutes = self._extract_numeric_field(
+            payload,
+            ["cooldown_minutes"],
+            field_name="cooldown_minutes",
+            scale=60.0,
+        )
+        if cooldown_minutes is not None:
+            cooldown_value = cooldown_minutes
+        if cooldown_value is not None:
+            base.cooldown = max(cooldown_value, 0.0)
+
+        bark_url = payload.get("bark_url")
+        if bark_url is None and "url" in payload:
+            bark_url = payload.get("url")
+        url_value = self._clean_optional_string(bark_url)
+        if url_value is not None or ("bark_url" in payload or "url" in payload):
+            base.bark_url = url_value
+
+        append_field = None
+        if "bark_append_payload" in payload:
+            append_field = payload.get("bark_append_payload")
+        elif "bark_append_title_body" in payload:
+            append_field = payload.get("bark_append_title_body")
+        if append_field is not None:
+            base.bark_append_payload = self._interpret_bool(append_field)
+
+        bark_timeout = self._extract_numeric_field(payload, ["bark_timeout"], field_name="bark_timeout")
+        if bark_timeout is not None:
+            base.bark_timeout = max(bark_timeout, 1.0)
+
+        title_value = self._clean_optional_string(payload.get("title_template") or payload.get("title"))
+        if title_value is not None:
+            base.title_template = title_value
+
+        body_value = self._clean_optional_string(payload.get("body_template") or payload.get("body"))
+        if body_value is not None:
+            base.body_template = body_value
+
+        if not enabled_flag:
+            base.threshold = None
+            base.reset_ratio = None
+
+        return base.normalized()
+
     async def handle_grvt_adjust_ack(self, request: web.Request) -> web.Response:
         try:
             body = await request.json()
@@ -2496,20 +2856,23 @@ async def _run_app(args: argparse.Namespace) -> None:
     risk_reset = None
     if risk_threshold and args.risk_alert_reset and args.risk_alert_reset > 0:
         risk_reset = min(args.risk_alert_reset, risk_threshold)
-    bark_notifier: Optional[BarkNotifier] = None
     bark_url = (args.bark_url or "").strip()
-    if bark_url:
-        bark_notifier = BarkNotifier(
-            bark_url,
-            timeout=max(args.bark_timeout, 1.0),
-            append_payload=bool(args.bark_append_title_body),
+    alert_settings = RiskAlertSettings(
+        threshold=risk_threshold,
+        reset_ratio=risk_reset,
+        cooldown=max(args.risk_alert_cooldown, 0.0),
+        bark_url=bark_url or None,
+        bark_append_payload=bool(args.bark_append_title_body),
+        bark_timeout=max(args.bark_timeout, 1.0),
+        title_template=args.bark_title_template,
+        body_template=args.bark_body_template,
+    ).normalized()
+    if alert_settings.threshold and alert_settings.bark_url:
+        LOGGER.info(
+            "Bark notifications enabled; risk alerts fire at %.1f%%",
+            alert_settings.threshold * 100,
         )
-        if risk_threshold:
-            LOGGER.info(
-                "Bark notifications enabled; risk alerts fire at %.1f%%",
-                risk_threshold * 100,
-            )
-        if not args.bark_append_title_body:
+        if not alert_settings.bark_append_payload:
             LOGGER.info("Bark notifier configured to skip automatic title/body appending")
     elif risk_threshold:
         LOGGER.warning(
@@ -2526,10 +2889,7 @@ async def _run_app(args: argparse.Namespace) -> None:
         dashboard_username=args.dashboard_username,
         dashboard_password=args.dashboard_password,
         dashboard_session_ttl=args.dashboard_session_ttl,
-        bark_notifier=bark_notifier,
-        risk_alert_threshold=risk_threshold,
-        risk_alert_reset=risk_reset,
-        risk_alert_cooldown=max(args.risk_alert_cooldown, 0.0),
+    alert_settings=alert_settings,
         enable_volatility_monitor=enable_vol_monitor,
         volatility_symbols=volatility_symbols,
         volatility_poll_interval=max(getattr(args, "volatility_poll_interval", 60.0), 20.0),
@@ -2643,6 +3003,20 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=_env_float("BARK_TIMEOUT", 10.0),
         help="HTTP timeout in seconds for Bark push requests.",
+    )
+    parser.add_argument(
+        "--bark-title-template",
+        default=os.getenv("BARK_TITLE_TEMPLATE", "GRVT Risk {ratio_percent:.1f}%"),
+        help="Template for Bark alert titles.",
+    )
+    parser.add_argument(
+        "--bark-body-template",
+        default=
+        os.getenv(
+            "BARK_BODY_TEMPLATE",
+            "{account_label} ({agent_id}) loss {loss_value} / {base_label} {base_value}",
+        ),
+        help="Template for Bark alert bodies.",
     )
     parser.add_argument(
         "--disable-volatility-monitor",
