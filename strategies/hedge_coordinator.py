@@ -1101,7 +1101,8 @@ class HedgeCoordinator:
         self._global_risk_stats = self._calculate_global_risk()
 
     def _calculate_global_risk(self) -> Optional[GlobalRiskSnapshot]:
-        total_transferable = Decimal("0")
+        total_equity_sum = Decimal("0")
+        total_initial_margin_sum = Decimal("0")
         worst_loss_value = Decimal("0")
         worst_agent_id: Optional[str] = None
         worst_account_label: Optional[str] = None
@@ -1115,13 +1116,13 @@ class HedgeCoordinator:
                 equity_value = self._select_equity_value(account_payload, summary)
                 if equity_value is None or equity_value <= 0:
                     continue
+                total_equity_sum += equity_value
                 total_pnl = self._decimal_from(account_payload.get("total_pnl"))
                 if total_pnl is None:
                     total_pnl = self._decimal_from(account_payload.get("total"))
                 initial_margin = self._compute_initial_margin_total(account_payload)
+                total_initial_margin_sum += initial_margin
                 transferable = self._compute_transferable_amount(equity_value, initial_margin, total_pnl)
-                if transferable is not None:
-                    total_transferable += transferable
                 if total_pnl is not None and total_pnl < 0:
                     abs_loss = abs(total_pnl)
                     if abs_loss > worst_loss_value:
@@ -1129,10 +1130,12 @@ class HedgeCoordinator:
                         worst_agent_id = agent_id
                         worst_account_label = account_label
 
-        if worst_loss_value <= 0 or total_transferable <= 0:
+        risk_capacity = total_equity_sum - total_initial_margin_sum
+
+        if worst_loss_value <= 0 or risk_capacity <= 0:
             snapshot = GlobalRiskSnapshot(
                 ratio=None,
-                total_transferable=total_transferable,
+                total_transferable=risk_capacity if risk_capacity > 0 else Decimal("0"),
                 worst_loss_value=worst_loss_value,
                 worst_agent_id=worst_agent_id,
                 worst_account_label=worst_account_label,
@@ -1140,10 +1143,10 @@ class HedgeCoordinator:
             self._record_transferable_history(snapshot.total_transferable)
             return snapshot
 
-        ratio = float(worst_loss_value / total_transferable)
+        ratio = float(worst_loss_value / risk_capacity)
         snapshot = GlobalRiskSnapshot(
             ratio=ratio,
-            total_transferable=total_transferable,
+            total_transferable=risk_capacity,
             worst_loss_value=worst_loss_value,
             worst_agent_id=worst_agent_id,
             worst_account_label=worst_account_label,
@@ -1570,7 +1573,7 @@ class HedgeCoordinator:
                         ratio=stats.ratio,
                         loss_value=stats.worst_loss_value,
                         base_value=stats.total_transferable,
-                        base_label="transferable",
+                        base_label="Equity-IM",
                     )
                 )
                 self._risk_alert_active[GLOBAL_RISK_ALERT_KEY] = True
@@ -1727,7 +1730,7 @@ class HedgeCoordinator:
                 ratio=ratio,
                 loss_value=loss_value,
                 base_value=base_value,
-                base_label="transferable",
+                base_label="Equity-IM",
             )
 
         await self._send_risk_alert(alert, source="test")

@@ -1426,9 +1426,9 @@
             <p class="summary-sub" id="grvt-wallet-balance">Wallet --</p>
           </article>
           <article class="card grvt-summary-card">
-            <h3>可转总额</h3>
+            <h3>风险基数</h3>
             <div class="value" id="grvt-transfer-total">--</div>
-            <p class="summary-sub" id="grvt-transfer-note">估算全部账号</p>
+            <p class="summary-sub" id="grvt-transfer-note">Σ Equity - Σ 初始保证金</p>
           </article>
           <article class="card grvt-summary-card">
             <h3>Risk Level</h3>
@@ -1532,7 +1532,7 @@
                     <th>来源</th>
                     <th>账户</th>
                     <th>风险%</th>
-                    <th>亏损 / 可转</th>
+                    <th>亏损 / 基数</th>
                   </tr>
                 </thead>
                 <tbody id="risk-history-body"></tbody>
@@ -1555,12 +1555,12 @@
           </div>
           <div class="grvt-chart-card hidden" id="grvt-transfer-chart-wrapper">
             <div class="grvt-chart-header">
-              <h3>可转总额走势</h3>
+              <h3>风险基数走势</h3>
               <span class="summary-sub" id="grvt-transfer-chart-note">等待数据…</span>
             </div>
             <canvas id="grvt-transfer-chart"></canvas>
             <div class="chart-legend" id="grvt-transfer-chart-legend">
-              <span><span class="legend-dot legend-transfer"></span>可转总额</span>
+              <span><span class="legend-dot legend-transfer"></span>风险基数</span>
               <span><span class="legend-dot legend-diff"></span>BTC-ETH Δ%</span>
             </div>
           </div>
@@ -2109,7 +2109,7 @@
   const GLOBAL_RISK_THRESHOLD_TEXT = '阈值 20% / 40% / 70%';
   const BTC_LINE_COLOR = '#f6c177';
   const ETH_LINE_COLOR = '#4cc9f0';
-  const TRANSFER_LINE_COLOR = '#c084fc';
+  const RISK_CAPACITY_LINE_COLOR = '#c084fc';
   const PRICE_DIFF_LINE_COLOR = '#7dd3fc';
   const DEFAULT_MARGIN_SCHEDULE = [
     { maxNotional: 600000, initial: 0.02, maintenance: 0.01 },
@@ -2126,10 +2126,10 @@
     BTC: DEFAULT_MARGIN_SCHEDULE,
     ETH: DEFAULT_MARGIN_SCHEDULE,
   };
-  const TRANSFERABLE_CONFIRMATION_CYCLES = 3;
-  const TRANSFERABLE_DEVIATION_THRESHOLD = 0.1;
-  const TRANSFERABLE_MIN_ABS_DELTA = 500;
-  const TRANSFERABLE_PENDING_TOLERANCE = 0.001;
+  const RISK_CAPACITY_CONFIRMATION_CYCLES = 3;
+  const RISK_CAPACITY_DEVIATION_THRESHOLD = 0.1;
+  const RISK_CAPACITY_MIN_ABS_DELTA = 500;
+  const RISK_CAPACITY_PENDING_TOLERANCE = 0.001;
       let batchBusy = false;
       let lastDefaultPaused = false;
       let selectedSpreadAgent = null;
@@ -2156,7 +2156,7 @@
   let riskHistoryEntries = [];
   let lastRiskHistoryFetch = 0;
   const RISK_HISTORY_REFRESH_INTERVAL = 5000;
-  const transferableBufferState = {
+  const riskCapacityBufferState = {
     acceptedValue: null,
     acceptedAt: null,
     pendingValue: null,
@@ -4015,27 +4015,27 @@
         };
       }
 
-      function acceptTransferableValue(value, timestamp) {
-        transferableBufferState.acceptedValue = Number.isFinite(value) ? value : null;
-        transferableBufferState.acceptedAt = Number.isFinite(timestamp) ? timestamp : Date.now() / 1000;
-        transferableBufferState.pendingValue = null;
-        transferableBufferState.pendingCycles = 0;
-        transferableBufferState.pendingDeltaPct = 0;
-        transferableBufferState.pendingSince = null;
+      function acceptRiskCapacityValue(value, timestamp) {
+        riskCapacityBufferState.acceptedValue = Number.isFinite(value) ? value : null;
+        riskCapacityBufferState.acceptedAt = Number.isFinite(timestamp) ? timestamp : Date.now() / 1000;
+        riskCapacityBufferState.pendingValue = null;
+        riskCapacityBufferState.pendingCycles = 0;
+        riskCapacityBufferState.pendingDeltaPct = 0;
+        riskCapacityBufferState.pendingSince = null;
       }
 
-      function evaluateTransferableBuffer({ hasValue, value, timestamp, baseNote }) {
+      function evaluateRiskCapacityBuffer({ hasValue, value, timestamp, baseNote }) {
         const safeBaseNote = baseNote || '';
         const safeTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now() / 1000;
 
         if (!hasValue || !Number.isFinite(value)) {
-          transferableBufferState.pendingValue = null;
-          transferableBufferState.pendingCycles = 0;
-          transferableBufferState.pendingDeltaPct = 0;
-          transferableBufferState.pendingSince = null;
-          const accepted = transferableBufferState.acceptedValue;
+          riskCapacityBufferState.pendingValue = null;
+          riskCapacityBufferState.pendingCycles = 0;
+          riskCapacityBufferState.pendingDeltaPct = 0;
+          riskCapacityBufferState.pendingSince = null;
+          const accepted = riskCapacityBufferState.acceptedValue;
           if (!Number.isFinite(accepted)) {
-            return { displayValue: null, note: safeBaseNote || '缺少可转额度数据', status: 'missing' };
+            return { displayValue: null, note: safeBaseNote || '缺少风险基数数据', status: 'missing' };
           }
           const noteParts = [];
           if (safeBaseNote) {
@@ -4049,34 +4049,34 @@
           };
         }
 
-        const previous = transferableBufferState.acceptedValue;
+        const previous = riskCapacityBufferState.acceptedValue;
         if (!Number.isFinite(previous)) {
-          acceptTransferableValue(value, safeTimestamp);
+          acceptRiskCapacityValue(value, safeTimestamp);
           return { displayValue: value, note: safeBaseNote, status: 'fresh' };
         }
 
         const delta = Math.abs(value - previous);
         const base = Math.max(Math.abs(previous), 1);
         const percentDelta = delta / base;
-        const exceedsThreshold = percentDelta >= TRANSFERABLE_DEVIATION_THRESHOLD && delta >= TRANSFERABLE_MIN_ABS_DELTA;
+        const exceedsThreshold = percentDelta >= RISK_CAPACITY_DEVIATION_THRESHOLD && delta >= RISK_CAPACITY_MIN_ABS_DELTA;
 
         if (!exceedsThreshold) {
-          acceptTransferableValue(value, safeTimestamp);
+          acceptRiskCapacityValue(value, safeTimestamp);
           return { displayValue: value, note: safeBaseNote, status: 'fresh' };
         }
 
-        const tolerance = Math.max(Math.abs(value), 1) * TRANSFERABLE_PENDING_TOLERANCE;
-        if (Number.isFinite(transferableBufferState.pendingValue) && Math.abs(transferableBufferState.pendingValue - value) <= tolerance) {
-          transferableBufferState.pendingCycles += 1;
+        const tolerance = Math.max(Math.abs(value), 1) * RISK_CAPACITY_PENDING_TOLERANCE;
+        if (Number.isFinite(riskCapacityBufferState.pendingValue) && Math.abs(riskCapacityBufferState.pendingValue - value) <= tolerance) {
+          riskCapacityBufferState.pendingCycles += 1;
         } else {
-          transferableBufferState.pendingValue = value;
-          transferableBufferState.pendingCycles = 1;
-          transferableBufferState.pendingSince = safeTimestamp;
+          riskCapacityBufferState.pendingValue = value;
+          riskCapacityBufferState.pendingCycles = 1;
+          riskCapacityBufferState.pendingSince = safeTimestamp;
         }
-        transferableBufferState.pendingDeltaPct = percentDelta;
+        riskCapacityBufferState.pendingDeltaPct = percentDelta;
 
-        if (transferableBufferState.pendingCycles >= TRANSFERABLE_CONFIRMATION_CYCLES) {
-          acceptTransferableValue(value, safeTimestamp);
+        if (riskCapacityBufferState.pendingCycles >= RISK_CAPACITY_CONFIRMATION_CYCLES) {
+          acceptRiskCapacityValue(value, safeTimestamp);
           return { displayValue: value, note: safeBaseNote, status: 'fresh' };
         }
 
@@ -4084,7 +4084,7 @@
         if (safeBaseNote) {
           noteParts.push(safeBaseNote);
         }
-        noteParts.push(`数据确认中 (${transferableBufferState.pendingCycles}/${TRANSFERABLE_CONFIRMATION_CYCLES})`);
+        noteParts.push(`数据确认中 (${riskCapacityBufferState.pendingCycles}/${RISK_CAPACITY_CONFIRMATION_CYCLES})`);
         noteParts.push(`偏差 ${formatPercent(percentDelta * 100, 1)}`);
         return {
           displayValue: previous,
@@ -4295,7 +4295,7 @@
         renderGrvtTransferHistory(summary);
       }
 
-      function normalizeTransferableSeries(history, limit = 720) {
+      function normalizeRiskCapacitySeries(history, limit = 720) {
         if (!Array.isArray(history)) {
           return [];
         }
@@ -4657,7 +4657,7 @@
             return;
           }
           const entries = [
-            '<span><span class="legend-dot legend-transfer"></span>可转总额</span>',
+            '<span><span class="legend-dot legend-transfer"></span>风险基数</span>',
           ];
           if (activeDiffSeries) {
             entries.push(
@@ -4666,16 +4666,16 @@
           }
           grvtTransferChartLegend.innerHTML = entries.join('');
         };
-        const transferPoints = normalizeTransferableSeries(data?.transferable_history);
+        const riskCapacityPoints = normalizeRiskCapacitySeries(data?.transferable_history);
         updateLegend();
-        if (!transferPoints.length) {
+        if (!riskCapacityPoints.length) {
           grvtTransferChartWrapper.classList.add('hidden');
           if (grvtTransferChartNote) {
             grvtTransferChartNote.textContent = '等待数据…';
           }
           return;
         }
-        const chartResult = renderTransferableCanvas(transferPoints, activeDiffSeries);
+        const chartResult = renderRiskCapacityCanvas(riskCapacityPoints, activeDiffSeries);
         if (!chartResult) {
           grvtTransferChartWrapper.classList.add('hidden');
           if (grvtTransferChartNote) {
@@ -4690,7 +4690,7 @@
         }
       }
 
-      function renderTransferableCanvas(transferPoints, diffSeries = null) {
+      function renderRiskCapacityCanvas(riskCapacityPoints, diffSeries = null) {
         if (!grvtTransferChartCanvas) {
           return null;
         }
@@ -4707,7 +4707,7 @@
   const values = [];
   const diffValues = [];
   let filteredDiffPoints = null;
-        for (const point of transferPoints) {
+        for (const point of riskCapacityPoints) {
           const ts = Number(point?.ts);
           const value = Number(point?.value);
           if (!Number.isFinite(ts) || !Number.isFinite(value)) {
@@ -4781,7 +4781,7 @@
           ctx.lineTo(width - layout.right, y);
           ctx.stroke();
         }
-        drawTimedSeries(ctx, transferPoints, mapX, mapY, TRANSFER_LINE_COLOR, 2.8);
+  drawTimedSeries(ctx, riskCapacityPoints, mapX, mapY, RISK_CAPACITY_LINE_COLOR, 2.8);
         if (filteredDiffPoints && diffBounds && mapDiffY) {
           const zeroDiffY = mapDiffY(0);
           if (zeroDiffY >= layout.top && zeroDiffY <= layout.top + innerHeight) {
@@ -4914,7 +4914,7 @@
             grvtTransferableTotal.textContent = '--';
           }
           if (grvtTransferableNote) {
-            grvtTransferableNote.textContent = 'Awaiting data…';
+            grvtTransferableNote.textContent = '等待风险基数数据…';
           }
           if (grvtRiskLevel) {
             grvtRiskLevel.textContent = '--';
@@ -5145,12 +5145,11 @@
           }
         }
 
-        let aggregateEquity = 0;
-        let aggregateWallet = 0;
-        let aggregateTransferable = 0;
-        let hasEquity = false;
-        let hasWallet = false;
-        let hasTransferableValue = false;
+    let aggregateEquity = 0;
+    let aggregateWallet = 0;
+  let aggregateInitialMargin = 0;
+  let hasEquity = false;
+  let hasWallet = false;
         let worstLossAccount = null;
 
         for (const entry of flattenedAccounts) {
@@ -5162,10 +5161,8 @@
             aggregateWallet += entry.walletValue;
             hasWallet = true;
           }
-          const transferableEstimate = entry.transferableEstimate;
-          if (transferableEstimate && Number.isFinite(transferableEstimate.value)) {
-            aggregateTransferable += transferableEstimate.value;
-            hasTransferableValue = true;
+          if (Number.isFinite(entry.initialMarginTotal)) {
+            aggregateInitialMargin += entry.initialMarginTotal;
           }
           const totalValue = Number(entry.totalValue);
           if (Number.isFinite(totalValue) && totalValue < 0) {
@@ -5195,31 +5192,33 @@
             ? `Wallet ${numberFormatter.format(aggregateWallet)}`
             : 'Wallet --';
         }
-        const transferableBaseNote = hasTransferableValue
-          ? `覆盖 ${aggregateAccountCount} 个账户`
-          : '缺少可转额度数据';
-        const bufferedTransferable = evaluateTransferableBuffer({
-          hasValue: hasTransferableValue,
-          value: hasTransferableValue ? aggregateTransferable : null,
+        const rawRiskCapacity = hasEquity ? aggregateEquity - aggregateInitialMargin : null;
+        const hasRiskCapacityValue = Number.isFinite(rawRiskCapacity) && rawRiskCapacity > 0;
+        const riskCapacityBaseNote = hasRiskCapacityValue
+          ? `覆盖 ${aggregateAccountCount} 个账户 · Equity-IM`
+          : '缺少风险基数数据';
+        const bufferedRiskCapacity = evaluateRiskCapacityBuffer({
+          hasValue: hasRiskCapacityValue,
+          value: hasRiskCapacityValue ? rawRiskCapacity : null,
           timestamp: latestUpdate,
-          baseNote: transferableBaseNote,
+          baseNote: riskCapacityBaseNote,
         });
-        const effectiveTransferable = Number.isFinite(bufferedTransferable.displayValue)
-          ? bufferedTransferable.displayValue
+        const effectiveRiskCapacity = Number.isFinite(bufferedRiskCapacity.displayValue)
+          ? bufferedRiskCapacity.displayValue
           : null;
 
         if (grvtTransferableTotal) {
-          grvtTransferableTotal.textContent = Number.isFinite(effectiveTransferable)
-            ? numberFormatter.format(effectiveTransferable)
+          grvtTransferableTotal.textContent = Number.isFinite(effectiveRiskCapacity)
+            ? numberFormatter.format(effectiveRiskCapacity)
             : '--';
         }
         if (grvtTransferableNote) {
-          grvtTransferableNote.textContent = bufferedTransferable.note;
+          grvtTransferableNote.textContent = bufferedRiskCapacity.note;
         }
 
         if (grvtRiskLevel && grvtRiskDetail) {
-          const denominator = Number.isFinite(effectiveTransferable) && effectiveTransferable > 0
-            ? effectiveTransferable
+          const denominator = Number.isFinite(effectiveRiskCapacity) && effectiveRiskCapacity > 0
+            ? effectiveRiskCapacity
             : null;
           if (worstLossAccount && denominator) {
             const riskRatio = worstLossAccount.lossValue / denominator;
@@ -5230,13 +5229,13 @@
               ? `${worstLossAccount.accountName} (${worstLossAccount.agentId})`
               : worstLossAccount.agentId;
             const lossText = numberFormatter.format(worstLossAccount.lossValue ?? 0);
-            const transferableText = numberFormatter.format(denominator);
-            grvtRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 可转 ${transferableText} · ${getRiskThresholdSummary()}`;
+            const riskCapacityText = numberFormatter.format(denominator);
+            grvtRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 基数 ${riskCapacityText} · ${getRiskThresholdSummary()}`;
           } else if (worstLossAccount && !denominator) {
             latestGlobalRiskRatio = null;
             grvtRiskLevel.textContent = '—';
             applyRiskTone(grvtRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
-            grvtRiskDetail.textContent = '缺少可转额度数据，无法计算 RISK';
+            grvtRiskDetail.textContent = '缺少风险基数数据，无法计算 RISK';
           } else {
             latestGlobalRiskRatio = null;
             grvtRiskLevel.textContent = '—';
