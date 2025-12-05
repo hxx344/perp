@@ -2033,6 +2033,10 @@
     BTC: DEFAULT_MARGIN_SCHEDULE,
     ETH: DEFAULT_MARGIN_SCHEDULE,
   };
+  const TRANSFERABLE_CONFIRMATION_CYCLES = 3;
+  const TRANSFERABLE_DEVIATION_THRESHOLD = 0.1;
+  const TRANSFERABLE_MIN_ABS_DELTA = 500;
+  const TRANSFERABLE_PENDING_TOLERANCE = 0.001;
       let batchBusy = false;
       let lastDefaultPaused = false;
       let selectedSpreadAgent = null;
@@ -2055,6 +2059,14 @@
   let riskSettingsSnapshot = null;
   let riskTestBusy = false;
   let latestGlobalRiskRatio = null;
+  const transferableBufferState = {
+    acceptedValue: null,
+    acceptedAt: null,
+    pendingValue: null,
+    pendingCycles: 0,
+    pendingDeltaPct: 0,
+    pendingSince: null,
+  };
 
       const numberFormatter = new Intl.NumberFormat(undefined, {
         minimumFractionDigits: 2,
@@ -3818,6 +3830,84 @@
         };
       }
 
+      function acceptTransferableValue(value, timestamp) {
+        transferableBufferState.acceptedValue = Number.isFinite(value) ? value : null;
+        transferableBufferState.acceptedAt = Number.isFinite(timestamp) ? timestamp : Date.now() / 1000;
+        transferableBufferState.pendingValue = null;
+        transferableBufferState.pendingCycles = 0;
+        transferableBufferState.pendingDeltaPct = 0;
+        transferableBufferState.pendingSince = null;
+      }
+
+      function evaluateTransferableBuffer({ hasValue, value, timestamp, baseNote }) {
+        const safeBaseNote = baseNote || '';
+        const safeTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now() / 1000;
+
+        if (!hasValue || !Number.isFinite(value)) {
+          transferableBufferState.pendingValue = null;
+          transferableBufferState.pendingCycles = 0;
+          transferableBufferState.pendingDeltaPct = 0;
+          transferableBufferState.pendingSince = null;
+          const accepted = transferableBufferState.acceptedValue;
+          if (!Number.isFinite(accepted)) {
+            return { displayValue: null, note: safeBaseNote || '缺少可转额度数据', status: 'missing' };
+          }
+          const noteParts = [];
+          if (safeBaseNote) {
+            noteParts.push(safeBaseNote);
+          }
+          noteParts.push('沿用上次值');
+          return {
+            displayValue: accepted,
+            note: noteParts.join(' · '),
+            status: 'stale',
+          };
+        }
+
+        const previous = transferableBufferState.acceptedValue;
+        if (!Number.isFinite(previous)) {
+          acceptTransferableValue(value, safeTimestamp);
+          return { displayValue: value, note: safeBaseNote, status: 'fresh' };
+        }
+
+        const delta = Math.abs(value - previous);
+        const base = Math.max(Math.abs(previous), 1);
+        const percentDelta = delta / base;
+        const exceedsThreshold = percentDelta >= TRANSFERABLE_DEVIATION_THRESHOLD && delta >= TRANSFERABLE_MIN_ABS_DELTA;
+
+        if (!exceedsThreshold) {
+          acceptTransferableValue(value, safeTimestamp);
+          return { displayValue: value, note: safeBaseNote, status: 'fresh' };
+        }
+
+        const tolerance = Math.max(Math.abs(value), 1) * TRANSFERABLE_PENDING_TOLERANCE;
+        if (Number.isFinite(transferableBufferState.pendingValue) && Math.abs(transferableBufferState.pendingValue - value) <= tolerance) {
+          transferableBufferState.pendingCycles += 1;
+        } else {
+          transferableBufferState.pendingValue = value;
+          transferableBufferState.pendingCycles = 1;
+          transferableBufferState.pendingSince = safeTimestamp;
+        }
+        transferableBufferState.pendingDeltaPct = percentDelta;
+
+        if (transferableBufferState.pendingCycles >= TRANSFERABLE_CONFIRMATION_CYCLES) {
+          acceptTransferableValue(value, safeTimestamp);
+          return { displayValue: value, note: safeBaseNote, status: 'fresh' };
+        }
+
+        const noteParts = [];
+        if (safeBaseNote) {
+          noteParts.push(safeBaseNote);
+        }
+        noteParts.push(`数据确认中 (${transferableBufferState.pendingCycles}/${TRANSFERABLE_CONFIRMATION_CYCLES})`);
+        noteParts.push(`偏差 ${formatPercent(percentDelta * 100, 1)}`);
+        return {
+          displayValue: previous,
+          note: noteParts.join(' · '),
+          status: 'pending',
+        };
+      }
+
       function updateGrvtSymbolOptions(symbols) {
         if (!grvtAdjustSymbolsSelect) {
           return;
@@ -4920,22 +5010,31 @@
             ? `Wallet ${numberFormatter.format(aggregateWallet)}`
             : 'Wallet --';
         }
+        const transferableBaseNote = hasTransferableValue
+          ? `覆盖 ${aggregateAccountCount} 个账户`
+          : '缺少可转额度数据';
+        const bufferedTransferable = evaluateTransferableBuffer({
+          hasValue: hasTransferableValue,
+          value: hasTransferableValue ? aggregateTransferable : null,
+          timestamp: latestUpdate,
+          baseNote: transferableBaseNote,
+        });
+        const effectiveTransferable = Number.isFinite(bufferedTransferable.displayValue)
+          ? bufferedTransferable.displayValue
+          : null;
+
         if (grvtTransferableTotal) {
-          grvtTransferableTotal.textContent = hasTransferableValue
-            ? numberFormatter.format(aggregateTransferable)
+          grvtTransferableTotal.textContent = Number.isFinite(effectiveTransferable)
+            ? numberFormatter.format(effectiveTransferable)
             : '--';
         }
         if (grvtTransferableNote) {
-          if (hasTransferableValue) {
-            grvtTransferableNote.textContent = `覆盖 ${aggregateAccountCount} 个账户`;
-          } else {
-            grvtTransferableNote.textContent = '缺少可转额度数据';
-          }
+          grvtTransferableNote.textContent = bufferedTransferable.note;
         }
 
         if (grvtRiskLevel && grvtRiskDetail) {
-          const denominator = hasTransferableValue && aggregateTransferable > 0
-            ? aggregateTransferable
+          const denominator = Number.isFinite(effectiveTransferable) && effectiveTransferable > 0
+            ? effectiveTransferable
             : null;
           if (worstLossAccount && denominator) {
             const riskRatio = worstLossAccount.lossValue / denominator;
