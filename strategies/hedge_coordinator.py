@@ -157,6 +157,7 @@ MAX_STRATEGY_TRADES = 200
 GLOBAL_RISK_ALERT_KEY = "__global_risk__"
 TRANSFERABLE_HISTORY_LIMIT = 720
 TRANSFERABLE_HISTORY_MERGE_SECONDS = 20.0
+ALERT_HISTORY_LIMIT = 200
 
 DEFAULT_MARGIN_SCHEDULE: Tuple[Tuple[str, str, str], ...] = (
     ("600000", "0.02", "0.01"),
@@ -995,6 +996,8 @@ class HedgeCoordinator:
         self._risk_alert_active: Dict[str, bool] = {}
         self._risk_alert_last_ts: Dict[str, float] = {}
         self._global_risk_stats: Optional[GlobalRiskSnapshot] = None
+        self._alert_history: Deque[Dict[str, Any]] = deque(maxlen=ALERT_HISTORY_LIMIT)
+        self._alert_history_lock = asyncio.Lock()
 
     def _apply_alert_settings(self, settings: Optional[RiskAlertSettings] = None) -> None:
         if settings is not None:
@@ -1340,6 +1343,52 @@ class HedgeCoordinator:
             "worst_account_label": stats.worst_account_label,
         }
 
+    async def alert_history_snapshot(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        async with self._alert_history_lock:
+            entries = list(self._alert_history)
+        if limit is not None and limit > 0:
+            entries = entries[-limit:]
+        # newest first for UI
+        return [copy.deepcopy(entry) for entry in reversed(entries)]
+
+    async def _record_alert_history(
+        self,
+        alert: RiskAlertInfo,
+        *,
+        source: str,
+        status: str,
+        title: str,
+        body: str,
+        error: Optional[str] = None,
+    ) -> None:
+        def _to_float(value: Decimal) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        entry = {
+            "timestamp": time.time(),
+            "source": source,
+            "status": status,
+            "agent_id": alert.agent_id,
+            "account_label": alert.account_label,
+            "ratio": alert.ratio,
+            "ratio_percent": alert.ratio * 100 if alert.ratio is not None else None,
+            "loss_value": self._format_decimal(alert.loss_value),
+            "loss_value_raw": _to_float(alert.loss_value),
+            "base_value": self._format_decimal(alert.base_value),
+            "base_value_raw": _to_float(alert.base_value),
+            "base_label": alert.base_label or "wallet",
+            "title": title,
+            "body": body,
+            "error": error,
+        }
+        async with self._alert_history_lock:
+            self._alert_history.append(entry)
+
     async def set_all_paused(self, paused: bool) -> Dict[str, Any]:
         async with self._lock:
             self._default_paused = bool(paused)
@@ -1608,9 +1657,9 @@ class HedgeCoordinator:
             LOGGER.warning("Unable to schedule Bark alert; event loop not running")
             return
         for alert in alerts:
-            loop.create_task(self._send_risk_alert(alert))
+            loop.create_task(self._send_risk_alert(alert, source="auto"))
 
-    async def _send_risk_alert(self, alert: RiskAlertInfo) -> None:
+    async def _send_risk_alert(self, alert: RiskAlertInfo, *, source: str = "auto") -> None:
         if self._bark_notifier is None:
             return
         title = f"GRVT Risk {alert.ratio * 100:.1f}%"
@@ -1619,7 +1668,23 @@ class HedgeCoordinator:
             f"{alert.account_label} ({alert.agent_id}) loss {self._format_decimal(alert.loss_value)} "
             f"/ {base_label} {self._format_decimal(alert.base_value)}"
         )
-        await self._bark_notifier.send(title=title, body=body)
+        status = "sent"
+        error_message = None
+        try:
+            await self._bark_notifier.send(title=title, body=body)
+        except Exception as exc:  # pragma: no cover - network path
+            status = "error"
+            error_message = str(exc)
+            LOGGER.warning("Bark alert delivery failed: %s", exc)
+        finally:
+            await self._record_alert_history(
+                alert,
+                source=source,
+                status=status,
+                title=title,
+                body=body,
+                error=error_message,
+            )
 
     async def trigger_test_alert(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         overrides = overrides or {}
@@ -1665,7 +1730,7 @@ class HedgeCoordinator:
                 base_label="transferable",
             )
 
-        await self._send_risk_alert(alert)
+        await self._send_risk_alert(alert, source="test")
         return {
             "agent_id": alert.agent_id,
             "account_label": alert.account_label,
@@ -1737,6 +1802,7 @@ class CoordinatorApp:
                 web.post("/auto_balance/config", self.handle_auto_balance_update),
                 web.get("/risk_alert/settings", self.handle_risk_alert_settings),
                 web.post("/risk_alert/settings", self.handle_risk_alert_update),
+                web.get("/risk_alert/history", self.handle_risk_alert_history),
                 web.post("/risk_alert/test", self.handle_risk_alert_test),
                 web.get("/grvt/adjustments", self.handle_grvt_adjustments),
                 web.post("/grvt/adjust", self.handle_grvt_adjust),
@@ -1901,6 +1967,18 @@ class CoordinatorApp:
         self._enforce_dashboard_auth(request)
         payload = await self._coordinator.alert_settings_snapshot()
         return web.json_response({"settings": payload})
+
+    async def handle_risk_alert_history(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        limit_param = request.rel_url.query.get("limit")
+        limit: Optional[int] = None
+        if limit_param is not None:
+            try:
+                limit = max(1, min(int(limit_param), ALERT_HISTORY_LIMIT))
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text="limit must be a positive integer")
+        history = await self._coordinator.alert_history_snapshot(limit=limit)
+        return web.json_response({"history": history})
 
     async def handle_risk_alert_update(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)

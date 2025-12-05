@@ -531,6 +531,73 @@
         color: #8a94a6;
       }
 
+      .risk-history-card {
+        margin-top: 1.25rem;
+        padding: 1rem 1.1rem 1.2rem;
+        border-radius: 12px;
+        background: #0d111a;
+        border: 1px solid rgba(255, 255, 255, 0.04);
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.015);
+      }
+
+      .risk-history-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+      }
+
+      .risk-history-header h3 {
+        margin: 0;
+        font-size: 1rem;
+      }
+
+      .risk-history-status {
+        margin: 0 0 0.75rem;
+        font-size: 0.8rem;
+        color: #8a94a6;
+      }
+
+      .risk-history-table-wrapper {
+        max-height: 280px;
+        overflow-y: auto;
+        border: 1px solid rgba(255, 255, 255, 0.04);
+        border-radius: 10px;
+      }
+
+      .risk-history-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.78rem;
+      }
+
+      .risk-history-table th,
+      .risk-history-table td {
+        padding: 0.45rem 0.6rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        text-align: left;
+      }
+
+      .risk-history-table th {
+        font-size: 0.75rem;
+        color: #8a94a6;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+
+      .risk-history-table td:last-child,
+      .risk-history-table th:last-child {
+        text-align: right;
+      }
+
+      .risk-history-empty {
+        margin: 0;
+        padding: 0.75rem;
+        text-align: center;
+        color: #8a94a6;
+      }
+
       .risk-meta {
         margin: 0.85rem 0 0;
         font-size: 0.82rem;
@@ -1451,6 +1518,28 @@
             <p class="risk-settings-message" id="risk-settings-message">未加载</p>
             <p class="risk-settings-message" id="risk-test-message"></p>
           </div>
+          <div class="risk-history-card">
+            <div class="risk-history-header">
+              <h3>告警历史</h3>
+              <button type="button" class="button-ghost" id="risk-history-refresh">刷新</button>
+            </div>
+            <p class="risk-history-status" id="risk-history-status">等待告警数据…</p>
+            <div class="risk-history-table-wrapper">
+              <table class="risk-history-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>来源</th>
+                    <th>账户</th>
+                    <th>风险%</th>
+                    <th>亏损 / 可转</th>
+                  </tr>
+                </thead>
+                <tbody id="risk-history-body"></tbody>
+              </table>
+              <p class="risk-history-empty hidden" id="risk-history-empty">暂无告警</p>
+            </div>
+          </div>
         </div>
         <div class="grvt-chart-grid">
           <div class="grvt-chart-card hidden" id="grvt-price-chart-wrapper">
@@ -1879,6 +1968,10 @@
   const riskTestButton = document.getElementById('risk-settings-test');
   const riskDisableButton = document.getElementById('risk-settings-disable');
   const riskRefreshButton = document.getElementById('risk-settings-refresh');
+  const riskHistoryBody = document.getElementById('risk-history-body');
+  const riskHistoryEmpty = document.getElementById('risk-history-empty');
+  const riskHistoryStatus = document.getElementById('risk-history-status');
+  const riskHistoryRefreshButton = document.getElementById('risk-history-refresh');
   const grvtAdjustPanel = document.getElementById('grvt-adjust-panel');
   const grvtAdjustSizeInput = document.getElementById('grvt-adjust-size');
   const grvtAdjustSymbolsSelect = document.getElementById('grvt-adjust-symbols');
@@ -2059,6 +2152,10 @@
   let riskSettingsSnapshot = null;
   let riskTestBusy = false;
   let latestGlobalRiskRatio = null;
+  let riskHistoryBusy = false;
+  let riskHistoryEntries = [];
+  let lastRiskHistoryFetch = 0;
+  const RISK_HISTORY_REFRESH_INTERVAL = 5000;
   const transferableBufferState = {
     acceptedValue: null,
     acceptedAt: null,
@@ -3468,6 +3565,94 @@
         if (element) {
           element.textContent = message || '';
         }
+      }
+
+      function describeRiskAlertSource(entry) {
+        if (!entry) {
+          return '—';
+        }
+        const source = String(entry.source || 'auto').toLowerCase();
+        let label = source === 'test' ? '测试' : '自动';
+        if (entry.status === 'error') {
+          label += ' · 失败';
+        }
+        return label;
+      }
+
+      function renderRiskHistory(entries) {
+        if (!riskHistoryBody || !riskHistoryEmpty) {
+          return;
+        }
+        riskHistoryBody.innerHTML = '';
+        if (!Array.isArray(entries) || !entries.length) {
+          riskHistoryEmpty.classList.remove('hidden');
+          return;
+        }
+        riskHistoryEmpty.classList.add('hidden');
+        const fragment = document.createDocumentFragment();
+        for (const entry of entries) {
+          const row = document.createElement('tr');
+          const timeText = formatTimestamp(entry.timestamp) || '—';
+          const sourceText = describeRiskAlertSource(entry);
+          const accountLabel = entry.account_label || 'Global';
+          const agentLabel = entry.agent_id ? ` (${entry.agent_id})` : '';
+          const ratioPercent = Number.isFinite(entry?.ratio_percent)
+            ? entry.ratio_percent
+            : Number.isFinite(entry?.ratio)
+              ? entry.ratio * 100
+              : null;
+          const ratioText = Number.isFinite(ratioPercent) ? formatPercent(ratioPercent, 1) : '—';
+          const baseLabel = entry.base_label ? ` ${entry.base_label}` : '';
+          const lossText = `${entry.loss_value || '--'} / ${entry.base_value || '--'}${baseLabel}`;
+          row.innerHTML = `
+            <td>${escapeHtml(timeText)}</td>
+            <td>${escapeHtml(sourceText)}</td>
+            <td>${escapeHtml(accountLabel + agentLabel)}</td>
+            <td>${escapeHtml(ratioText)}</td>
+            <td>${escapeHtml(lossText)}</td>
+          `;
+          fragment.appendChild(row);
+        }
+        riskHistoryBody.appendChild(fragment);
+      }
+
+      async function loadRiskHistory({ silent = false } = {}) {
+        if (riskHistoryBusy) {
+          return;
+        }
+        const now = performance.now();
+        if (silent && now - lastRiskHistoryFetch < RISK_HISTORY_REFRESH_INTERVAL) {
+          return;
+        }
+        riskHistoryBusy = true;
+        if (!silent && riskHistoryStatus) {
+          riskHistoryStatus.textContent = '读取告警历史…';
+        }
+        try {
+          const response = await fetch('/risk_alert/history', { cache: 'no-store' });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          riskHistoryEntries = Array.isArray(result?.history) ? result.history : [];
+          renderRiskHistory(riskHistoryEntries);
+          lastRiskHistoryFetch = performance.now();
+          if (riskHistoryStatus) {
+            riskHistoryStatus.textContent = `已加载 ${riskHistoryEntries.length} 条告警`;
+          }
+        } catch (error) {
+          if (riskHistoryStatus) {
+            riskHistoryStatus.textContent = `读取失败：${error}`;
+          }
+        } finally {
+          riskHistoryBusy = false;
+        }
+      }
+
+      function maybeRefreshRiskHistory() {
+        loadRiskHistory({ silent: true });
       }
 
       function updateRiskInputsState() {
@@ -6112,6 +6297,7 @@
           renderAutoBalance(data?.auto_balance, data?.agents);
           renderSpread(data);
           renderStrategy(data);
+          maybeRefreshRiskHistory();
         } catch (error) {
           updatedElement.textContent = `Dashboard error: ${error}`;
           agentCount.textContent = '—';
@@ -6279,6 +6465,11 @@
           loadRiskSettings({ silent: false });
         });
       }
+      if (riskHistoryRefreshButton) {
+        riskHistoryRefreshButton.addEventListener('click', () => {
+          loadRiskHistory({ silent: false });
+        });
+      }
       if (riskAlertEnabledInput) {
         riskAlertEnabledInput.addEventListener('change', () => {
           updateRiskInputsState();
@@ -6325,6 +6516,7 @@
       updateGrvtTransferButtons();
       updateAutoBalanceButtons();
       updateRiskButtons();
+  loadRiskHistory({ silent: true });
       loadAutoBalanceConfig({ silent: true });
       loadRiskSettings({ silent: true });
       refreshMetrics();
