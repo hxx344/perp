@@ -298,6 +298,47 @@ class LighterClient(BaseExchangeClient):
             return value
         return units * step
 
+    @staticmethod
+    def _normalize_client_order_index(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            text_value = str(value).strip()
+        except Exception:
+            return None
+
+        if not text_value:
+            return None
+
+        try:
+            return int(text_value)
+        except (TypeError, ValueError):
+            pass
+
+        try:
+            decimal_value = Decimal(text_value)
+        except (InvalidOperation, ValueError):
+            return None
+
+        integral_candidate = decimal_value.to_integral_value(rounding=ROUND_HALF_UP)
+        if integral_candidate == decimal_value:
+            try:
+                return int(integral_candidate)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    @classmethod
+    def _client_order_index_equals(cls, value: Any, reference: Any) -> bool:
+        lhs = cls._normalize_client_order_index(value)
+        rhs = cls._normalize_client_order_index(reference)
+        return lhs is not None and rhs is not None and lhs == rhs
+
     def _apply_spot_trade_constraints(self, quantity: Decimal, price: Decimal) -> Decimal:
         if not self._is_spot_market():
             return quantity
@@ -930,7 +971,15 @@ class LighterClient(BaseExchangeClient):
                 except Exception as exc:  # pragma: no cover - logging safeguard
                     self.logger.log(f"Error invoking external order handler: {exc}", "ERROR")
 
-            if order_data['client_order_index'] == self.current_order_client_id or order_type == 'OPEN':
+            matches_client_order = self._client_order_index_equals(
+                order_data.get('client_order_index'),
+                self.current_order_client_id,
+            )
+            should_track_order = matches_client_order or (
+                self.current_order_client_id is None and order_type == 'OPEN'
+            )
+
+            if should_track_order:
                 current_order = OrderInfo(
                     order_id=order_id,
                     side=side,
