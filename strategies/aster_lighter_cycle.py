@@ -3791,6 +3791,23 @@ class HedgingCycleExecutor:
 
             start = time.time()
 
+            position_before: Optional[Decimal] = None
+            expected_final_position: Optional[Decimal] = None
+            try:
+                position_before = await self.lighter_client.get_account_positions()
+            except Exception as exc:
+                self.logger.log(
+                    f"{leg_name} | Could not fetch Lighter position before order: {exc}",
+                    "WARNING",
+                )
+
+            direction_normalized = direction.lower()
+            if position_before is not None:
+                if direction_normalized == "buy":
+                    expected_final_position = position_before + order_quantity
+                elif direction_normalized == "sell":
+                    expected_final_position = position_before - order_quantity
+
             order_result = await self.lighter_client.place_limit_order(
                 self.lighter_config.contract_id,
                 order_quantity,
@@ -3841,8 +3858,10 @@ class HedgingCycleExecutor:
                 fill_info = await self._wait_for_lighter_fill(
                     str(order_result.order_id),
                     leg_name,
+                    expected_final_position=expected_final_position,
                     expected_fill_size=order_quantity,
                     expected_side=direction,
+                    position_before=position_before,
                 )
             except SkipCycleError:
                 self.logger.log(
@@ -3976,22 +3995,31 @@ class HedgingCycleExecutor:
             # Absolute target check: compare actual final position to expected final position
             expected_match = abs(position_after - expected_final_position) <= tolerance
         elif (
-            expected_final_position is None
-            and expected_fill_size is not None
+            expected_fill_size is not None
             and expected_side is not None
             and position_after is not None
         ):
-            # Delta-based check: if we don't know the starting position, assume we expect at least
-            # expected_fill_size movement in the expected direction.
+            # Delta-based check: prefer comparing against the observed movement when possible.
             side_norm = expected_side.lower()
+            movement = None
+            if position_before is not None:
+                movement = position_after - position_before
+
+            threshold = expected_fill_size - tolerance
             if side_norm == "buy":
-                expected_match = position_after >= (expected_fill_size - tolerance)
+                if movement is not None:
+                    expected_match = movement >= threshold
+                else:
+                    expected_match = position_after >= threshold
             elif side_norm == "sell":
-                expected_match = (-position_after) >= (expected_fill_size - tolerance)
+                if movement is not None:
+                    expected_match = (-movement) >= threshold
+                else:
+                    expected_match = (-position_after) >= threshold
 
         if expected_match:
             fill_size = expected_fill_size
-            if fill_size is None and position_after is not None and position_before is not None:
+            if position_after is not None and position_before is not None:
                 fill_size = abs(position_after - position_before)
 
             if fill_size is None:

@@ -1,8 +1,25 @@
 import asyncio
+import sys
+import types
 from decimal import Decimal
 from typing import Any, cast
 
 import pytest
+
+
+if "edgex_sdk" not in sys.modules:
+    class _StubEdgeXClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover - test shim
+            pass
+
+    class _StubEdgeXParams:  # pragma: no cover - test shim
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    edgex_module = types.ModuleType("edgex_sdk")
+    setattr(edgex_module, "Client", _StubEdgeXClient)
+    setattr(edgex_module, "GetOrderBookDepthParams", _StubEdgeXParams)
+    sys.modules["edgex_sdk"] = edgex_module
 
 from strategies.aster_lighter_cycle import (
     CycleConfig,
@@ -98,3 +115,20 @@ def test_wait_for_lighter_fill_delta_based_success_without_expected_final():
 
     assert result.status == "FILLED"
     assert result.filled_size == Decimal("1")
+
+
+def test_wait_for_lighter_fill_sell_delta_with_position_before():
+    executor = _make_executor(position_after=Decimal("0.5"))
+
+    result = asyncio.run(
+        executor._wait_for_lighter_fill(
+            "126",
+            "LEG2",
+            expected_fill_size=Decimal("0.1"),
+            expected_side="sell",
+            position_before=Decimal("0.6"),
+        )
+    )
+
+    assert result.status == "FILLED"
+    assert result.filled_size == Decimal("0.1")
