@@ -90,6 +90,8 @@ class LighterClient(BaseExchangeClient):
         self.default_leverage: Optional[int] = None
         self.max_leverage: Optional[int] = None
         self._last_confirmed_tier_name: Optional[str] = None
+        debug_flag = os.getenv("LIGHTER_DEBUG_ORDERS") or ""
+        self._debug_orders: bool = debug_flag.strip().lower() in {"1", "true", "yes", "on"}
 
     def _require_lighter_client(self) -> SignerClient:
         client = self.lighter_client
@@ -922,8 +924,18 @@ class LighterClient(BaseExchangeClient):
 
         # Create order using official SDK
         lighter_client = self._require_lighter_client()
+        if self._debug_orders:
+            self.logger.log(
+                f"Lighter order params: {order_params}",
+                "INFO",
+            )
         create_order, tx_hash, error = await lighter_client.create_order(**order_params)
         if error is not None:
+            if self._debug_orders:
+                self.logger.log(
+                    f"Lighter order error -> tx_hash={tx_hash}, error={error}",
+                    "ERROR",
+                )
             return OrderResult(
                 success=False, order_id=str(order_params['client_order_index']),
                 error_message=f"Order creation error: {error}")
