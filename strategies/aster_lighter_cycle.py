@@ -1100,6 +1100,7 @@ class CycleConfig:
     enforce_min_cycle_interval: bool = True
     lighter_leverage: int = 50
     lighter_market_type: str = "perp"
+    lighter_spot_market_id: Optional[str] = None
 
 
 @dataclass
@@ -2150,6 +2151,11 @@ class HedgingCycleExecutor:
             boost_mode=False,
         )
         setattr(self.lighter_config, "market_type", self._lighter_market_type)
+        spot_market_override = None
+        if self._lighter_market_type == "spot":
+            spot_market_override = getattr(config, "lighter_spot_market_id", None) or os.getenv("LIGHTER_SPOT_MARKET_ID")
+        if spot_market_override:
+            setattr(self.lighter_config, "spot_market_id", str(spot_market_override).strip())
 
         self.aster_client: Optional["AsterClient"] = None
         self.lighter_client: Optional["LighterClient"] = None
@@ -4718,6 +4724,10 @@ def _parse_args() -> argparse.Namespace:
         help="Select the Lighter trading route. Spot mode skips leverage enforcement and uses spot balances.",
     )
     parser.add_argument(
+        "--lighter-spot-market-id",
+        help="Override the Lighter spot market id (defaults to 2048 when --lighter-market-type=spot)",
+    )
+    parser.add_argument(
         "--l1-private-key",
         help=(
             "Optional L1 wallet private key. When provided, existing private key and Lighter API credentials "
@@ -5112,6 +5122,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         enforce_min_cycle_interval=not bool(getattr(args, "disable_min_cycle_interval", False)),
         lighter_leverage=lighter_leverage,
         lighter_market_type=lighter_market_type,
+        lighter_spot_market_id=getattr(args, "lighter_spot_market_id", None),
     )
 
     executor = HedgingCycleExecutor(config)

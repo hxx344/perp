@@ -313,6 +313,7 @@ python strategies/aster_lighter_cycle.py \
 - `--aster-leg3-depth` 可为第三条 Aster 反向 Maker 挂单单独设置深度，未提供时默认跟随 `--aster-maker-depth`。
 - 每轮执行前脚本会自动检查配置的 L1 钱包，如果原生 USDC 余额大于 1 USDC，会先发起充值到 Lighter 账户后再开始下一轮。
 - `--lighter-market-type {perp,spot}`：选择 Lighter 交易路由。`perp`（默认）走永续接口并应用 `--lighter-leverage`；`spot` 会跳过杠杆设定，直接使用现货余额下单，并在循环开始前按照可用底仓自动收紧每腿数量，避免出现“卖空现货”的情况。
+- `--lighter-spot-market-id`：仅在 `--lighter-market-type spot` 时生效，强制 Lighter 使用指定的现货 `market_id`（默认固定为 `2048`，也可以通过环境变量 `LIGHTER_SPOT_MARKET_ID` 覆盖）。
 - `--take-profit` 参数目前保留兼容性，但不会影响 Aster 反向 Maker 的挂单价格。
 - 默认等待超时为 5 秒，可通过 `--max-wait` 调整。
 - `--max-retries` 默认 100 次，`--retry-delay` 默认 5 秒，两者共同控制 Aster Maker 单的重试次数与重试间隔，避免超时直接退出。
@@ -323,6 +324,31 @@ python strategies/aster_lighter_cycle.py \
    选择 `--virtual-maker-price-source edgex` 则可使用 EdgeX 行情：若配置了 `EDGEX_ACCOUNT_ID` 与
    `EDGEX_STARK_PRIVATE_KEY` 会走官方 SDK，否则自动退回公开 WebSocket (`EDGEX_PUBLIC_WS_URL` 可覆写)。
    如需自定义监听合约，可通过 `--virtual-maker-symbol` 覆盖（默认沿用解析到的 Aster 合约 ID 或标的）。
+
+### 现货快速脚本示例
+
+如果想要一个更轻量、开箱即用的现货示例，可以直接运行 `examples/lighter_spot_cycle_example.py`。
+该脚本会自动设置 Lighter 为 `spot` 路由、捕捉初始库存，并打印每一轮四腿对冲的摘要，适合作为
+自定义开发的模板：
+
+```powershell
+cd d:/project8/perp-dex-tools
+$env:SPOT_MAX_CYCLES=3            # 可选：执行 3 轮后退出，设 0 持续运行
+$env:SPOT_QUANTITY=0.4            # 可选：覆盖每腿数量（Decimal 字符串）
+D:/project8/.venv/Scripts/python.exe examples/lighter_spot_cycle_example.py
+```
+
+脚本会默认读取同目录下的 `.env`，可通过 `SPOT_ENV_FILE` 指定其它路径。其余可调环境变量：
+
+- `SPOT_ASTER_TICKER` / `SPOT_LIGHTER_TICKER`：标的符号（默认 `ETH` / `ETH-PERP`）。
+- `SPOT_DIRECTION`：`buy` / `sell`，决定初始 Maker 方向。
+- `SPOT_SLIPPAGE_PCT`：Lighter Taker 相对 Aster 成交价的滑点百分比（默认 `0.08`）。
+- `SPOT_CYCLE_DELAY`：两轮之间额外等待秒数（默认 1s，可设为 `0`）。
+- `SPOT_VIRTUAL_MAKER=1`：仅监听行情，不在 Aster 真正下单，方便冷启动测试。
+- `SPOT_LIGHTER_MARKET_ID`：强制脚本使用指定的 Lighter 现货 `market_id`（默认 2048）。
+
+其余逻辑沿用 `HedgingCycleExecutor`，因此 `.env` 中仍需配置 Aster/Lighter 的完整凭证。可根据需要
+复制该脚本并加入更多风控或日志。
 
 ### 可选：协调机与面板
 

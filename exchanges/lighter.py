@@ -37,6 +37,7 @@ if root_logger.level == logging.DEBUG:
 
 
 DEFAULT_LIGHTER_BASE_URL = "https://mainnet.zklighter.elliot.ai"
+DEFAULT_SPOT_MARKET_ID = "2048"
 
 
 class LighterClient(BaseExchangeClient):
@@ -224,6 +225,23 @@ class LighterClient(BaseExchangeClient):
         if isinstance(market_type, str):
             return market_type.lower() == "spot"
         return False
+
+    def _resolve_spot_market_id(self) -> str:
+        override = getattr(self.config, "spot_market_id", None)
+        if not override:
+            override = os.getenv("LIGHTER_SPOT_MARKET_ID")
+
+        if override is None:
+            return DEFAULT_SPOT_MARKET_ID
+
+        if isinstance(override, (int, float)):
+            try:
+                return str(int(override))
+            except (TypeError, ValueError):
+                pass
+
+        override_text = str(override).strip()
+        return override_text or DEFAULT_SPOT_MARKET_ID
 
     def _extract_spot_balance(self, account: Any) -> Decimal:
         assets = getattr(account, "assets", None)
@@ -1320,45 +1338,83 @@ class LighterClient(BaseExchangeClient):
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
         """Get contract ID for a ticker."""
-        ticker = self.config.ticker
-        if len(ticker) == 0:
-            self.logger.log("Ticker is empty", "ERROR")
-            raise ValueError("Ticker is empty")
+        ticker = (getattr(self.config, "ticker", "") or "").strip()
 
         order_api = OrderApi(self.api_client)
-        # Get all order books to find the market for our ticker
         order_books = await order_api.order_books()
+        order_book_entries = getattr(order_books, "order_books", None) or []
 
-        # Find the market that matches our ticker
         market_info = None
-        for market in order_books.order_books:
-            if market.symbol == ticker:
-                market_info = market
-                break
+        spot_override: Optional[str] = None
 
-        if market_info is None:
-            self.logger.log("Failed to get markets", "ERROR")
+        if self._is_spot_market():
+            spot_override = self._resolve_spot_market_id()
+            for market in order_book_entries:
+                try:
+                    if str(market.market_id) == spot_override:
+                        market_info = market
+                        break
+                except Exception:
+                    continue
+
+            self.logger.log(
+                f"Spot route enabled; forcing Lighter market id {spot_override}",
+                "INFO",
+            )
+            if market_info is None:
+                self.logger.log(
+                    f"Spot market id {spot_override} not found in order books; falling back to order-book details only",
+                    "WARNING",
+                )
+        else:
+            if not ticker:
+                self.logger.log("Ticker is empty", "ERROR")
+                raise ValueError("Ticker is empty")
+
+            for market in order_book_entries:
+                if market.symbol == ticker:
+                    market_info = market
+                    break
+
+            if market_info is None:
+                self.logger.log("Failed to get markets", "ERROR")
+                raise ValueError("Failed to get markets")
+
+        market_identifier_text: Optional[str] = spot_override
+        if market_identifier_text is None:
+            market_identifier_text = str(getattr(market_info, "market_id", "")).strip()
+
+        if not market_identifier_text:
+            self.logger.log("Failed to resolve Lighter market id", "ERROR")
             raise ValueError("Failed to get markets")
 
-        market_summary = await order_api.order_book_details(market_id=market_info.market_id)
+        try:
+            market_index_value = int(market_identifier_text)
+        except (TypeError, ValueError) as exc:
+            self.logger.log(f"Failed to parse market id '{market_identifier_text}'", "ERROR")
+            raise ValueError("Invalid market id received from Lighter") from exc
+
+        market_summary = await order_api.order_book_details(market_id=market_index_value)
         if not market_summary.order_book_details:
             self.logger.log("Failed to load detailed market info", "ERROR")
             raise ValueError("Failed to load market details")
 
         order_book_details = market_summary.order_book_details[0]
         # Set contract_id to market name (Lighter uses market IDs as identifiers)
-        try:
-            market_index_value = int(market_info.market_id)
-        except (TypeError, ValueError) as exc:
-            self.logger.log(f"Failed to parse market id '{market_info.market_id}'", "ERROR")
-            raise ValueError("Invalid market id received from Lighter") from exc
-
         contract_identifier = str(market_index_value)
         setattr(self.config, "contract_id", contract_identifier)
         setattr(self.config, "market_index", market_index_value)
         self.market_index = market_index_value
-        self.base_amount_multiplier = pow(10, market_info.supported_size_decimals)
-        self.price_multiplier = pow(10, market_info.supported_price_decimals)
+        if market_info is not None:
+            self.base_amount_multiplier = pow(10, market_info.supported_size_decimals)
+            self.price_multiplier = pow(10, market_info.supported_price_decimals)
+        else:
+            size_decimals = getattr(order_book_details, "size_decimals", None)
+            price_decimals = getattr(order_book_details, "price_decimals", None)
+            if isinstance(size_decimals, int):
+                self.base_amount_multiplier = pow(10, size_decimals)
+            if isinstance(price_decimals, int):
+                self.price_multiplier = pow(10, price_decimals)
 
         try:
             tick_size_value = Decimal("1") / (Decimal("10") ** order_book_details.price_decimals)
