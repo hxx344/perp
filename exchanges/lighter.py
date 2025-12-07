@@ -1407,11 +1407,18 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("Invalid market id received from Lighter") from exc
 
         market_summary = await order_api.order_book_details(market_id=market_index_value)
-        if not market_summary.order_book_details:
+
+        details_list = market_summary.order_book_details or []
+        if self._is_spot_market():
+            spot_details = getattr(market_summary, "spot_order_book_details", None)
+            if spot_details:
+                details_list = spot_details
+
+        if not details_list:
             self.logger.log("Failed to load detailed market info", "ERROR")
             raise ValueError("Failed to load market details")
 
-        order_book_details = market_summary.order_book_details[0]
+        order_book_details = details_list[0]
         # Set contract_id to market name (Lighter uses market IDs as identifiers)
         contract_identifier = str(market_index_value)
         setattr(self.config, "contract_id", contract_identifier)
