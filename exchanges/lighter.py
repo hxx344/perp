@@ -1428,15 +1428,34 @@ class LighterClient(BaseExchangeClient):
             self.base_amount_multiplier = pow(10, market_info.supported_size_decimals)
             self.price_multiplier = pow(10, market_info.supported_price_decimals)
         else:
-            size_decimals = getattr(order_book_details, "size_decimals", None)
-            price_decimals = getattr(order_book_details, "price_decimals", None)
+            size_decimals = getattr(order_book_details, "supported_size_decimals", None)
+            if not isinstance(size_decimals, int):
+                size_decimals = getattr(order_book_details, "size_decimals", None)
+
+            price_decimals = getattr(order_book_details, "supported_price_decimals", None)
+            if not isinstance(price_decimals, int):
+                price_decimals = getattr(order_book_details, "price_decimals", None)
+
             if isinstance(size_decimals, int):
                 self.base_amount_multiplier = pow(10, size_decimals)
             if isinstance(price_decimals, int):
                 self.price_multiplier = pow(10, price_decimals)
 
+        tick_decimals = getattr(order_book_details, "supported_price_decimals", None)
+        if not isinstance(tick_decimals, int):
+            tick_decimals = getattr(order_book_details, "price_decimals", None)
+            if not isinstance(tick_decimals, int) and tick_decimals is not None:
+                try:
+                    tick_decimals = int(tick_decimals)
+                except (TypeError, ValueError):
+                    tick_decimals = None
+
+        if not isinstance(tick_decimals, int):
+            self.logger.log("Tick size decimals missing in market details", "ERROR")
+            raise ValueError("Failed to get tick size")
+
         try:
-            tick_size_value = Decimal("1") / (Decimal("10") ** order_book_details.price_decimals)
+            tick_size_value = Decimal("1") / (Decimal("10") ** tick_decimals)
         except Exception:
             self.logger.log("Failed to get tick size", "ERROR")
             raise ValueError("Failed to get tick size")
