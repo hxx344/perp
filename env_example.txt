@@ -42,9 +42,14 @@ ASTER_SECRET_KEY=your_aster_secret_key
 # --l1-private-key 新私钥
 # 若需调整 Lighter 杠杆，可在命令行添加：
 # --lighter-leverage 30  (示例为30x)
+# 推荐：填写多密钥 JSON 或 "index:key" 列表供新版 SignerClient 使用
+# 示例1（JSON）：{"0":"0xabc...","4":"0xdef..."}
+# 示例2（列表）：0:0xabc...,4:0xdef...
+LIGHTER_API_PRIVATE_KEYS=
+# 兼容旧版本的单密钥字段，仍被脚本读取；如已使用多密钥，可留空
 API_KEY_PRIVATE_KEY=
-LIGHTER_ACCOUNT_INDEX=
 LIGHTER_API_KEY_INDEX=
+LIGHTER_ACCOUNT_INDEX=
 
 # Notification (optional)
 # guide: https://www.feishu.cn/hc/zh-CN/articles/185289387886-%E6%B6%88%E6%81%AF%E5%8A%A9%E6%89%8B-%E6%9C%BA%E5%99%A8%E4%BA%BA

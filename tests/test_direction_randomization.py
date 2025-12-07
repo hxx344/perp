@@ -2,7 +2,7 @@ import asyncio
 import random
 from decimal import Decimal
 import types
-from typing import Any, Dict, List, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from strategies.aster_lighter_cycle import CycleConfig, HedgingCycleExecutor, LegResult
 
@@ -59,9 +59,9 @@ def _attach_leg_stubs(executor: HedgingCycleExecutor, recorder: List[Tuple[str, 
 
     async def stub_lighter(
         self: HedgingCycleExecutor,
-        leg_name: str,
-        direction: str,
-        reference_price: Decimal | None = None,
+    leg_name: str,
+    direction: str,
+    reference_price: Optional[Decimal] = None,
     ) -> LegResult:
         recorder.append((leg_name, direction))
         return LegResult(

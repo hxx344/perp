@@ -15,6 +15,18 @@ class DummyPosition:
         self.side = side
 
 
+class DummyAsset:
+    def __init__(self, asset_id=None, symbol=None, balance="0"):
+        self.asset_id = asset_id
+        self.symbol = symbol
+        self.balance = balance
+
+
+class DummyAccount:
+    def __init__(self, assets):
+        self.assets = assets
+
+
 class DummyConfig(dict):
     def __getattr__(self, item):
         try:
@@ -62,3 +74,51 @@ def test_get_account_positions_falls_back_to_side(monkeypatch):
     quantity = asyncio.run(client.get_account_positions())
 
     assert quantity == Decimal("-3.0")
+
+
+def test_extract_spot_balance_prefers_asset_id(monkeypatch):
+    client = _make_client(contract_id=1)
+    client.base_asset_id = 7
+    account = DummyAccount(
+        assets=[
+            DummyAsset(asset_id=3, balance="2.5"),
+            DummyAsset(asset_id=7, balance="9.75"),
+        ]
+    )
+
+    result = client._extract_spot_balance(account)
+
+    assert result == Decimal("9.75")
+
+
+def test_extract_spot_balance_falls_back_to_symbol():
+    client = _make_client(contract_id=1)
+    client.base_asset_id = None
+    client.base_asset_symbol = "ETH"
+    account = DummyAccount(
+        assets=[
+            DummyAsset(symbol="BTC", balance="1.2"),
+            DummyAsset(symbol="eth", balance="4.4"),
+        ]
+    )
+
+    result = client._extract_spot_balance(account)
+
+    assert result == Decimal("4.4")
+
+
+def test_get_account_positions_returns_spot_balance(monkeypatch):
+    client = _make_client(contract_id=1)
+    client.market_type = "spot"
+    client.base_asset_id = 99
+
+    account = DummyAccount(assets=[DummyAsset(asset_id=99, balance="12.34")])
+
+    async def fake_fetch_account():
+        return account
+
+    monkeypatch.setattr(client, "_fetch_account_with_retry", fake_fetch_account)
+
+    quantity = asyncio.run(client.get_account_positions())
+
+    assert quantity == Decimal("12.34")

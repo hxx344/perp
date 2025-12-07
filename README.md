@@ -312,6 +312,7 @@ python strategies/aster_lighter_cycle.py \
 - `--aster-leg1-depth` 可为第一条 Aster Maker 挂单单独设置深度，未提供时默认跟随 `--aster-maker-depth`。
 - `--aster-leg3-depth` 可为第三条 Aster 反向 Maker 挂单单独设置深度，未提供时默认跟随 `--aster-maker-depth`。
 - 每轮执行前脚本会自动检查配置的 L1 钱包，如果原生 USDC 余额大于 1 USDC，会先发起充值到 Lighter 账户后再开始下一轮。
+- `--lighter-market-type {perp,spot}`：选择 Lighter 交易路由。`perp`（默认）走永续接口并应用 `--lighter-leverage`；`spot` 会跳过杠杆设定，直接使用现货余额下单，并在循环开始前按照可用底仓自动收紧每腿数量，避免出现“卖空现货”的情况。
 - `--take-profit` 参数目前保留兼容性，但不会影响 Aster 反向 Maker 的挂单价格。
 - 默认等待超时为 5 秒，可通过 `--max-wait` 调整。
 - `--max-retries` 默认 100 次，`--retry-delay` 默认 5 秒，两者共同控制 Aster Maker 单的重试次数与重试间隔，避免超时直接退出。
@@ -434,9 +435,9 @@ python strategies/grvt_lighter_cycle.py \
 
 #### Lighter 配置
 
-- `API_KEY_PRIVATE_KEY`: Lighter API 私钥
+- `LIGHTER_API_PRIVATE_KEYS`: 推荐写成 JSON（如 `{"0":"0xabc...","4":"0xdef..."}`）或以逗号/分号分隔的 `index:key` 列表（如 `0:0xabc...,4:0xdef...`），脚本会按索引一次性加载多把 API 私钥供新版 SignerClient 使用。
+- `API_KEY_PRIVATE_KEY` 与 `LIGHTER_API_KEY_INDEX`: 向后兼容的单密钥字段；若已配置 `LIGHTER_API_PRIVATE_KEYS` 可留空。
 - `LIGHTER_ACCOUNT_INDEX`: Lighter 账户索引
-- `LIGHTER_API_KEY_INDEX`: Lighter API 密钥索引
 
 #### GRVT 配置
 

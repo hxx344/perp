@@ -3,6 +3,7 @@ Lighter exchange client implementation.
 """
 
 import os
+import json
 import asyncio
 import time
 import logging
@@ -13,8 +14,11 @@ from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
 from helpers.logger import TradingLogger
 
 # Import official Lighter SDK for API client
-import lighter
-from lighter import SignerClient, ApiClient, Configuration
+from lighter.signer_client import SignerClient
+from lighter.api_client import ApiClient
+from lighter.configuration import Configuration
+from lighter.api.account_api import AccountApi
+from lighter.api.order_api import OrderApi
 
 # Import custom WebSocket implementation
 from .lighter_custom_websocket import LighterCustomWebSocketManager
@@ -32,6 +36,9 @@ if root_logger.level == logging.DEBUG:
     root_logger.setLevel(logging.INFO)
 
 
+DEFAULT_LIGHTER_BASE_URL = "https://mainnet.zklighter.elliot.ai"
+
+
 class LighterClient(BaseExchangeClient):
     """Lighter exchange client implementation."""
 
@@ -40,13 +47,17 @@ class LighterClient(BaseExchangeClient):
         super().__init__(config)
 
         # Lighter credentials from environment
-        self.api_key_private_key = os.getenv('API_KEY_PRIVATE_KEY')
-        self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX', '0'))
-        self.api_key_index = int(os.getenv('LIGHTER_API_KEY_INDEX', '0'))
-        self.base_url = "https://mainnet.zklighter.elliot.ai"
+        account_index_raw = os.getenv('LIGHTER_ACCOUNT_INDEX', '0')
+        try:
+            self.account_index = int(account_index_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid LIGHTER_ACCOUNT_INDEX '{account_index_raw}'"
+            ) from exc
 
-        if not self.api_key_private_key:
-            raise ValueError("API_KEY_PRIVATE_KEY must be set in environment variables")
+        self.api_private_keys = self._load_api_private_keys()
+        base_url_env = (os.getenv('LIGHTER_BASE_URL') or DEFAULT_LIGHTER_BASE_URL).strip()
+        self.base_url = base_url_env or DEFAULT_LIGHTER_BASE_URL
 
         # Initialize logger
         self.logger = TradingLogger(exchange="lighter", ticker=self.config.ticker, log_to_console=False)
@@ -69,11 +80,21 @@ class LighterClient(BaseExchangeClient):
         self.current_order = None
         self.market_detail = None
         self.market_index: Optional[int] = None
+        self.market_type = getattr(self.config, "market_type", None)
+        self.base_asset_id = getattr(self.config, "base_asset_id", None)
+        self.quote_asset_id = getattr(self.config, "quote_asset_id", None)
+        self.base_asset_symbol = getattr(self.config, "base_asset_symbol", None)
         self.default_initial_margin_fraction: Optional[int] = None
         self.min_initial_margin_fraction: Optional[int] = None
         self.default_leverage: Optional[int] = None
         self.max_leverage: Optional[int] = None
         self._last_confirmed_tier_name: Optional[str] = None
+
+    def _require_lighter_client(self) -> SignerClient:
+        client = self.lighter_client
+        if client is None:
+            raise RuntimeError("Lighter client not initialized")
+        return client
 
     def prune_caches(self, *, max_orders: int = 1000) -> None:
         """Bound in-memory caches to avoid unbounded growth.
@@ -198,6 +219,42 @@ class LighterClient(BaseExchangeClient):
                 return self._extract_mapping_value(extra, key)
         return None
 
+    def _is_spot_market(self) -> bool:
+        market_type = self.market_type or getattr(self.config, "market_type", None)
+        if isinstance(market_type, str):
+            return market_type.lower() == "spot"
+        return False
+
+    def _extract_spot_balance(self, account: Any) -> Decimal:
+        assets = getattr(account, "assets", None)
+        if assets is None:
+            assets = getattr(account, "spot_assets", None)
+
+        if not assets:
+            return Decimal("0")
+
+        base_id = self.base_asset_id
+        base_symbol = (self.base_asset_symbol or "").upper()
+
+        for asset in assets:
+            asset_id = self._extract_mapping_value(asset, "asset_id")
+            if base_id is not None:
+                try:
+                    if int(asset_id) != int(base_id):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+            elif base_symbol:
+                symbol_value = self._extract_mapping_value(asset, "symbol")
+                if not isinstance(symbol_value, str) or symbol_value.upper() != base_symbol:
+                    continue
+            elif asset_id is None:
+                continue
+
+            return self._decimal_or_zero(self._extract_mapping_value(asset, "balance"))
+
+        return Decimal("0")
+
     def _resolve_order_price(self, order_data: Dict[str, Any], filled_size: Decimal) -> Decimal:
         average_price = self._first_available_decimal(
             order_data,
@@ -243,18 +300,116 @@ class LighterClient(BaseExchangeClient):
 
         return Decimal("0")
 
+    @staticmethod
+    def _parse_api_private_key_spec(raw_value: Optional[str]) -> Dict[int, str]:
+        parsed: Dict[int, str] = {}
+        if not raw_value:
+            return parsed
+
+        text = raw_value.strip()
+        if not text:
+            return parsed
+
+        try:
+            candidate = json.loads(text)
+        except json.JSONDecodeError:
+            candidate = None
+
+        if isinstance(candidate, dict):
+            for key, value in candidate.items():
+                try:
+                    index = int(key)
+                except (TypeError, ValueError):
+                    continue
+                key_text = str(value).strip() if value is not None else ""
+                if key_text:
+                    parsed[index] = key_text
+            if parsed:
+                return parsed
+
+        if isinstance(candidate, list):
+            for entry in candidate:
+                if not isinstance(entry, dict):
+                    continue
+                idx_value = entry.get("index") or entry.get("apiKeyIndex") or entry.get("api_key_index")
+                if idx_value is None:
+                    continue
+                try:
+                    index = int(idx_value)
+                except (TypeError, ValueError):
+                    continue
+                key_text = entry.get("privateKey") or entry.get("private_key") or entry.get("key")
+                if isinstance(key_text, str) and key_text.strip():
+                    parsed[index] = key_text.strip()
+            if parsed:
+                return parsed
+
+        segments: List[str]
+        if any(sep in text for sep in (";", "|")):
+            for delimiter in (";", "|"):
+                if delimiter in text:
+                    segments = [part for part in text.split(delimiter) if part]
+                    break
+        else:
+            segments = [part for part in text.split(",") if part]
+
+        for segment in segments:
+            item = segment.strip()
+            if not item or ":" not in item:
+                continue
+            idx_part, key_part = item.split(":", 1)
+            try:
+                index = int(idx_part.strip())
+            except (TypeError, ValueError):
+                continue
+            key_text = key_part.strip()
+            if key_text:
+                parsed[index] = key_text
+
+        return parsed
+
+    def _load_api_private_keys(self) -> Dict[int, str]:
+        env_payload = os.getenv('LIGHTER_API_PRIVATE_KEYS') or os.getenv('API_KEY_PRIVATE_KEYS')
+        key_map = self._parse_api_private_key_spec(env_payload)
+
+        if not key_map:
+            legacy_key = (os.getenv('API_KEY_PRIVATE_KEY') or '').strip()
+            legacy_index = (os.getenv('LIGHTER_API_KEY_INDEX') or '').strip()
+            if legacy_key and legacy_index:
+                try:
+                    key_map[int(legacy_index)] = legacy_key
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Invalid LIGHTER_API_KEY_INDEX '{legacy_index}'"
+                    ) from exc
+
+        if not key_map:
+            raise ValueError(
+                "Missing Lighter API credentials. Set LIGHTER_API_PRIVATE_KEYS (JSON or 'index:key' pairs) "
+                "or API_KEY_PRIVATE_KEY + LIGHTER_API_KEY_INDEX."
+            )
+
+        return key_map
+
     def _validate_config(self) -> None:
         """Validate Lighter configuration."""
-        required_env_vars = ['API_KEY_PRIVATE_KEY', 'LIGHTER_ACCOUNT_INDEX', 'LIGHTER_API_KEY_INDEX']
-        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
-        if missing_vars:
-            raise ValueError(f"Missing required environment variables: {missing_vars}")
+        if not os.getenv('LIGHTER_ACCOUNT_INDEX'):
+            raise ValueError("LIGHTER_ACCOUNT_INDEX must be set in environment variables")
+
+        has_multi = bool((os.getenv('LIGHTER_API_PRIVATE_KEYS') or os.getenv('API_KEY_PRIVATE_KEYS')))
+        has_legacy = bool(os.getenv('API_KEY_PRIVATE_KEY') and os.getenv('LIGHTER_API_KEY_INDEX'))
+
+        if not (has_multi or has_legacy):
+            raise ValueError(
+                "Missing Lighter API credentials. Provide LIGHTER_API_PRIVATE_KEYS or API_KEY_PRIVATE_KEY + "
+                "LIGHTER_API_KEY_INDEX."
+            )
 
     async def _get_market_config(self, ticker: str) -> Tuple[int, int, int]:
         """Get market configuration for a ticker using official SDK."""
         try:
             # Use shared API client
-            order_api = lighter.OrderApi(self.api_client)
+            order_api = OrderApi(self.api_client)
 
             # Get order books to find market info
             order_books = await order_api.order_books()
@@ -265,8 +420,38 @@ class LighterClient(BaseExchangeClient):
                     base_multiplier = pow(10, market.supported_size_decimals)
                     price_multiplier = pow(10, market.supported_price_decimals)
 
-                    # Store market info for later use
+                    # Store market info and asset metadata for later use
                     self.config.market_info = market
+
+                    market_type_value = getattr(market, "market_type", None)
+                    if isinstance(market_type_value, str):
+                        self.market_type = market_type_value.lower()
+
+                    self.base_asset_id = getattr(market, "base_asset_id", None)
+                    self.quote_asset_id = getattr(market, "quote_asset_id", None)
+
+                    symbol_value = getattr(market, "symbol", None)
+                    if isinstance(symbol_value, str) and symbol_value:
+                        symbol_text = symbol_value.strip()
+                        base_symbol = symbol_text
+                        if "-" in symbol_text:
+                            base_symbol = symbol_text.split("-", 1)[0]
+                        elif symbol_text.endswith("PERP"):
+                            base_symbol = symbol_text[:-4]
+                        elif symbol_text.endswith("-PERP"):
+                            base_symbol = symbol_text[:-5]
+                        normalized_symbol = base_symbol.strip().upper()
+                        if normalized_symbol:
+                            self.base_asset_symbol = normalized_symbol
+
+                    if self.base_asset_symbol:
+                        setattr(self.config, "base_asset_symbol", self.base_asset_symbol)
+                    if self.base_asset_id is not None:
+                        setattr(self.config, "base_asset_id", self.base_asset_id)
+                    if self.quote_asset_id is not None:
+                        setattr(self.config, "quote_asset_id", self.quote_asset_id)
+                    if self.market_type:
+                        setattr(self.config, "market_type", self.market_type)
 
                     self.logger.log(
                         f"Market config for {ticker}: ID={market_id}, "
@@ -287,9 +472,8 @@ class LighterClient(BaseExchangeClient):
             try:
                 self.lighter_client = SignerClient(
                     url=self.base_url,
-                    private_key=self.api_key_private_key,
                     account_index=self.account_index,
-                    api_key_index=self.api_key_index,
+                    api_private_keys=self.api_private_keys,
                 )
 
                 # Check client
@@ -380,7 +564,7 @@ class LighterClient(BaseExchangeClient):
             return False
 
         try:
-            account_api = lighter.AccountApi(self.api_client)
+            account_api = AccountApi(self.api_client)
         except Exception as exc:  # pragma: no cover - SDK construction failure
             _emit(
                 "ERROR",
@@ -719,7 +903,8 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("Lighter client not initialized. Call connect() first.")
 
         # Create order using official SDK
-        create_order, tx_hash, error = await self.lighter_client.create_order(**order_params)
+        lighter_client = self._require_lighter_client()
+        create_order, tx_hash, error = await lighter_client.create_order(**order_params)
         if error is not None:
             return OrderResult(
                 success=False, order_id=str(order_params['client_order_index']),
@@ -734,6 +919,7 @@ class LighterClient(BaseExchangeClient):
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
+        lighter_client = self._require_lighter_client()
 
         market_index = self._resolve_market_index()
 
@@ -760,8 +946,8 @@ class LighterClient(BaseExchangeClient):
             'base_amount': int(quantity * self.base_amount_multiplier),
             'price': int(price * self.price_multiplier),
             'is_ask': is_ask,
-            'order_type': self.lighter_client.ORDER_TYPE_LIMIT,
-            'time_in_force': self.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+            'order_type': lighter_client.ORDER_TYPE_LIMIT,
+            'time_in_force': lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
             'reduce_only': False,
             'trigger_price': 0,
         }
@@ -790,13 +976,17 @@ class LighterClient(BaseExchangeClient):
             if self.current_order is not None:
                 order_status = self.current_order.status
 
+        final_order = self.current_order
+        final_order_id = final_order.order_id if final_order is not None else order_result.order_id
+        final_status = final_order.status if final_order is not None else order_status
+
         return OrderResult(
             success=True,
-            order_id=self.current_order.order_id,
+            order_id=final_order_id,
             side=direction,
             size=quantity,
             price=order_price,
-            status=self.current_order.status
+            status=final_status
         )
 
     async def _get_active_close_orders(self, contract_id: str) -> int:
@@ -853,9 +1043,10 @@ class LighterClient(BaseExchangeClient):
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
+        lighter_client = self._require_lighter_client()
 
         # Cancel order using official SDK
-        cancel_order, tx_hash, error = await self.lighter_client.cancel_order(
+        cancel_order, tx_hash, error = await lighter_client.cancel_order(
             market_index=self._resolve_market_index(),
             order_index=int(order_id)  # Assuming order_id is the order index
         )
@@ -872,21 +1063,22 @@ class LighterClient(BaseExchangeClient):
         """Get order information from Lighter using official SDK."""
         try:
             # Use shared API client to get account info
-            account_api = lighter.AccountApi(self.api_client)
+            account_api = AccountApi(self.api_client)
 
             # Get account orders
             account_data = await account_api.account(by="index", value=str(self.account_index))
 
             # Look for the specific order in account positions
-            for position in account_data.positions:
-                if position.symbol == self.config.ticker:
-                    position_amt = abs(float(position.position))
+            for position in getattr(account_data, "positions", []) or []:
+                symbol_value = getattr(position, "symbol", None)
+                if symbol_value == self.config.ticker:
+                    position_amt = abs(float(getattr(position, "position", 0)))
                     if position_amt > 0.001:  # Only include significant positions
                         return OrderInfo(
                             order_id=order_id,
-                            side="buy" if float(position.position) > 0 else "sell",
+                            side="buy" if float(getattr(position, "position", 0)) > 0 else "sell",
                             size=Decimal(str(position_amt)),
-                            price=Decimal(str(position.avg_price)),
+                            price=Decimal(str(getattr(position, "avg_price", 0))),
                             status="FILLED",  # Positions are filled orders
                             filled_size=Decimal(str(position_amt)),
                             remaining_size=Decimal('0')
@@ -899,20 +1091,21 @@ class LighterClient(BaseExchangeClient):
             return None
 
     @query_retry(reraise=True)
-    async def _fetch_orders_with_retry(self) -> List[Dict[str, Any]]:
+    async def _fetch_orders_with_retry(self) -> List[Any]:
         """Get orders using official SDK."""
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
+        lighter_client = self._require_lighter_client()
 
         # Generate auth token for API call
-        auth_token, error = self.lighter_client.create_auth_token_with_expiry()
+        auth_token, error = lighter_client.create_auth_token_with_expiry()
         if error is not None:
             self.logger.log(f"Error creating auth token: {error}", "ERROR")
             raise ValueError(f"Error creating auth token: {error}")
 
         # Use OrderApi to get active orders
-        order_api = lighter.OrderApi(self.api_client)
+        order_api = OrderApi(self.api_client)
 
         # Get active orders for the specific market
         orders_response = await order_api.account_active_orders(
@@ -926,14 +1119,14 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("Failed to get orders")
 
         orders = getattr(orders_response, "orders", None)
-        if orders is None:
+        if not orders:
             return []
 
         return list(orders)
 
     async def get_active_orders(self, contract_id: str) -> List[OrderInfo]:
         """Get active orders for a contract using official SDK."""
-        order_list = await self._fetch_orders_with_retry()
+        order_list: List[Any] = await self._fetch_orders_with_retry()
 
         if not order_list:
             return []
@@ -941,23 +1134,28 @@ class LighterClient(BaseExchangeClient):
             order_list = list(order_list)
 
         # Filter orders for the specific market
-        contract_orders = []
+        contract_orders: List[OrderInfo] = []
         for order in order_list:
-            # Convert Lighter Order to OrderInfo
-            side = "sell" if order.is_ask else "buy"
-            size = Decimal(order.initial_base_amount)
-            price = Decimal(order.price)
+            is_ask = bool(getattr(order, "is_ask", False))
+            side = "sell" if is_ask else "buy"
+            size = self._decimal_or_zero(getattr(order, "initial_base_amount", None))
+            price = self._decimal_or_zero(getattr(order, "price", None))
+            remaining_size = self._decimal_or_zero(getattr(order, "remaining_base_amount", None))
+            filled_size = self._decimal_or_zero(getattr(order, "filled_base_amount", None))
+            order_index = getattr(order, "order_index", getattr(order, "id", None))
+            status_value = getattr(order, "status", "")
+            status_text = status_value.upper() if isinstance(status_value, str) else str(status_value)
 
             # Only include orders with remaining size > 0
             if size > 0:
                 contract_orders.append(OrderInfo(
-                    order_id=str(order.order_index),
+                    order_id=str(order_index) if order_index is not None else "",
                     side=side,
-                    size=Decimal(order.remaining_base_amount),  # FIXME: This is wrong. Should be size
+                    size=size,
                     price=price,
-                    status=order.status.upper(),
-                    filled_size=Decimal(order.filled_base_amount),
-                    remaining_size=Decimal(order.remaining_base_amount)
+                    status=status_text,
+                    filled_size=filled_size,
+                    remaining_size=remaining_size
                 ))
 
         return contract_orders
@@ -965,7 +1163,7 @@ class LighterClient(BaseExchangeClient):
     @query_retry(reraise=True)
     async def _fetch_account_with_retry(self):
         """Get primary account details using official SDK."""
-        account_api = lighter.AccountApi(self.api_client)
+        account_api = AccountApi(self.api_client)
 
         account_data = await account_api.account(by="index", value=str(self.account_index))
 
@@ -1011,6 +1209,13 @@ class LighterClient(BaseExchangeClient):
 
     async def get_account_positions(self) -> Decimal:
         """Get account positions using official SDK."""
+        if self._is_spot_market():
+            try:
+                account = await self._fetch_account_with_retry()
+            except Exception:
+                return Decimal("0")
+            return self._extract_spot_balance(account)
+
         # Get account info which includes positions
         positions = await self._fetch_positions_with_retry()
 
@@ -1037,7 +1242,7 @@ class LighterClient(BaseExchangeClient):
                 continue
             return self._signed_position_quantity(position)
 
-        return Decimal(0)
+        return Decimal("0")
 
     async def get_available_balance(self) -> Decimal:
         """Fetch the available balance from the primary account."""
@@ -1098,6 +1303,18 @@ class LighterClient(BaseExchangeClient):
             metrics["position_value"] = self._decimal_or_zero(self._extract_mapping_value(target_position, "position_value"))
             metrics["unrealized_pnl"] = self._decimal_or_zero(self._extract_mapping_value(target_position, "unrealized_pnl"))
             metrics["realized_pnl"] = self._decimal_or_zero(self._extract_mapping_value(target_position, "realized_pnl"))
+        elif self._is_spot_market():
+            spot_balance = self._extract_spot_balance(account)
+            metrics["position_size"] = spot_balance
+            contract_identifier_value = getattr(self.config, "contract_id", None)
+            if contract_identifier_value:
+                try:
+                    best_bid, best_ask = await self.fetch_bbo_prices(contract_identifier_value)
+                except Exception:
+                    pass
+                else:
+                    mid_price = (best_bid + best_ask) / Decimal("2")
+                    metrics["position_value"] = spot_balance * mid_price
 
         return metrics
 
@@ -1108,7 +1325,7 @@ class LighterClient(BaseExchangeClient):
             self.logger.log("Ticker is empty", "ERROR")
             raise ValueError("Ticker is empty")
 
-        order_api = lighter.OrderApi(self.api_client)
+        order_api = OrderApi(self.api_client)
         # Get all order books to find the market for our ticker
         order_books = await order_api.order_books()
 

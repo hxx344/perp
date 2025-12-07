@@ -251,6 +251,7 @@ Key options:
 - `--aster-leg1-depth`: Override the depth level for the Aster maker entry leg (defaults to `--aster-maker-depth`).
 - `--aster-leg3-depth`: Override the depth level for the Aster reverse maker leg (defaults to `--aster-maker-depth`).
 - Before each hedging cycle the executor checks the configured L1 wallet and bridges any native USDC balance above 1 USDC to the linked Lighter account before submitting new orders.
+- `--lighter-market-type {perp,spot}`: Select the Lighter route. `perp` (default) keeps using the perpetual APIs and enforces `--lighter-leverage`. `spot` skips leverage updates entirely, consumes the spot wallet balance instead, and clamps each cycle’s quantity to the available base asset so the script never tries to short inventory you do not hold.
 - `--virtual-aster-maker`: Simulate the Aster maker legs without sending real orders; combine with
    `--virtual-maker-price-source bn` to watch Binance futures level-4 prices instead of Aster depth,
    or `--virtual-maker-price-source edgex` to source prices from EdgeX. If `EDGEX_ACCOUNT_ID` and
@@ -356,9 +357,9 @@ Key options:
 
 #### Lighter Configuration
 
-- `API_KEY_PRIVATE_KEY`: Your Lighter API private key
+- `LIGHTER_API_PRIVATE_KEYS`: Recommended multi-key map for the new SignerClient. Provide a JSON string (e.g., `{"0":"0xabc...","4":"0xdef..."}`) or a comma/semicolon-separated list of `index:key` pairs (e.g., `0:0xabc...,4:0xdef...`).
+- `API_KEY_PRIVATE_KEY` & `LIGHTER_API_KEY_INDEX`: Legacy single-key fields that remain supported for backwards compatibility; you can leave them blank once `LIGHTER_API_PRIVATE_KEYS` is populated.
 - `LIGHTER_ACCOUNT_INDEX`: Lighter account index
-- `LIGHTER_API_KEY_INDEX`: Lighter API key index
 
 #### GRVT Configuration
 

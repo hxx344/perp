@@ -1099,6 +1099,7 @@ class CycleConfig:
     tracemalloc_frames: int = 25
     enforce_min_cycle_interval: bool = True
     lighter_leverage: int = 50
+    lighter_market_type: str = "perp"
 
 
 @dataclass
@@ -1933,15 +1934,15 @@ async def _auto_provision_lighter_credentials(env_path: Path) -> None:
 
     signer_client = SignerClient(
         url=base_url,
-        private_key=private_key,
         account_index=account_index,
-        api_key_index=api_key_index,
+        api_private_keys={api_key_index: private_key},
     )
     try:
         logger.info("Submitting change_api_key transaction to bind API key")
         _, error = await signer_client.change_api_key(
             eth_private_key=l1_private_key,
             new_pubkey=public_key,
+            api_key_index=api_key_index,
         )
         if error is not None:
             raise LighterProvisioningError(f"Failed to bind API key: {error}")
@@ -1962,6 +1963,8 @@ async def _auto_provision_lighter_credentials(env_path: Path) -> None:
     finally:
         await signer_client.close()
 
+    key_map_payload = json.dumps({str(api_key_index): private_key})
+    _persist_env_value(env_path, "LIGHTER_API_PRIVATE_KEYS", key_map_payload)
     _persist_env_value(env_path, "API_KEY_PRIVATE_KEY", private_key)
     _persist_env_value(env_path, "LIGHTER_API_KEY_INDEX", str(api_key_index))
     _persist_env_value(env_path, "LIGHTER_ACCOUNT_INDEX", str(account_index))
@@ -2009,6 +2012,18 @@ class HedgingCycleExecutor:
             log_to_console=bool(getattr(config, "log_to_console", False)),
         )
 
+        market_type_raw = getattr(config, "lighter_market_type", "perp") or "perp"
+        market_type_normalized = str(market_type_raw).strip().lower()
+        if market_type_normalized not in {"perp", "spot"}:
+            market_type_normalized = "perp"
+        self._lighter_market_type = market_type_normalized
+        self._lighter_is_spot = market_type_normalized == "spot"
+        self.config.lighter_market_type = market_type_normalized
+        self.logger.log(
+            f"Lighter market type resolved to {market_type_normalized.upper()}",
+            "INFO",
+        )
+
         agent_id_raw = getattr(config, "coordinator_agent_id", None)
         self._coordinator_agent_id = self._normalize_agent_identifier(agent_id_raw)
         self.config.coordinator_agent_id = self._coordinator_agent_id
@@ -2036,6 +2051,14 @@ class HedgingCycleExecutor:
         self._preserve_initial_lighter_position = bool(
             getattr(config, "preserve_initial_position", False)
         )
+        self._auto_preserve_spot_inventory = False
+        if self._lighter_is_spot and not self._preserve_initial_lighter_position:
+            self._preserve_initial_lighter_position = True
+            self._auto_preserve_spot_inventory = True
+            self.logger.log(
+                "Spot mode detected; automatically preserving initial Lighter inventory",
+                "INFO",
+            )
         self._baseline_lighter_position: Optional[Decimal] = None
         self._virtual_price_source = (config.virtual_aster_price_source or "aster").lower()
         allowed_virtual_sources = {"aster", "bn", "edgex"}
@@ -2126,6 +2149,7 @@ class HedgingCycleExecutor:
             pause_price=Decimal("-1"),
             boost_mode=False,
         )
+        setattr(self.lighter_config, "market_type", self._lighter_market_type)
 
         self.aster_client: Optional["AsterClient"] = None
         self.lighter_client: Optional["LighterClient"] = None
@@ -2195,11 +2219,18 @@ class HedgingCycleExecutor:
             )
             baseline = Decimal("0")
 
+        quantity_step = self._lighter_quantity_step if isinstance(self._lighter_quantity_step, Decimal) and self._lighter_quantity_step > 0 else None
+        if quantity_step is not None:
+            quantized_baseline = self._quantize_quantity(baseline, quantity_step)
+            if quantized_baseline is not None:
+                baseline = quantized_baseline
+
         self._baseline_lighter_position = baseline
+        auto_note = " (auto-enabled for spot mode)" if self._auto_preserve_spot_inventory else ""
         self.logger.log(
             (
                 "Initial Lighter position preservation enabled; baseline captured at "
-                f"{_format_decimal(baseline)} contracts"
+                f"{_format_decimal(baseline)} contracts{auto_note}"
             ),
             "INFO",
         )
@@ -3000,6 +3031,22 @@ class HedgingCycleExecutor:
         if lighter_client_config is not None:
             lighter_client_config.contract_id = lighter_contract_id
             lighter_client_config.tick_size = lighter_tick
+            setattr(lighter_client_config, "market_type", getattr(lighter_client_config, "market_type", self._lighter_market_type))
+
+        resolved_market_type = getattr(self.lighter_client, "market_type", None)
+        if isinstance(resolved_market_type, str) and resolved_market_type:
+            normalized_market_type = resolved_market_type.strip().lower()
+            if normalized_market_type in {"perp", "spot"} and normalized_market_type != self._lighter_market_type:
+                self._lighter_market_type = normalized_market_type
+                self._lighter_is_spot = normalized_market_type == "spot"
+                self.config.lighter_market_type = normalized_market_type
+                setattr(self.lighter_config, "market_type", normalized_market_type)
+                if lighter_client_config is not None:
+                    setattr(lighter_client_config, "market_type", normalized_market_type)
+                self.logger.log(
+                    f"Lighter market type updated from metadata to {normalized_market_type.upper()}",
+                    "INFO",
+                )
 
         lighter_step = Decimal("0.001")
         base_amount_multiplier = getattr(self.lighter_client, "base_amount_multiplier", None)
@@ -3094,12 +3141,18 @@ class HedgingCycleExecutor:
                     "WARNING",
                 )
 
-        target_leverage = getattr(self.config, "lighter_leverage", DEFAULT_LIGHTER_LEVERAGE) or DEFAULT_LIGHTER_LEVERAGE
-        try:
-            target_leverage = int(target_leverage)
-        except (TypeError, ValueError):
-            target_leverage = DEFAULT_LIGHTER_LEVERAGE
-        await self._ensure_lighter_leverage(target_leverage)
+        if self._lighter_is_spot:
+            self.logger.log(
+                "Spot mode enabled on Lighter; skipping leverage enforcement",
+                "INFO",
+            )
+        else:
+            target_leverage = getattr(self.config, "lighter_leverage", DEFAULT_LIGHTER_LEVERAGE) or DEFAULT_LIGHTER_LEVERAGE
+            try:
+                target_leverage = int(target_leverage)
+            except (TypeError, ValueError):
+                target_leverage = DEFAULT_LIGHTER_LEVERAGE
+            await self._ensure_lighter_leverage(target_leverage)
 
         if not self._virtual_reference_symbol:
             if self._virtual_price_source == "edgex":
@@ -3236,6 +3289,9 @@ class HedgingCycleExecutor:
                 self._current_cycle_entry_direction = entry_direction
 
             cycle_quantity = self._prepare_cycle_quantity()
+            if self._lighter_is_spot:
+                cycle_quantity = await self._enforce_spot_entry_capacity(entry_direction, cycle_quantity)
+                self._current_cycle_lighter_quantity = cycle_quantity
             self.logger.log(
                 f"Cycle quantity initialised at {cycle_quantity} ({self._current_cycle_quantity_source})",
                 "INFO",
@@ -3345,6 +3401,71 @@ class HedgingCycleExecutor:
                 if quantized is not None and quantized > 0:
                     result = quantized
         return result
+
+    async def _enforce_spot_entry_capacity(self, entry_direction: str, requested_quantity: Decimal) -> Decimal:
+        if requested_quantity <= 0 or not self._lighter_is_spot:
+            return requested_quantity
+
+        leg2_direction = "sell" if (entry_direction or "").lower() == "buy" else "buy"
+        if leg2_direction != "sell":
+            return requested_quantity
+
+        if not self.lighter_client:
+            return requested_quantity
+
+        try:
+            metrics = await self.lighter_client.get_account_metrics()
+        except Exception as exc:
+            self.logger.log(
+                f"Unable to fetch Lighter metrics for spot capacity check: {exc}",
+                "WARNING",
+            )
+            return requested_quantity
+
+        def _to_decimal(value: Any) -> Decimal:
+            if isinstance(value, Decimal):
+                return value
+            if value is None:
+                return Decimal("0")
+            try:
+                return Decimal(str(value))
+            except (InvalidOperation, ValueError, TypeError):
+                return Decimal("0")
+
+        available_base = _to_decimal(metrics.get("position_size"))
+        if available_base <= 0:
+            raise SkipCycleError(
+                "Lighter spot inventory is empty; deposit base asset or switch back to perp mode before running the cycle",
+            )
+
+        buffer = self._lighter_quantity_step if isinstance(self._lighter_quantity_step, Decimal) else None
+        if buffer is None or buffer <= 0:
+            buffer = Decimal("0.00000001")
+
+        max_quantity = available_base - buffer
+        if max_quantity <= 0:
+            raise SkipCycleError(
+                "Lighter spot inventory after safety buffer is insufficient for the next sell leg",
+            )
+
+        if requested_quantity <= max_quantity:
+            return requested_quantity
+
+        adjusted_quantity = self._apply_cycle_quantity_steps(max_quantity)
+        if adjusted_quantity <= 0:
+            raise SkipCycleError(
+                "Available Lighter spot inventory is too low after rounding; cannot execute current cycle",
+            )
+
+        self.logger.log(
+            (
+                "Reducing cycle quantity to fit Lighter spot balance: "
+                f"{_format_decimal(requested_quantity)} -> {_format_decimal(adjusted_quantity)}"
+            ),
+            "WARNING",
+        )
+        self._current_cycle_quantity_source = "spot-balance"
+        return adjusted_quantity
 
     async def _execute_aster_maker(self, leg_name: str, direction: str) -> LegResult:
         cycle_quantity = self._prepare_cycle_quantity()
@@ -4245,17 +4366,19 @@ class HedgingCycleExecutor:
 
         delta = position - target_position
 
-        if delta == Decimal("0"):
+        quantity_tolerance = self._lighter_quantity_step if isinstance(self._lighter_quantity_step, Decimal) and self._lighter_quantity_step > 0 else Decimal("0.00000001")
+
+        if abs(delta) <= quantity_tolerance:
             if self._preserve_initial_lighter_position:
                 self.logger.log(
                     (
                         "Lighter position matches baseline "
-                        f"{_format_decimal(target_position)}; no restoration required"
+                        f"{_format_decimal(target_position)} within tolerance; no restoration required"
                     ),
                     "INFO",
                 )
             else:
-                self.logger.log("No Lighter position detected; no emergency action required", "INFO")
+                self.logger.log("Lighter position delta within tolerance; no emergency action required", "INFO")
             if bool(getattr(self.config, "log_to_console", False)):
                 print()
             return
@@ -4263,6 +4386,22 @@ class HedgingCycleExecutor:
         # Positive deltas denote excess long exposure relative to the target; negative deltas denote excess short exposure.
         side = "sell" if delta > 0 else "buy"
         quantity = abs(delta)
+
+        quantity_step = self._lighter_quantity_step if isinstance(self._lighter_quantity_step, Decimal) and self._lighter_quantity_step > 0 else None
+        if quantity_step is not None:
+            quantized_quantity = self._quantize_quantity(quantity, quantity_step)
+            if quantized_quantity is not None:
+                quantity = quantized_quantity
+
+        if quantity <= 0:
+            self.logger.log(
+                (
+                    "Emergency flatten skipped because outstanding delta "
+                    f"{_format_decimal(delta)} rounds below minimum executable size"
+                ),
+                "INFO",
+            )
+            return
 
         if self._preserve_initial_lighter_position:
             self.logger.log(
@@ -4573,6 +4712,12 @@ def _parse_args() -> argparse.Namespace:
         help="Target leverage to enforce on Lighter before each run (1-125)",
     )
     parser.add_argument(
+        "--lighter-market-type",
+        choices=["perp", "spot"],
+        default="perp",
+        help="Select the Lighter trading route. Spot mode skips leverage enforcement and uses spot balances.",
+    )
+    parser.add_argument(
         "--l1-private-key",
         help=(
             "Optional L1 wallet private key. When provided, existing private key and Lighter API credentials "
@@ -4853,6 +4998,11 @@ async def _async_main(args: argparse.Namespace) -> None:
     await _auto_provision_lighter_credentials(env_path)
     dotenv.load_dotenv(env_path, override=True)
 
+    lighter_market_type = getattr(args, "lighter_market_type", "perp") or "perp"
+    lighter_market_type = str(lighter_market_type).strip().lower()
+    if lighter_market_type not in {"perp", "spot"}:
+        lighter_market_type = "perp"
+
     lighter_quantity_min = args.lighter_quantity_min
     lighter_quantity_max = args.lighter_quantity_max
     lighter_leverage = getattr(args, "lighter_leverage", DEFAULT_LIGHTER_LEVERAGE)
@@ -4861,8 +5011,10 @@ async def _async_main(args: argparse.Namespace) -> None:
     except (TypeError, ValueError) as exc:
         raise ValueError("--lighter-leverage must be an integer") from exc
 
-    if lighter_leverage < 1 or lighter_leverage > 125:
+    if lighter_market_type != "spot" and (lighter_leverage < 1 or lighter_leverage > 125):
         raise ValueError("--lighter-leverage must be between 1 and 125 (inclusive)")
+    if lighter_market_type == "spot" and lighter_leverage < 0:
+        raise ValueError("--lighter-leverage must be non-negative in spot mode")
 
     if (lighter_quantity_min is None) != (lighter_quantity_max is None):
         raise ValueError("Both --lighter-quantity-min and --lighter-quantity-max must be provided together")
@@ -4959,6 +5111,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         tracemalloc_frames=int(getattr(args, "tracemalloc_frames", 25) or 25),
         enforce_min_cycle_interval=not bool(getattr(args, "disable_min_cycle_interval", False)),
         lighter_leverage=lighter_leverage,
+        lighter_market_type=lighter_market_type,
     )
 
     executor = HedgingCycleExecutor(config)

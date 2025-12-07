@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Tuple, Type, Union
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
-from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import RetryCallState, retry, retry_if_exception_type, stop_after_attempt, wait_exponential  # type: ignore
 
 
 def query_retry(
@@ -53,8 +53,8 @@ class OrderInfo:
     size: Decimal
     price: Decimal
     status: str
-    filled_size: Decimal = 0.0
-    remaining_size: Decimal = 0.0
+    filled_size: Decimal = Decimal("0")
+    remaining_size: Decimal = Decimal("0")
     cancel_reason: str = ''
 
 
@@ -63,7 +63,7 @@ class BaseExchangeClient(ABC):
 
     def __init__(self, config: Dict[str, Any]):
         """Initialize the exchange client with configuration."""
-        self.config = config
+        self.config: Any = config
         self._validate_config()
 
     def round_to_tick(self, price) -> Decimal:
