@@ -7,7 +7,7 @@ import json
 import asyncio
 import time
 import logging
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
 from typing import Dict, Any, List, Optional, Tuple, Iterable
 
 from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
@@ -90,6 +90,8 @@ class LighterClient(BaseExchangeClient):
         self.default_leverage: Optional[int] = None
         self.max_leverage: Optional[int] = None
         self._last_confirmed_tier_name: Optional[str] = None
+        self.spot_min_base_amount: Optional[Decimal] = None
+        self.spot_min_quote_amount: Optional[Decimal] = None
         debug_flag = os.getenv("LIGHTER_DEBUG_ORDERS") or ""
         self._debug_orders: bool = debug_flag.strip().lower() in {"1", "true", "yes", "on"}
 
@@ -274,6 +276,62 @@ class LighterClient(BaseExchangeClient):
             return self._decimal_or_zero(self._extract_mapping_value(asset, "balance"))
 
         return Decimal("0")
+
+    def _spot_size_step(self) -> Optional[Decimal]:
+        multiplier = self.base_amount_multiplier
+        try:
+            if multiplier:
+                multiplier_dec = Decimal(multiplier)
+                if multiplier_dec > 0:
+                    return Decimal("1") / multiplier_dec
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+        return None
+
+    @staticmethod
+    def _round_to_step(value: Decimal, step: Decimal, *, rounding=ROUND_HALF_UP) -> Decimal:
+        if step <= 0:
+            return value
+        try:
+            units = (value / step).to_integral_value(rounding=rounding)
+        except (InvalidOperation, ValueError):
+            return value
+        return units * step
+
+    def _apply_spot_trade_constraints(self, quantity: Decimal, price: Decimal) -> Decimal:
+        if not self._is_spot_market():
+            return quantity
+
+        detail = self.market_detail
+        if detail is None or quantity <= 0:
+            return quantity
+
+        result = quantity
+        size_step = self._spot_size_step()
+        if size_step is not None and size_step > 0:
+            result = self._round_to_step(result, size_step)
+
+        min_base = self.spot_min_base_amount
+        min_quote = self.spot_min_quote_amount
+
+        if min_base is not None and min_base > 0 and result < min_base:
+            result = min_base
+            if size_step is not None and size_step > 0:
+                result = self._round_to_step(result, size_step, rounding=ROUND_UP)
+
+        if (
+            min_quote is not None
+            and min_quote > 0
+            and price is not None
+            and price > 0
+        ):
+            min_qty_for_quote = min_quote / price
+            if min_qty_for_quote > result:
+                result = min_qty_for_quote
+                if size_step is not None and size_step > 0:
+                    result = self._round_to_step(result, size_step, rounding=ROUND_UP)
+
+        return result
 
     def _resolve_order_price(self, order_data: Dict[str, Any], filled_size: Decimal) -> Decimal:
         average_price = self._first_available_decimal(
@@ -969,6 +1027,17 @@ class LighterClient(BaseExchangeClient):
         self.current_order_client_id = client_order_index
         self.current_order = None
 
+        adjusted_quantity = self._apply_spot_trade_constraints(quantity, price)
+        if adjusted_quantity != quantity:
+            self.logger.log(
+                (
+                    f"Spot order quantity adjusted for minimums: "
+                    f"{quantity} -> {adjusted_quantity}"
+                ),
+                "INFO",
+            )
+            quantity = adjusted_quantity
+
         # Create order parameters
         order_params = {
             'market_index': market_index,
@@ -1463,6 +1532,23 @@ class LighterClient(BaseExchangeClient):
         setattr(self.config, "tick_size", tick_size_value)
 
         self.market_detail = order_book_details
+        if self._is_spot_market():
+            self.spot_min_base_amount = self._parse_decimal(getattr(order_book_details, "min_base_amount", None))
+            self.spot_min_quote_amount = self._parse_decimal(getattr(order_book_details, "min_quote_amount", None))
+            size_step = self._spot_size_step()
+            self.logger.log(
+                (
+                    "Spot constraints -> min_base="
+                    f"{self.spot_min_base_amount or 'n/a'}, min_quote="
+                    f"{self.spot_min_quote_amount or 'n/a'}, step="
+                    f"{size_step or 'n/a'}"
+                ),
+                "INFO",
+            )
+        else:
+            self.spot_min_base_amount = None
+            self.spot_min_quote_amount = None
+
         self.default_initial_margin_fraction = getattr(order_book_details, "default_initial_margin_fraction", None)
         self.min_initial_margin_fraction = getattr(order_book_details, "min_initial_margin_fraction", None)
         self.default_leverage = self._fraction_to_leverage(self.default_initial_margin_fraction)
