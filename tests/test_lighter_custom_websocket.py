@@ -42,3 +42,15 @@ def test_extract_orders_falls_back_to_contract_id():
     result = manager._extract_orders_for_market(orders)
 
     assert result == [{"client_order_index": 3}]
+
+
+def test_extract_orders_handles_list_payload():
+    manager = _make_manager(market_index="2051")
+    orders = [
+        {"market_index": "2050", "client_order_index": 9},
+        {"market_index": 2051, "client_order_index": 4},
+    ]
+
+    result = manager._extract_orders_for_market(orders)
+
+    assert result == [{"market_index": 2051, "client_order_index": 4}]

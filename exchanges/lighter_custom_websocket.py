@@ -300,28 +300,44 @@ class LighterCustomWebSocketManager:
 
     def _extract_orders_for_market(self, orders_payload: Any) -> List[Dict[str, Any]]:
         """Extract account order updates for the configured market."""
-        if not isinstance(orders_payload, dict):
+        keys_to_try = self._candidate_market_keys()
+
+        if isinstance(orders_payload, dict):
+            for key in keys_to_try:
+                if key in orders_payload:
+                    return orders_payload[key] or []
+
+            # Fallback: compare via string forms without exact key match
+            target = next((str(k) for k in keys_to_try if k is not None), None)
+            if target is not None:
+                for incoming_key, value in orders_payload.items():
+                    try:
+                        if str(incoming_key) == target:
+                            return value or []
+                    except Exception:
+                        continue
+
             return []
 
-        keys_to_try = self._candidate_market_keys()
-        for key in keys_to_try:
-            if key in orders_payload:
-                return orders_payload[key] or []
-
-        # Fallback: compare via string forms without exact key match
-        target = None
-        for key in keys_to_try:
-            if key is not None:
-                target = str(key)
-                break
-
-        if target is not None:
-            for incoming_key, value in orders_payload.items():
+        if isinstance(orders_payload, list):
+            normalized_targets = {
+                str(k): True for k in keys_to_try if k is not None
+            }
+            matched: List[Dict[str, Any]] = []
+            for entry in orders_payload:
+                if not isinstance(entry, dict):
+                    continue
+                market_candidate = entry.get("market_index") or entry.get("marketId")
+                if market_candidate is None:
+                    continue
                 try:
-                    if str(incoming_key) == target:
-                        return value or []
+                    market_key = str(market_candidate)
                 except Exception:
                     continue
+                if market_key in normalized_targets:
+                    matched.append(entry)
+
+            return matched
 
         return []
 
