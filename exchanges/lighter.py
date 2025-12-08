@@ -7,6 +7,7 @@ import json
 import asyncio
 import time
 import logging
+import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
 from typing import Dict, Any, List, Optional, Tuple, Iterable
 
@@ -38,6 +39,17 @@ if root_logger.level == logging.DEBUG:
 
 DEFAULT_LIGHTER_BASE_URL = "https://mainnet.zklighter.elliot.ai"
 DEFAULT_SPOT_MARKET_ID = "2048"
+
+ASSET_SYMBOL_ALIASES = {
+    "WETH": "ETH",
+    "WBTC": "BTC",
+    "WEETH": "ETH",
+    "WSTETH": "STETH",
+    "USDC.E": "USDC",
+    "USDC.E.E": "USDC",
+    "USDC.EE": "USDC",
+    "USDC": "USDC",
+}
 
 
 class LighterClient(BaseExchangeClient):
@@ -277,29 +289,48 @@ class LighterClient(BaseExchangeClient):
     def _normalize_asset_symbol(self, symbol_value: Any) -> Optional[str]:
         if not isinstance(symbol_value, str):
             return None
+
         text = symbol_value.strip()
         if not text:
             return None
 
         candidate = text.upper()
 
-        for prefix in ("SPOT-", "SPOT_", "SPOT/"):
+        for prefix in ("SPOT-", "SPOT_", "SPOT/", "SPOT"):
             if candidate.startswith(prefix):
                 candidate = candidate[len(prefix):]
                 break
 
-        for suffix in ("-PERP", "_PERP", "/PERP", "PERP", "-SPOT", "_SPOT", "/SPOT", "SPOT"):
+        for suffix in (
+            "-PERP",
+            "_PERP",
+            "/PERP",
+            "PERP",
+            "-SPOT",
+            "_SPOT",
+            "/SPOT",
+            "SPOT",
+        ):
             if candidate.endswith(suffix):
                 candidate = candidate[: -len(suffix)]
                 break
+
+        candidate = re.sub(r"[.:\s]+", "-", candidate)
 
         for separator in ("-", "/", "_"):
             if separator in candidate:
                 candidate = candidate.split(separator, 1)[0]
                 break
 
+        candidate = re.sub(r"[^A-Z0-9]", "", candidate)
         candidate = candidate.strip()
-        return candidate or None
+        if not candidate:
+            return None
+
+        alias = ASSET_SYMBOL_ALIASES.get(candidate)
+        if alias:
+            return alias
+        return candidate
 
     def _ensure_base_asset_symbol(self) -> Optional[str]:
         if self.base_asset_symbol:

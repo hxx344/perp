@@ -139,6 +139,22 @@ def test_extract_spot_balance_normalizes_asset_symbol_variants():
     assert result == Decimal("1.01")
 
 
+def test_extract_spot_balance_handles_weth_alias():
+    client = _make_client(contract_id=1, ticker="eth-usdc")
+    client.base_asset_id = None
+    client.base_asset_symbol = None
+
+    account = DummyAccount(
+        assets=[
+            DummyAsset(symbol="WETH", balance="3.3"),
+        ]
+    )
+
+    result = client._extract_spot_balance(account)
+
+    assert result == Decimal("3.3")
+
+
 def test_get_account_positions_returns_spot_balance(monkeypatch):
     client = _make_client(contract_id=1)
     client.market_type = "spot"
