@@ -3443,6 +3443,34 @@ class HedgingCycleExecutor:
 
         available_base = _to_decimal(metrics.get("position_size"))
         if available_base <= 0:
+            fallback_balance: Optional[Decimal] = None
+            try:
+                fallback_balance = await self.lighter_client.get_account_positions()
+            except Exception as exc:
+                self.logger.log(
+                    f"Spot capacity fallback balance lookup failed: {exc}",
+                    "WARNING",
+                )
+            else:
+                if fallback_balance and fallback_balance > 0:
+                    available_base = fallback_balance
+                    self.logger.log(
+                        (
+                            "Spot capacity guard recovered non-zero balance from fallback lookup: "
+                            f"metrics={metrics.get('position_size')} -> fallback={_format_decimal(fallback_balance)}"
+                        ),
+                        "INFO",
+                    )
+
+        if available_base <= 0:
+            debug_snapshot = {
+                "metrics_position": str(metrics.get("position_size")),
+                "metrics_available_balance": str(metrics.get("available_balance")),
+            }
+            self.logger.log(
+                f"Spot capacity aborting due to zero balance (snapshot={debug_snapshot})",
+                "WARNING",
+            )
             raise SkipCycleError(
                 "Lighter spot inventory is empty; deposit base asset or switch back to perp mode before running the cycle",
             )
