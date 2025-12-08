@@ -13,9 +13,10 @@ from decimal import Decimal
 class TradingLogger:
     """Enhanced logging with structured output and error handling."""
 
-    def __init__(self, exchange: str, ticker: str, log_to_console: bool = False):
+    def __init__(self, exchange: str, ticker: str, log_to_console: bool = False, enable_debug: bool = False):
         self.exchange = exchange
         self.ticker = ticker
+        self.enable_debug = enable_debug
         # Ensure logs directory exists at the project root
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         logs_dir = os.path.join(project_root, 'logs')
@@ -37,14 +38,23 @@ class TradingLogger:
 
     def _setup_logger(self, log_to_console: bool) -> logging.Logger:
         """Setup the logger with proper configuration."""
+        desired_level = logging.DEBUG if self.enable_debug else logging.INFO
         logger = logging.getLogger(f"trading_bot_{self.exchange}_{self.ticker}")
-        logger.setLevel(logging.INFO)
+        logger.setLevel(desired_level)
 
         # Prevent propagation to root logger to avoid duplicate messages
         logger.propagate = False
 
-        # If handlers already exist, reuse the logger as-is
+        def _apply_handler_levels():
+            for handler in logger.handlers:
+                if isinstance(handler, logging.FileHandler):
+                    handler.setLevel(logging.DEBUG)
+                elif isinstance(handler, logging.StreamHandler):
+                    handler.setLevel(logging.DEBUG if self.enable_debug else logging.INFO)
+
+        # If handlers already exist, just update levels and reuse the logger as-is
         if logger.handlers:
+            _apply_handler_levels()
             return logger
 
         class _DedupFilter(logging.Filter):
@@ -108,9 +118,11 @@ class TradingLogger:
         # Console handler if requested
         if log_to_console:
             console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.INFO)
+            console_handler.setLevel(logging.DEBUG if self.enable_debug else logging.INFO)
             console_handler.setFormatter(formatter)
             logger.addHandler(console_handler)
+
+        _apply_handler_levels()
 
         return logger
 

@@ -60,8 +60,16 @@ class LighterClient(BaseExchangeClient):
         base_url_env = (os.getenv('LIGHTER_BASE_URL') or DEFAULT_LIGHTER_BASE_URL).strip()
         self.base_url = base_url_env or DEFAULT_LIGHTER_BASE_URL
 
+        debug_flag = os.getenv("LIGHTER_DEBUG_ORDERS") or ""
+        self._debug_orders: bool = debug_flag.strip().lower() in {"1", "true", "yes", "on"}
+
         # Initialize logger
-        self.logger = TradingLogger(exchange="lighter", ticker=self.config.ticker, log_to_console=False)
+        self.logger = TradingLogger(
+            exchange="lighter",
+            ticker=self.config.ticker,
+            log_to_console=False,
+            enable_debug=self._debug_orders,
+        )
         self._order_update_handler = None
 
         # Initialize Lighter client (will be done in connect)
@@ -92,8 +100,6 @@ class LighterClient(BaseExchangeClient):
         self._last_confirmed_tier_name: Optional[str] = None
         self.spot_min_base_amount: Optional[Decimal] = None
         self.spot_min_quote_amount: Optional[Decimal] = None
-        debug_flag = os.getenv("LIGHTER_DEBUG_ORDERS") or ""
-        self._debug_orders: bool = debug_flag.strip().lower() in {"1", "true", "yes", "on"}
 
     def _log_debug(self, message: str) -> None:
         if self._debug_orders:
