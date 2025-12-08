@@ -33,6 +33,9 @@ class LighterCustomWebSocketManager:
         # Hard caps and housekeeping
         self.max_levels = 50  # keep top-N levels per side to bound memory
         self._cleanup_every_messages = 200  # aggressive periodic trim
+        self.last_account_orders_at: Optional[float] = None
+        self.last_account_orders_entries: List[Dict[str, Any]] = []
+        self.last_account_orders_client_ids: List[Any] = []
 
         # WebSocket URL
         self.ws_url = "wss://mainnet.zklighter.elliot.ai/stream"
@@ -267,6 +270,30 @@ class LighterCustomWebSocketManager:
     def handle_order_update(self, order_data_list: List[Dict[str, Any]]):
         """Handle order update from WebSocket."""
         try:
+            now = time.time()
+            self.last_account_orders_at = now
+            self.last_account_orders_entries = list(order_data_list or [])
+            self.last_account_orders_client_ids = []
+            for entry in order_data_list or []:
+                if not isinstance(entry, dict):
+                    continue
+                client_idx = entry.get("client_order_index") or entry.get("clientOrderIndex")
+                if client_idx is not None:
+                    try:
+                        normalized = int(str(client_idx))
+                    except (TypeError, ValueError):
+                        normalized = client_idx
+                    self.last_account_orders_client_ids.append(normalized)
+
+            if self.last_account_orders_client_ids:
+                self._log(
+                    (
+                        "Account orders ids observed: "
+                        f"{self.last_account_orders_client_ids}"
+                    ),
+                    "DEBUG",
+                )
+
             # Call the order update callback if it exists
             if self.order_update_callback:
                 self.order_update_callback(order_data_list)

@@ -3953,6 +3953,33 @@ class HedgingCycleExecutor:
         tracker_missing_logged = False
         tracker_idle_logged = False
 
+        def _log_account_orders_state(context: str) -> None:
+            ws_manager = getattr(self.lighter_client, "ws_manager", None)
+            if not ws_manager:
+                self.logger.log(
+                    f"{leg_name} | {context} - WebSocket manager unavailable",
+                    "DEBUG",
+                )
+                return
+
+            last_ts = getattr(ws_manager, "last_account_orders_at", None)
+            last_clients = getattr(ws_manager, "last_account_orders_client_ids", [])
+            if last_ts is None:
+                self.logger.log(
+                    f"{leg_name} | {context} - No account_orders updates observed yet",
+                    "DEBUG",
+                )
+                return
+
+            age = max(0.0, time.time() - float(last_ts))
+            self.logger.log(
+                (
+                    f"{leg_name} | {context} - last account_orders update {age:.1f}s ago, "
+                    f"client_ids={last_clients or '[]'}"
+                ),
+                "DEBUG",
+            )
+
         while time.time() < deadline:
             current_order = getattr(self.lighter_client, "current_order", None)
             client_identifier = getattr(self.lighter_client, "current_order_client_id", None)
@@ -3994,6 +4021,7 @@ class HedgingCycleExecutor:
                     )
                     tracker_mismatch_logged = True
                     tracker_missing_logged = False
+                    _log_account_orders_state("tracker mismatch")
                 elif current_order is None and not tracker_missing_logged:
                     self.logger.log(
                         (
@@ -4003,6 +4031,7 @@ class HedgingCycleExecutor:
                         "DEBUG",
                     )
                     tracker_missing_logged = True
+                    _log_account_orders_state("awaiting first account_orders update")
                 elif (
                     current_order
                     and client_identifier == target_client_id
@@ -4017,6 +4046,7 @@ class HedgingCycleExecutor:
                         "DEBUG",
                     )
                     tracker_idle_logged = True
+                    _log_account_orders_state("order pending")
 
             await asyncio.sleep(self.config.poll_interval)
 
@@ -4028,6 +4058,7 @@ class HedgingCycleExecutor:
             ),
             "WARNING",
         )
+        _log_account_orders_state("timeout summary")
         # Mark that this cycle had a Lighter timeout to avoid skewed summary/PNL later
         try:
             self._cycle_had_timeout = True
