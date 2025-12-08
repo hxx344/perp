@@ -3939,12 +3939,34 @@ class HedgingCycleExecutor:
 
         deadline = time.time() + self.config.lighter_max_wait_seconds
         target_client_id = int(client_order_id)
+        self.logger.log(
+            (
+                f"{leg_name} | Waiting for Lighter fill client_id={client_order_id} "
+                f"expect_final={expected_final_position}, expect_size={expected_fill_size}, side={expected_side}"
+            ),
+            "DEBUG",
+        )
+
+        last_status_logged: Optional[str] = None
+        last_remaining_logged: Optional[Decimal] = None
 
         while time.time() < deadline:
             current_order = getattr(self.lighter_client, "current_order", None)
             client_identifier = getattr(self.lighter_client, "current_order_client_id", None)
             if current_order and client_identifier == target_client_id:
                 status = current_order.status
+                remaining = getattr(current_order, "remaining_size", None)
+                if status != last_status_logged or remaining != last_remaining_logged:
+                    self.logger.log(
+                        (
+                            f"{leg_name} | Lighter status update client_id={client_order_id} "
+                            f"status={status}, filled={current_order.filled_size}, remaining={remaining}, "
+                            f"price={current_order.price}"
+                        ),
+                        "DEBUG",
+                    )
+                    last_status_logged = status
+                    last_remaining_logged = remaining
                 if status == "FILLED":
                     return current_order
                 if status in {"CANCELED", "REJECTED", "EXPIRED"}:

@@ -488,6 +488,11 @@ class LighterCustomWebSocketManager:
                                             "check market_index/contract_id mapping",
                                             "DEBUG",
                                         )
+                                    else:
+                                        self._log(
+                                            f"Account orders update matched {len(orders)} entries for market {self.market_index}",
+                                            "DEBUG",
+                                        )
                                     self.handle_order_update(orders)
                                 elif data.get("type") == "update/order_book" and not self.snapshot_loaded:
                                     # Ignore updates until we have the initial snapshot

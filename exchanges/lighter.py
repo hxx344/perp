@@ -95,6 +95,13 @@ class LighterClient(BaseExchangeClient):
         debug_flag = os.getenv("LIGHTER_DEBUG_ORDERS") or ""
         self._debug_orders: bool = debug_flag.strip().lower() in {"1", "true", "yes", "on"}
 
+    def _log_debug(self, message: str) -> None:
+        if self._debug_orders:
+            try:
+                self.logger.log(message, "DEBUG")
+            except Exception:
+                pass
+
     def _require_lighter_client(self) -> SignerClient:
         client = self.lighter_client
         if client is None:
@@ -971,8 +978,9 @@ class LighterClient(BaseExchangeClient):
                 except Exception as exc:  # pragma: no cover - logging safeguard
                     self.logger.log(f"Error invoking external order handler: {exc}", "ERROR")
 
+            client_order_index_value = order_data.get('client_order_index')
             matches_client_order = self._client_order_index_equals(
-                order_data.get('client_order_index'),
+                client_order_index_value,
                 self.current_order_client_id,
             )
             should_track_order = matches_client_order or (
@@ -980,6 +988,10 @@ class LighterClient(BaseExchangeClient):
             )
 
             if should_track_order:
+                self._log_debug(
+                    f"Track order update client_idx={client_order_index_value} status={status} side={side} "
+                    f"filled={filled_size} remaining={remaining_size} order_id={order_id}"
+                )
                 current_order = OrderInfo(
                     order_id=order_id,
                     side=side,
@@ -991,6 +1003,10 @@ class LighterClient(BaseExchangeClient):
                     cancel_reason=''
                 )
                 self.current_order = current_order
+            else:
+                self._log_debug(
+                    f"Skip order update client_idx={client_order_index_value} status={status} order_id={order_id}"
+                )
 
             if status in ['FILLED', 'CANCELED']:
                 self.logger.log_transaction(order_id, side, filled_size, price, status)
@@ -1099,6 +1115,11 @@ class LighterClient(BaseExchangeClient):
             'reduce_only': False,
             'trigger_price': 0,
         }
+
+        self._log_debug(
+            "Submitting Lighter order "
+            f"client_idx={client_order_index} side={'sell' if is_ask else 'buy'} qty={quantity} price={price}"
+        )
 
         order_result = await self._submit_order_with_retry(order_params)
         return order_result
