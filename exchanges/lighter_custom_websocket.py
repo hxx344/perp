@@ -525,7 +525,17 @@ class LighterCustomWebSocketManager:
                                     # Ignore updates until we have the initial snapshot
                                     continue
                                 else:
-                                    self._log(f"Unknown message type: {data.get('type', 'unknown')}", "DEBUG")
+                                    try:
+                                        payload_preview = json.dumps(data, default=str)
+                                    except Exception:
+                                        payload_preview = str(data)
+                                    self._log(
+                                        (
+                                            f"Unknown message type: {data.get('type', 'unknown')} "
+                                            f"payload={payload_preview}"
+                                        ),
+                                        "DEBUG",
+                                    )
 
                             # Periodic cleanup outside the lock
                             cleanup_counter += 1
