@@ -2007,10 +2007,13 @@ class HedgingCycleExecutor:
             getattr(config, "enforce_min_cycle_interval", True)
         )
         ticker_label = f"{config.aster_ticker}_{config.lighter_ticker}".replace("/", "-")
+        debug_flag = os.getenv("LIGHTER_DEBUG_ORDERS") or ""
+        self._debug_orders = debug_flag.strip().lower() in {"1", "true", "yes", "on"}
         self.logger = TradingLogger(
             exchange="hedge",
             ticker=ticker_label,
             log_to_console=bool(getattr(config, "log_to_console", False)),
+            enable_debug=self._debug_orders,
         )
 
         market_type_raw = getattr(config, "lighter_market_type", "perp") or "perp"
