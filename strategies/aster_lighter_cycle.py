@@ -3949,10 +3949,14 @@ class HedgingCycleExecutor:
 
         last_status_logged: Optional[str] = None
         last_remaining_logged: Optional[Decimal] = None
+        tracker_mismatch_logged = False
+        tracker_missing_logged = False
+        tracker_idle_logged = False
 
         while time.time() < deadline:
             current_order = getattr(self.lighter_client, "current_order", None)
             client_identifier = getattr(self.lighter_client, "current_order_client_id", None)
+
             if current_order and client_identifier == target_client_id:
                 status = current_order.status
                 remaining = getattr(current_order, "remaining_size", None)
@@ -3971,6 +3975,49 @@ class HedgingCycleExecutor:
                     return current_order
                 if status in {"CANCELED", "REJECTED", "EXPIRED"}:
                     raise RuntimeError(f"{leg_name} | Lighter order ended with status {status}")
+                tracker_idle_logged = False
+                tracker_mismatch_logged = False
+                tracker_missing_logged = False
+            else:
+                tracked_status = getattr(current_order, "status", None) if current_order else None
+                tracked_side = getattr(current_order, "side", None) if current_order else None
+                tracked_order_id = getattr(current_order, "order_id", None) if current_order else None
+
+                if client_identifier and client_identifier != target_client_id and not tracker_mismatch_logged:
+                    self.logger.log(
+                        (
+                            f"{leg_name} | Lighter tracker points to client_id={client_identifier} "
+                            f"(order_id={tracked_order_id}, status={tracked_status}, side={tracked_side}) while waiting for {target_client_id}. "
+                            "Likely previous order still in cache; waiting for websocket state to advance."
+                        ),
+                        "DEBUG",
+                    )
+                    tracker_mismatch_logged = True
+                    tracker_missing_logged = False
+                elif current_order is None and not tracker_missing_logged:
+                    self.logger.log(
+                        (
+                            f"{leg_name} | Lighter tracker has no current order while waiting for client_id={target_client_id}. "
+                            "This usually means the websocket hasn't delivered an update yet; will keep polling."
+                        ),
+                        "DEBUG",
+                    )
+                    tracker_missing_logged = True
+                elif (
+                    current_order
+                    and client_identifier == target_client_id
+                    and tracked_status not in {"FILLED", "CANCELED", "REJECTED", "EXPIRED"}
+                    and not tracker_idle_logged
+                ):
+                    self.logger.log(
+                        (
+                            f"{leg_name} | Lighter order still pending: status={tracked_status}, filled={current_order.filled_size}, "
+                            f"remaining={getattr(current_order, 'remaining_size', None)}, price={current_order.price}"
+                        ),
+                        "DEBUG",
+                    )
+                    tracker_idle_logged = True
+
             await asyncio.sleep(self.config.poll_interval)
 
         self.logger.log(
@@ -3997,6 +4044,20 @@ class HedgingCycleExecutor:
             )
 
         current_order = getattr(self.lighter_client, "current_order", None)
+        tracker_client_identifier = getattr(self.lighter_client, "current_order_client_id", None)
+        tracker_status = getattr(current_order, "status", None) if current_order else None
+        tracker_remaining = getattr(current_order, "remaining_size", None) if current_order else None
+        tracker_filled = getattr(current_order, "filled_size", None) if current_order else None
+        tracker_order_id = getattr(current_order, "order_id", None) if current_order else None
+        tracker_side = getattr(current_order, "side", None) if current_order else None
+        self.logger.log(
+            (
+                f"{leg_name} | Timeout snapshot -> tracked_client_id={tracker_client_identifier}, "
+                f"order_id={tracker_order_id}, status={tracker_status}, side={tracker_side}, "
+                f"filled={tracker_filled}, remaining={tracker_remaining}"
+            ),
+            "WARNING",
+        )
         assumed_price = Decimal("0")
         if current_order is not None:
             price_candidate = getattr(current_order, "price", None)
