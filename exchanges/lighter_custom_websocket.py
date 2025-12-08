@@ -274,6 +274,57 @@ class LighterCustomWebSocketManager:
         except Exception as e:
             self._log(f"Error handling order update: {e}", "ERROR")
 
+    def _candidate_market_keys(self) -> List[Any]:
+        """Return possible keys used by the stream for this market."""
+        keys: List[Any] = []
+
+        def _append_variants(value: Any) -> None:
+            if value is None:
+                return
+            for variant in (value, str(value)):
+                if variant not in keys:
+                    keys.append(variant)
+            # Try integer conversion when the original looked like a number
+            try:
+                numeric = int(str(value))
+            except (TypeError, ValueError):
+                return
+            if numeric not in keys:
+                keys.append(numeric)
+
+        _append_variants(self.market_index)
+        _append_variants(getattr(self.config, "market_index", None))
+        _append_variants(getattr(self.config, "contract_id", None))
+
+        return keys
+
+    def _extract_orders_for_market(self, orders_payload: Any) -> List[Dict[str, Any]]:
+        """Extract account order updates for the configured market."""
+        if not isinstance(orders_payload, dict):
+            return []
+
+        keys_to_try = self._candidate_market_keys()
+        for key in keys_to_try:
+            if key in orders_payload:
+                return orders_payload[key] or []
+
+        # Fallback: compare via string forms without exact key match
+        target = None
+        for key in keys_to_try:
+            if key is not None:
+                target = str(key)
+                break
+
+        if target is not None:
+            for incoming_key, value in orders_payload.items():
+                try:
+                    if str(incoming_key) == target:
+                        return value or []
+                except Exception:
+                    continue
+
+        return []
+
     async def connect(self):
         """Connect to Lighter WebSocket using custom implementation."""
         cleanup_counter = 0
@@ -413,8 +464,14 @@ class LighterCustomWebSocketManager:
                                     # Respond to ping with pong
                                     await self.ws.send(json.dumps({"type": "pong"}))
                                 elif data.get("type") == "update/account_orders":
-                                    # Handle account orders updates
-                                    orders = data.get("orders", {}).get(str(self.market_index), [])
+                                    orders_payload = data.get("orders", {})
+                                    orders = self._extract_orders_for_market(orders_payload)
+                                    if not orders and orders_payload:
+                                        self._log(
+                                            "Received account_orders update but no entries matched configured market; "
+                                            "check market_index/contract_id mapping",
+                                            "DEBUG",
+                                        )
                                     self.handle_order_update(orders)
                                 elif data.get("type") == "update/order_book" and not self.snapshot_loaded:
                                     # Ignore updates until we have the initial snapshot
