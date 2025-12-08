@@ -89,10 +89,15 @@ class LighterClient(BaseExchangeClient):
         self.current_order = None
         self.market_detail = None
         self.market_index: Optional[int] = None
-        self.market_type = getattr(self.config, "market_type", None)
-        self.base_asset_id = getattr(self.config, "base_asset_id", None)
-        self.quote_asset_id = getattr(self.config, "quote_asset_id", None)
-        self.base_asset_symbol = getattr(self.config, "base_asset_symbol", None)
+        raw_market_type = getattr(self.config, "market_type", None)
+        self.market_type = raw_market_type.lower() if isinstance(raw_market_type, str) else raw_market_type
+        self.base_asset_id = self._coerce_int(getattr(self.config, "base_asset_id", None))
+        self.quote_asset_id = self._coerce_int(getattr(self.config, "quote_asset_id", None))
+        initial_symbol = getattr(self.config, "base_asset_symbol", None)
+        normalized_symbol = self._normalize_asset_symbol(initial_symbol)
+        self.base_asset_symbol = normalized_symbol
+        if normalized_symbol and normalized_symbol != initial_symbol:
+            setattr(self.config, "base_asset_symbol", normalized_symbol)
         self.default_initial_margin_fraction: Optional[int] = None
         self.min_initial_margin_fraction: Optional[int] = None
         self.default_leverage: Optional[int] = None
@@ -260,6 +265,86 @@ class LighterClient(BaseExchangeClient):
         override_text = str(override).strip()
         return override_text or DEFAULT_SPOT_MARKET_ID
 
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _normalize_asset_symbol(self, symbol_value: Any) -> Optional[str]:
+        if not isinstance(symbol_value, str):
+            return None
+        text = symbol_value.strip()
+        if not text:
+            return None
+
+        candidate = text.upper()
+
+        for prefix in ("SPOT-", "SPOT_", "SPOT/"):
+            if candidate.startswith(prefix):
+                candidate = candidate[len(prefix):]
+                break
+
+        for suffix in ("-PERP", "_PERP", "/PERP", "PERP", "-SPOT", "_SPOT", "/SPOT", "SPOT"):
+            if candidate.endswith(suffix):
+                candidate = candidate[: -len(suffix)]
+                break
+
+        for separator in ("-", "/", "_"):
+            if separator in candidate:
+                candidate = candidate.split(separator, 1)[0]
+                break
+
+        candidate = candidate.strip()
+        return candidate or None
+
+    def _ensure_base_asset_symbol(self) -> Optional[str]:
+        if self.base_asset_symbol:
+            return self.base_asset_symbol
+
+        for source in (
+            getattr(self.config, "base_asset_symbol", None),
+            getattr(self.config, "ticker", None),
+        ):
+            normalized = self._normalize_asset_symbol(source)
+            if normalized:
+                self.base_asset_symbol = normalized
+                setattr(self.config, "base_asset_symbol", normalized)
+                return normalized
+
+        return None
+
+    def _apply_market_metadata(
+        self,
+        *,
+        symbol: Any = None,
+        base_asset_id: Any = None,
+        quote_asset_id: Any = None,
+        market_type: Any = None,
+    ) -> None:
+        normalized_symbol = self._normalize_asset_symbol(symbol)
+        if normalized_symbol:
+            self.base_asset_symbol = normalized_symbol
+            setattr(self.config, "base_asset_symbol", normalized_symbol)
+
+        parsed_base_id = self._coerce_int(base_asset_id)
+        if parsed_base_id is not None:
+            self.base_asset_id = parsed_base_id
+            setattr(self.config, "base_asset_id", parsed_base_id)
+
+        parsed_quote_id = self._coerce_int(quote_asset_id)
+        if parsed_quote_id is not None:
+            self.quote_asset_id = parsed_quote_id
+            setattr(self.config, "quote_asset_id", parsed_quote_id)
+
+        if isinstance(market_type, str) and market_type.strip():
+            normalized_type = market_type.strip().lower()
+            self.market_type = normalized_type
+            setattr(self.config, "market_type", normalized_type)
+
     def _extract_spot_balance(self, account: Any) -> Decimal:
         assets = getattr(account, "assets", None)
         if assets is None:
@@ -268,20 +353,19 @@ class LighterClient(BaseExchangeClient):
         if not assets:
             return Decimal("0")
 
-        base_id = self.base_asset_id
-        base_symbol = (self.base_asset_symbol or "").upper()
+        base_id = self._coerce_int(self.base_asset_id)
+        base_symbol_value = self._ensure_base_asset_symbol()
+        base_symbol = base_symbol_value.upper() if base_symbol_value else ""
 
         for asset in assets:
-            asset_id = self._extract_mapping_value(asset, "asset_id")
+            asset_id = self._coerce_int(self._extract_mapping_value(asset, "asset_id"))
             if base_id is not None:
-                try:
-                    if int(asset_id) != int(base_id):
-                        continue
-                except (TypeError, ValueError):
+                if asset_id is None or asset_id != base_id:
                     continue
             elif base_symbol:
                 symbol_value = self._extract_mapping_value(asset, "symbol")
-                if not isinstance(symbol_value, str) or symbol_value.upper() != base_symbol:
+                symbol_normalized = self._normalize_asset_symbol(symbol_value)
+                if not symbol_normalized or symbol_normalized.upper() != base_symbol:
                     continue
             elif asset_id is None:
                 continue
@@ -554,36 +638,12 @@ class LighterClient(BaseExchangeClient):
 
                     # Store market info and asset metadata for later use
                     self.config.market_info = market
-
-                    market_type_value = getattr(market, "market_type", None)
-                    if isinstance(market_type_value, str):
-                        self.market_type = market_type_value.lower()
-
-                    self.base_asset_id = getattr(market, "base_asset_id", None)
-                    self.quote_asset_id = getattr(market, "quote_asset_id", None)
-
-                    symbol_value = getattr(market, "symbol", None)
-                    if isinstance(symbol_value, str) and symbol_value:
-                        symbol_text = symbol_value.strip()
-                        base_symbol = symbol_text
-                        if "-" in symbol_text:
-                            base_symbol = symbol_text.split("-", 1)[0]
-                        elif symbol_text.endswith("PERP"):
-                            base_symbol = symbol_text[:-4]
-                        elif symbol_text.endswith("-PERP"):
-                            base_symbol = symbol_text[:-5]
-                        normalized_symbol = base_symbol.strip().upper()
-                        if normalized_symbol:
-                            self.base_asset_symbol = normalized_symbol
-
-                    if self.base_asset_symbol:
-                        setattr(self.config, "base_asset_symbol", self.base_asset_symbol)
-                    if self.base_asset_id is not None:
-                        setattr(self.config, "base_asset_id", self.base_asset_id)
-                    if self.quote_asset_id is not None:
-                        setattr(self.config, "quote_asset_id", self.quote_asset_id)
-                    if self.market_type:
-                        setattr(self.config, "market_type", self.market_type)
+                    self._apply_market_metadata(
+                        symbol=getattr(market, "symbol", None),
+                        base_asset_id=getattr(market, "base_asset_id", None),
+                        quote_asset_id=getattr(market, "quote_asset_id", None),
+                        market_type=getattr(market, "market_type", None),
+                    )
 
                     self.logger.log(
                         f"Market config for {ticker}: ID={market_id}, "
@@ -1537,6 +1597,14 @@ class LighterClient(BaseExchangeClient):
                 self.logger.log("Failed to get markets", "ERROR")
                 raise ValueError("Failed to get markets")
 
+        if market_info is not None:
+            self._apply_market_metadata(
+                symbol=getattr(market_info, "symbol", None),
+                base_asset_id=getattr(market_info, "base_asset_id", None),
+                quote_asset_id=getattr(market_info, "quote_asset_id", None),
+                market_type=getattr(market_info, "market_type", None),
+            )
+
         market_identifier_text: Optional[str] = spot_override
         if market_identifier_text is None:
             market_identifier_text = str(getattr(market_info, "market_id", "")).strip()
@@ -1564,6 +1632,12 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("Failed to load market details")
 
         order_book_details = details_list[0]
+        self._apply_market_metadata(
+            symbol=getattr(order_book_details, "symbol", None),
+            base_asset_id=getattr(order_book_details, "base_asset_id", None),
+            quote_asset_id=getattr(order_book_details, "quote_asset_id", None),
+            market_type=getattr(order_book_details, "market_type", None),
+        )
         # Set contract_id to market name (Lighter uses market IDs as identifiers)
         contract_identifier = str(market_index_value)
         setattr(self.config, "contract_id", contract_identifier)

@@ -45,8 +45,8 @@ def _set_envvars(monkeypatch):
     monkeypatch.setenv("LIGHTER_API_KEY_INDEX", "0")
 
 
-def _make_client(contract_id):
-    config = DummyConfig(ticker="TEST-USD", contract_id=contract_id)
+def _make_client(contract_id, ticker="TEST-USD"):
+    config = DummyConfig(ticker=ticker, contract_id=contract_id)
     return LighterClient(config)
 
 
@@ -105,6 +105,38 @@ def test_extract_spot_balance_falls_back_to_symbol():
     result = client._extract_spot_balance(account)
 
     assert result == Decimal("4.4")
+
+
+def test_extract_spot_balance_uses_ticker_when_metadata_missing():
+    client = _make_client(contract_id=1, ticker="eth-usdc")
+    client.base_asset_id = None
+    client.base_asset_symbol = None
+
+    account = DummyAccount(
+        assets=[
+            DummyAsset(symbol="ETH", balance="7.25"),
+        ]
+    )
+
+    result = client._extract_spot_balance(account)
+
+    assert result == Decimal("7.25")
+
+
+def test_extract_spot_balance_normalizes_asset_symbol_variants():
+    client = _make_client(contract_id=1, ticker="spot-eth-usdc")
+    client.base_asset_id = None
+    client.base_asset_symbol = None
+
+    account = DummyAccount(
+        assets=[
+            DummyAsset(symbol="SPOT-ETH", balance="1.01"),
+        ]
+    )
+
+    result = client._extract_spot_balance(account)
+
+    assert result == Decimal("1.01")
 
 
 def test_get_account_positions_returns_spot_balance(monkeypatch):
