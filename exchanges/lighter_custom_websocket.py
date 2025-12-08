@@ -393,9 +393,9 @@ class LighterCustomWebSocketManager:
                     # Get auth token for the subscription
                     try:
                         if self.lighter_client:
-                            # Set auth token to expire in 10 minutes
-                            ten_minutes_deadline = int(time.time() + 10 * 60)
-                            auth_token, err = self.lighter_client.create_auth_token_with_expiry(ten_minutes_deadline)
+                            # Set auth token to expire in 10 minutes (duration, not absolute timestamp)
+                            ten_minutes_duration = 10 * 60
+                            auth_token, err = self.lighter_client.create_auth_token_with_expiry(ten_minutes_duration)
                             if err is not None:
                                 self._log(f"Failed to create auth token for account orders subscription: {err}", "WARNING")
                             else:
