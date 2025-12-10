@@ -1512,12 +1512,12 @@
             <span class="sim-slider-note" id="sim-start-note">--</span>
           </label>
           <label>
-            Long BTC (X)
-            <input type="number" id="sim-btc-amount" min="0" step="0.1" value="1" />
+            Long BTC Value (X · USDT)
+            <input type="number" id="sim-btc-amount" min="0" step="1000" value="100000" />
           </label>
           <label>
-            Short ETH (Y)
-            <input type="number" id="sim-eth-amount" min="0" step="0.1" value="1.5" />
+            Short ETH Value (Y · USDT)
+            <input type="number" id="sim-eth-amount" min="0" step="1000" value="150000" />
           </label>
         </div>
         <canvas id="sim-chart" height="320"></canvas>
@@ -2689,6 +2689,22 @@
         return numeric.toFixed(fractionDigits);
       }
 
+      function formatUsd(value) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return '--';
+        }
+        return `$${numberFormatter.format(numeric)}`;
+      }
+
+      function formatCoinAmount(value, fractionDigits = 4) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) {
+          return '--';
+        }
+        return numeric.toFixed(fractionDigits);
+      }
+
       function formatDuration(seconds) {
         if (!Number.isFinite(seconds) || seconds <= 0) {
           return '0s';
@@ -2779,12 +2795,12 @@
           simStartInput.value = String(Math.min(maxDays, defaultDays));
         }
         if (simBtcInput) {
-          const longAmount = Number(data.default?.long_amount ?? 1);
-          simBtcInput.value = Number.isFinite(longAmount) ? longAmount : 1;
+          const longValue = Number(data.default?.long_value ?? 100000);
+          simBtcInput.value = Number.isFinite(longValue) ? longValue : 100000;
         }
         if (simEthInput) {
-          const shortAmount = Number(data.default?.short_amount ?? 1.5);
-          simEthInput.value = Number.isFinite(shortAmount) ? shortAmount : 1.5;
+          const shortValue = Number(data.default?.short_value ?? 150000);
+          simEthInput.value = Number.isFinite(shortValue) ? shortValue : 150000;
         }
       }
 
@@ -2814,7 +2830,7 @@
         return series;
       }
 
-      function updateSimulationSummary(series, { btcAmount, ethAmount, startIndex } = {}) {
+      function updateSimulationSummary(series, { btcAmount, ethAmount, btcValue, ethValue, startIndex } = {}) {
         if (!simulationDataset) {
           return;
         }
@@ -2831,11 +2847,13 @@
         if (simExposureValue) {
           const longLabel = simulationDataset.long_label || simulationDataset.long_symbol || 'BTC';
           const shortLabel = simulationDataset.short_label || simulationDataset.short_symbol || 'ETH';
-          const longValue = Number(btcAmount);
-          const shortValue = Number(ethAmount);
-          const longText = Number.isFinite(longValue) ? longValue.toFixed(2) : '--';
-          const shortText = Number.isFinite(shortValue) ? shortValue.toFixed(2) : '--';
-          simExposureValue.textContent = `+${longText} ${longLabel} / -${shortText} ${shortLabel}`;
+          const longUsdText = formatUsd(btcValue);
+          const shortUsdText = formatUsd(ethValue);
+          const longCoinText = formatCoinAmount(btcAmount, 4);
+          const shortCoinText = formatCoinAmount(ethAmount, 4);
+          const longSide = `${longUsdText !== '--' ? `+${longUsdText}` : '+--'} ${longLabel} (~${longCoinText} ${longLabel})`;
+          const shortSide = `${shortUsdText !== '--' ? `-${shortUsdText}` : '- --'} ${shortLabel} (~${shortCoinText} ${shortLabel})`;
+          simExposureValue.textContent = `${longSide} / ${shortSide}`;
         }
         if (simPnLValue) {
           const latest = series?.length ? series[series.length - 1].pnl : null;
@@ -2974,17 +2992,28 @@
         const sliderDays = simStartInput ? Number(simStartInput.value) : 0;
         const clampedDays = clamp(sliderDays, 0, maxDays);
         const startIndex = Math.min(simulationDataset.points.length - 1, Math.round(clampedDays * samplesPerDay));
-        let btcAmount = parseDecimal(simBtcInput?.value);
-        if (!Number.isFinite(btcAmount) || btcAmount <= 0) {
-          btcAmount = simulationDataset.default?.long_amount ?? 1;
+        let btcValue = parseDecimal(simBtcInput?.value);
+        if (!Number.isFinite(btcValue) || btcValue <= 0) {
+          btcValue = simulationDataset.default?.long_value ?? 100000;
         }
-        let ethAmount = parseDecimal(simEthInput?.value);
-        if (!Number.isFinite(ethAmount) || ethAmount <= 0) {
-          ethAmount = simulationDataset.default?.short_amount ?? 1.5;
+        let ethValue = parseDecimal(simEthInput?.value);
+        if (!Number.isFinite(ethValue) || ethValue <= 0) {
+          ethValue = simulationDataset.default?.short_value ?? 150000;
+        }
+        const anchor = simulationDataset.points[startIndex];
+        const btcPrice = Number(anchor?.long ?? anchor?.btc ?? anchor?.price ?? 0);
+        const ethPrice = Number(anchor?.short ?? anchor?.eth ?? 0);
+        let btcAmount = btcPrice > 0 ? btcValue / btcPrice : 0;
+        let ethAmount = ethPrice > 0 ? ethValue / ethPrice : 0;
+        if ((!Number.isFinite(btcAmount) || btcAmount <= 0) && Number.isFinite(simulationDataset.default?.long_amount)) {
+          btcAmount = simulationDataset.default.long_amount;
+        }
+        if ((!Number.isFinite(ethAmount) || ethAmount <= 0) && Number.isFinite(simulationDataset.default?.short_amount)) {
+          ethAmount = simulationDataset.default.short_amount;
         }
         const series = computeSimulationSeries(simulationDataset.points, startIndex, btcAmount, ethAmount);
         simulationSeries = series;
-        updateSimulationSummary(series, { btcAmount, ethAmount, startIndex });
+        updateSimulationSummary(series, { btcAmount, ethAmount, btcValue, ethValue, startIndex });
         renderSimulationChart(series);
       }
 

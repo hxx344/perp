@@ -2087,8 +2087,8 @@ class CoordinatorApp:
             value = abs(value)
             return value if value > 0 else fallback
 
-        long_amount = _resolve_amount("long_amount", "btc_amount", 1.0)
-        short_amount = _resolve_amount("short_amount", "eth_amount", 1.5)
+        long_value = _resolve_amount("long_amount", "btc_amount", 100000.0)
+        short_value = _resolve_amount("short_amount", "eth_amount", 150000.0)
 
         try:
             long_series = await self._price_service.get_series(long_symbol, interval=normalized_interval, points=target_points)
@@ -2113,6 +2113,18 @@ class CoordinatorApp:
         raw_start_index = int(start_offset_days * samples_per_day)
         start_index = min(max(0, raw_start_index), max_start_index)
 
+        anchor_point = points[start_index] if start_index < len(points) else None
+        base_long_price = float(anchor_point.get("long", 0.0)) if anchor_point else 0.0
+        base_short_price = float(anchor_point.get("short", 0.0)) if anchor_point else 0.0
+
+        def _notional_to_quantity(value: float, price: float) -> float:
+            if value <= 0 or price <= 0:
+                return 0.0
+            return value / price
+
+        long_amount = _notional_to_quantity(long_value, base_long_price)
+        short_amount = _notional_to_quantity(short_value, base_short_price)
+
         pnl_series = self._compute_pair_pnl_series(points, start_index, long_amount, short_amount)
         start_anchor_ts = points[start_index]["ts"] if start_index < len(points) else None
         latest_pnl = pnl_series[-1]["pnl"] if pnl_series else 0.0
@@ -2133,6 +2145,8 @@ class CoordinatorApp:
                 "start_index": start_index,
                 "start_ts": start_anchor_ts,
                 "start_iso": self._format_iso_timestamp(start_anchor_ts),
+                "long_value": long_value,
+                "short_value": short_value,
                 "long_amount": long_amount,
                 "short_amount": short_amount,
                 "series": [
