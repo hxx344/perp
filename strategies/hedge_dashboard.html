@@ -144,6 +144,35 @@
         color: #8a94a6;
       }
 
+      .sim-optimize-row {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin: -0.25rem 0 1rem;
+      }
+
+      .sim-optimize-row button {
+        padding: 0.5rem 1.25rem;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: transparent;
+        color: #f5f7fb;
+        font-size: 0.9rem;
+        cursor: pointer;
+        transition: background 0.2s ease, border-color 0.2s ease;
+      }
+
+      .sim-optimize-row button:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.08);
+        border-color: rgba(255, 255, 255, 0.2);
+      }
+
+      .sim-optimize-row button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
       #sim-chart {
         width: 100%;
         height: 320px;
@@ -1520,6 +1549,10 @@
             <input type="number" id="sim-eth-amount" min="0" step="1000" value="150000" />
           </label>
         </div>
+        <div class="sim-optimize-row">
+          <button type="button" id="sim-optimize">计算最佳配比</button>
+          <span class="sim-slider-note" id="sim-optimize-note">基于当前 t 的移动平均平滑度</span>
+        </div>
         <canvas id="sim-chart" height="320"></canvas>
         <p class="sim-status" id="sim-status">数据源：Binance 1h klines</p>
       </div>
@@ -2186,6 +2219,11 @@
     const simDateRangeBadge = document.getElementById('sim-date-range');
     const simStatus = document.getElementById('sim-status');
     const simRefreshButton = document.getElementById('sim-refresh');
+    const simOptimizeButton = document.getElementById('sim-optimize');
+  const simOptimizeNote = document.getElementById('sim-optimize-note');
+    if (simOptimizeButton) {
+      simOptimizeButton.disabled = true;
+    }
   const MAX_SPREAD_HISTORY_POINTS = 1800;
     const MAX_STRATEGY_EVENTS = 120;
   const MAX_GRVT_POSITIONS = 12;
@@ -2310,6 +2348,7 @@
   let simulationDataset = null;
   let simulationSeries = [];
   let simulationBusy = false;
+  let simOptimizeBusy = false;
 
       const numberFormatter = new Intl.NumberFormat(undefined, {
         minimumFractionDigits: 2,
@@ -2769,6 +2808,126 @@
         return `${formatDateLabel(firstTs)} — ${formatDateLabel(lastTs)}`;
       }
 
+      function computeSelectedStartIndex() {
+        if (!simulationDataset || !Array.isArray(simulationDataset.points) || !simulationDataset.points.length) {
+          return 0;
+        }
+        const samplesPerDay = Math.max(1, Number(simulationDataset.samples_per_day) || 24);
+        const maxDays = Number(simStartInput?.max || 0);
+        const sliderDays = simStartInput ? Number(simStartInput.value) : 0;
+        const clampedDays = clamp(sliderDays, 0, maxDays);
+        return Math.min(simulationDataset.points.length - 1, Math.round(clampedDays * samplesPerDay));
+      }
+
+      function computeMovingAverageScore(series, windowSize) {
+        if (!Array.isArray(series) || !series.length) {
+          return Number.POSITIVE_INFINITY;
+        }
+        const window = Math.max(2, Math.min(windowSize, series.length));
+        const queue = [];
+        let runningSum = 0;
+        let totalAbs = 0;
+        let sampleCount = 0;
+        for (const point of series) {
+          const value = Number(point.pnl);
+          if (!Number.isFinite(value)) {
+            continue;
+          }
+          queue.push(value);
+          runningSum += value;
+          if (queue.length > window) {
+            runningSum -= queue.shift();
+          }
+          if (queue.length === window) {
+            const avg = runningSum / window;
+            totalAbs += Math.abs(avg);
+            sampleCount += 1;
+          }
+        }
+        if (!sampleCount) {
+          return Number.POSITIVE_INFINITY;
+        }
+        return totalAbs / sampleCount;
+      }
+
+      function generateScaleValues(min, max, steps) {
+        const normalizedSteps = Math.max(2, steps);
+        const values = [];
+        for (let index = 0; index < normalizedSteps; index += 1) {
+          const ratio = normalizedSteps === 1 ? 0 : index / (normalizedSteps - 1);
+          values.push(min + ratio * (max - min));
+        }
+        return values;
+      }
+
+      function computeOptimalExposure(startIndex) {
+        if (!simulationDataset || !Array.isArray(simulationDataset.points) || !simulationDataset.points.length) {
+          return null;
+        }
+        const points = simulationDataset.points;
+        const anchor = points[startIndex];
+        if (!anchor) {
+          return null;
+        }
+        const btcPrice = Number(anchor.long ?? anchor.btc ?? anchor.price ?? 0);
+        const ethPrice = Number(anchor.short ?? anchor.eth ?? 0);
+        if (!(btcPrice > 0 && ethPrice > 0)) {
+          return null;
+        }
+        const currentLongValue = parseDecimal(simBtcInput?.value);
+        const currentShortValue = parseDecimal(simEthInput?.value);
+        const fallbackLong = Number(simulationDataset.default?.long_value ?? 100000);
+        const fallbackShort = Number(simulationDataset.default?.short_value ?? 150000);
+        const baseLongValue = Number.isFinite(currentLongValue) && currentLongValue > 0 ? currentLongValue : fallbackLong;
+        const baseShortValue = Number.isFinite(currentShortValue) && currentShortValue > 0 ? currentShortValue : fallbackShort;
+
+        const samplesPerDay = Math.max(1, Number(simulationDataset.samples_per_day) || 24);
+        const windowSize = Math.max(4, Math.round(samplesPerDay));
+        const longScales = generateScaleValues(0.25, 2.5, 12);
+        const shortScales = generateScaleValues(0.25, 2.5, 12);
+
+        let best = null;
+        for (const longScale of longScales) {
+          const longValue = baseLongValue * longScale;
+          if (!(longValue > 0)) {
+            continue;
+          }
+          const longAmount = longValue / btcPrice;
+          if (!(longAmount > 0)) {
+            continue;
+          }
+          for (const shortScale of shortScales) {
+            const shortValue = baseShortValue * shortScale;
+            if (!(shortValue > 0)) {
+              continue;
+            }
+            const shortAmount = shortValue / ethPrice;
+            if (!(shortAmount > 0)) {
+              continue;
+            }
+            const series = computeSimulationSeries(points, startIndex, longAmount, shortAmount);
+            if (!series.length) {
+              continue;
+            }
+            const score = computeMovingAverageScore(series, windowSize);
+            if (!Number.isFinite(score)) {
+              continue;
+            }
+            if (!best || score < best.score) {
+              best = {
+                score,
+                series,
+                longValue,
+                shortValue,
+                longAmount,
+                shortAmount,
+              };
+            }
+          }
+        }
+        return best;
+      }
+
       function updateSimulationStatus() {
         if (!simStatus || !simulationDataset) {
           return;
@@ -2801,6 +2960,9 @@
         if (simEthInput) {
           const shortValue = Number(data.default?.short_value ?? 150000);
           simEthInput.value = Number.isFinite(shortValue) ? shortValue : 150000;
+        }
+        if (simOptimizeButton) {
+          simOptimizeButton.disabled = false;
         }
       }
 
@@ -2987,11 +3149,7 @@
         if (!simulationDataset || !Array.isArray(simulationDataset.points) || !simulationDataset.points.length) {
           return;
         }
-        const samplesPerDay = Math.max(1, Number(simulationDataset.samples_per_day) || 24);
-        const maxDays = Number(simStartInput?.max || 0);
-        const sliderDays = simStartInput ? Number(simStartInput.value) : 0;
-        const clampedDays = clamp(sliderDays, 0, maxDays);
-        const startIndex = Math.min(simulationDataset.points.length - 1, Math.round(clampedDays * samplesPerDay));
+        const startIndex = computeSelectedStartIndex();
         let btcValue = parseDecimal(simBtcInput?.value);
         if (!Number.isFinite(btcValue) || btcValue <= 0) {
           btcValue = simulationDataset.default?.long_value ?? 100000;
@@ -3015,6 +3173,68 @@
         simulationSeries = series;
         updateSimulationSummary(series, { btcAmount, ethAmount, btcValue, ethValue, startIndex });
         renderSimulationChart(series);
+      }
+
+      function handleSimOptimizeRequest(event) {
+        if (event) {
+          event.preventDefault();
+        }
+        if (simOptimizeBusy) {
+          return;
+        }
+        if (!simulationDataset || !Array.isArray(simulationDataset.points) || !simulationDataset.points.length) {
+          if (simOptimizeNote) {
+            simOptimizeNote.textContent = '请先加载模拟数据';
+          }
+          return;
+        }
+        simOptimizeBusy = true;
+        if (simOptimizeButton) {
+          simOptimizeButton.disabled = true;
+        }
+        if (simOptimizeNote) {
+          simOptimizeNote.textContent = '正在搜索最平滑的组合…';
+        }
+        try {
+          const startIndex = computeSelectedStartIndex();
+          const best = computeOptimalExposure(startIndex);
+          if (!best) {
+            if (simOptimizeNote) {
+              simOptimizeNote.textContent = '未找到更优的组合，试试调整窗口或输入值';
+            }
+            return;
+          }
+          const roundValue = (value) => {
+            if (!Number.isFinite(value) || value <= 0) {
+              return 0;
+            }
+            const rounded = Math.round(value / 1000) * 1000;
+            return Math.max(1000, rounded);
+          };
+          const roundedLongValue = roundValue(best.longValue);
+          const roundedShortValue = roundValue(best.shortValue);
+          if (simBtcInput) {
+            simBtcInput.value = String(roundedLongValue);
+          }
+          if (simEthInput) {
+            simEthInput.value = String(roundedShortValue);
+          }
+          updateSimulationFromInputs();
+          if (simOptimizeNote) {
+            const longText = `${formatUsd(roundedLongValue)} · ~${formatCoinAmount(best.longAmount, 4)} BTC`;
+            const shortText = `${formatUsd(roundedShortValue)} · ~${formatCoinAmount(best.shortAmount, 4)} ETH`;
+            simOptimizeNote.textContent = `最佳配比：${longText} / -${shortText} · 平滑分数 ${best.score.toFixed(4)}`;
+          }
+        } catch (error) {
+          if (simOptimizeNote) {
+            simOptimizeNote.textContent = `计算失败：${error?.message || error}`;
+          }
+        } finally {
+          simOptimizeBusy = false;
+          if (simOptimizeButton) {
+            simOptimizeButton.disabled = false;
+          }
+        }
       }
 
       function describeAdjustmentAction(action) {
@@ -6782,6 +7002,9 @@
       });
       if (simRefreshButton) {
         simRefreshButton.addEventListener('click', () => loadSimulationData({ silent: false }));
+      }
+      if (simOptimizeButton) {
+        simOptimizeButton.addEventListener('click', handleSimOptimizeRequest);
       }
       if (pauseAllButton) {
         pauseAllButton.addEventListener('click', () => sendBatchControl('pause', pauseAllButton));
