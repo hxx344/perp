@@ -2819,7 +2819,7 @@
         return Math.min(simulationDataset.points.length - 1, Math.round(clampedDays * samplesPerDay));
       }
 
-      function computeMovingAverageScore(series, windowSize) {
+      function computeMovingAverageScore(series, windowSize, normalizationFactor = 1) {
         if (!Array.isArray(series) || !series.length) {
           return Number.POSITIVE_INFINITY;
         }
@@ -2828,8 +2828,9 @@
         let runningSum = 0;
         let totalAbs = 0;
         let sampleCount = 0;
+        const denom = normalizationFactor > 0 ? normalizationFactor : 1;
         for (const point of series) {
-          const value = Number(point.pnl);
+          const value = Number(point.pnl) / denom;
           if (!Number.isFinite(value)) {
             continue;
           }
@@ -2909,7 +2910,8 @@
             if (!series.length) {
               continue;
             }
-            const score = computeMovingAverageScore(series, windowSize);
+            const notionalScale = Math.max(1e-9, longValue + shortValue);
+            const score = computeMovingAverageScore(series, windowSize, notionalScale);
             if (!Number.isFinite(score)) {
               continue;
             }
