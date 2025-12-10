@@ -2934,7 +2934,9 @@
           const response = await fetch('/simulation/pnl', { cache: 'no-store' });
           redirectIfUnauthorized(response);
           if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+            const errorText = (await response.text())?.trim();
+            const suffix = errorText ? ` ${errorText}` : '';
+            throw new Error(`HTTP ${response.status}${suffix}`);
           }
           const payload = await response.json();
           simulationDataset = payload;

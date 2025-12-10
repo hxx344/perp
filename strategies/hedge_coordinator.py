@@ -501,7 +501,7 @@ class VolatilityMonitor:
             async with session.get(self._ENDPOINT, params=params) as response:
                 if response.status != 200:
                     body_preview = (await response.text())[:200]
-                    raise RuntimeError(f"HTTP {response.status} {body_preview}")
+                    raise RuntimeError(f"{symbol}: HTTP {response.status} {body_preview}")
                 payload = await response.json()
             if not isinstance(payload, list):
                 raise RuntimeError("Unexpected payload type from Binance")
@@ -860,7 +860,8 @@ class HistoricalPriceFetcher:
             text = str(symbol).strip().upper()
         except Exception:
             return ""
-        return text[:50]
+        cleaned = "".join(ch for ch in text if ch.isalnum())
+        return cleaned[:50]
 
     def _normalize_interval(self, interval: Optional[str]) -> str:
         if not interval:
@@ -2059,8 +2060,8 @@ class CoordinatorApp:
                 value = max_value
             return value
 
-        long_symbol = self._normalize_symbol(params.get("long_symbol")) or "BTCUSDT"
-        short_symbol = self._normalize_symbol(params.get("short_symbol")) or "ETHUSDT"
+        long_symbol = self._sanitize_binance_symbol(params.get("long_symbol"), "BTCUSDT")
+        short_symbol = self._sanitize_binance_symbol(params.get("short_symbol"), "ETHUSDT")
         normalized_interval = self._price_service.normalize_interval(params.get("interval"))
         interval_minutes = self._price_service.interval_minutes(normalized_interval)
         window_days = _parse_int("window_days", 365, min_value=30, max_value=365)
@@ -2090,15 +2091,18 @@ class CoordinatorApp:
         short_amount = _resolve_amount("short_amount", "eth_amount", 1.5)
 
         try:
-            long_series, short_series = await asyncio.gather(
-                self._price_service.get_series(long_symbol, interval=normalized_interval, points=target_points),
-                self._price_service.get_series(short_symbol, interval=normalized_interval, points=target_points),
-            )
+            long_series = await self._price_service.get_series(long_symbol, interval=normalized_interval, points=target_points)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            LOGGER.warning("Failed to download simulation history: %s", exc)
-            raise web.HTTPBadGateway(text="failed to download price history")
+            self._raise_price_fetch_error(exc, long_symbol)
+
+        try:
+            short_series = await self._price_service.get_series(short_symbol, interval=normalized_interval, points=target_points)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._raise_price_fetch_error(exc, short_symbol)
 
         points = self._build_simulation_points(long_series, short_series)
         if len(points) < samples_per_day * 7:
@@ -2245,6 +2249,13 @@ class CoordinatorApp:
             return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
         except (OSError, OverflowError, ValueError):
             return None
+
+    def _raise_price_fetch_error(self, exc: Exception, symbol: str) -> None:
+        message = str(exc)
+        LOGGER.warning("Failed to download simulation history for %s: %s", symbol, message)
+        if "-1121" in message or "Invalid symbol" in message:
+            raise web.HTTPBadRequest(text=f"Binance 不识别交易对 {symbol}")
+        raise web.HTTPBadGateway(text="failed to download price history")
 
     async def handle_update(self, request: web.Request) -> web.Response:
         try:
@@ -3214,6 +3225,18 @@ class CoordinatorApp:
             return ""
         text = text.upper()
         return text[:80] if text else ""
+
+    def _sanitize_binance_symbol(self, value: Any, default: str) -> str:
+        default_clean = self._normalize_symbol(default) or "BTCUSDT"
+        cleaned = self._normalize_symbol(value)
+        if not cleaned:
+            cleaned = default_clean
+        suffixes = ("USDT", "USD", "USDC", "BUSD", "FDUSD", "TRY", "EUR")
+        if any(cleaned.endswith(suffix) for suffix in suffixes):
+            return cleaned
+        if len(cleaned) <= 5:
+            return f"{cleaned}USDT"
+        return cleaned
 
     def _credentials_configured(self) -> bool:
         return bool(self._dashboard_username or self._dashboard_password)
