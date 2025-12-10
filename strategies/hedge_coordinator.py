@@ -3229,7 +3229,7 @@ class CoordinatorApp:
     def _sanitize_binance_symbol(self, value: Any, default: str) -> str:
         default_clean = self._normalize_symbol(default) or "BTCUSDT"
         cleaned = self._normalize_symbol(value)
-        if not cleaned:
+        if not cleaned or cleaned in {"NONE", "NULL", "DEFAULT", "N/A", "NA", "UNKNOWN"}:
             cleaned = default_clean
         suffixes = ("USDT", "USD", "USDC", "BUSD", "FDUSD", "TRY", "EUR")
         if any(cleaned.endswith(suffix) for suffix in suffixes):
