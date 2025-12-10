@@ -35,6 +35,7 @@ import secrets
 import signal
 import statistics
 import time
+from datetime import datetime, timezone
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -788,6 +789,173 @@ class VolatilityMonitor:
                 text = text[: -len(suffix)]
                 break
         return text or symbol
+
+
+class HistoricalPriceFetcher:
+    _ENDPOINT = "https://api.binance.com/api/v3/klines"
+    _MAX_LIMIT = 1000
+    _MAX_POINTS = 50000
+    _DEFAULT_INTERVAL = "1h"
+    _INTERVAL_MINUTES: Dict[str, int] = {
+        "1m": 1,
+        "3m": 3,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "2h": 120,
+        "4h": 240,
+        "6h": 360,
+        "8h": 480,
+        "12h": 720,
+        "1d": 1440,
+    }
+
+    def __init__(self, *, timeout: float = 10.0, cache_ttl: float = 900.0) -> None:
+        self._timeout = max(float(timeout), 3.0)
+        self._cache_ttl = max(float(cache_ttl), 60.0)
+        self._session: Optional[ClientSession] = None
+        self._lock = asyncio.Lock()
+        self._cache: Dict[str, Tuple[float, List[Dict[str, float]]]] = {}
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
+    def interval_minutes(self, interval: Optional[str]) -> int:
+        normalized = self._normalize_interval(interval)
+        return self._INTERVAL_MINUTES.get(normalized, self._INTERVAL_MINUTES[self._DEFAULT_INTERVAL])
+
+    def normalize_interval(self, interval: Optional[str]) -> str:
+        return self._normalize_interval(interval)
+
+    async def get_series(self, symbol: str, *, interval: Optional[str] = None, points: int = 1000) -> List[Dict[str, float]]:
+        normalized_symbol = self._normalize_symbol(symbol)
+        if not normalized_symbol:
+            raise ValueError("symbol is required")
+        normalized_interval = self._normalize_interval(interval)
+        clamped_points = self._clamp_points(points)
+        cache_key = self._cache_key(normalized_symbol, normalized_interval, clamped_points)
+        now = time.time()
+        async with self._lock:
+            cached = self._cache.get(cache_key)
+            if cached and cached[0] > now:
+                return copy.deepcopy(cached[1])
+
+        series = await self._download_series(normalized_symbol, normalized_interval, clamped_points)
+
+        snapshot = copy.deepcopy(series)
+        async with self._lock:
+            self._cache[cache_key] = (time.time() + self._cache_ttl, snapshot)
+        return series
+
+    def _cache_key(self, symbol: str, interval: str, points: int) -> str:
+        return f"{symbol}:{interval}:{points}"
+
+    def _normalize_symbol(self, symbol: Optional[str]) -> str:
+        if symbol is None:
+            return ""
+        try:
+            text = str(symbol).strip().upper()
+        except Exception:
+            return ""
+        return text[:50]
+
+    def _normalize_interval(self, interval: Optional[str]) -> str:
+        if not interval:
+            return self._DEFAULT_INTERVAL
+        text = str(interval).strip().lower()
+        if text.endswith("m") or text.endswith("h") or text.endswith("d"):
+            normalized = text
+        else:
+            normalized = text + ("m" if text.isdigit() else "")
+        normalized = normalized.replace("minutes", "m").replace("hours", "h").replace("days", "d")
+        normalized = normalized.replace("mins", "m").replace("hrs", "h")
+        normalized = normalized.replace("minute", "m").replace("hour", "h").replace("day", "d")
+        normalized = normalized.replace("\u5206", "m")
+        normalized = normalized.replace("\u5c0f\u65f6", "h")
+        if normalized not in self._INTERVAL_MINUTES:
+            return self._DEFAULT_INTERVAL
+        return normalized
+
+    def _clamp_points(self, points: int) -> int:
+        try:
+            value = int(points)
+        except (TypeError, ValueError):
+            value = 1000
+        if value <= 0:
+            value = 100
+        return max(100, min(value, self._MAX_POINTS))
+
+    def _ensure_session(self) -> ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = ClientSession(timeout=ClientTimeout(total=self._timeout))
+        return self._session
+
+    async def _download_series(self, symbol: str, interval: str, points: int) -> List[Dict[str, float]]:
+        session = self._ensure_session()
+        collected: List[Dict[str, float]] = []
+        end_time_ms: Optional[int] = None
+
+        while len(collected) < points:
+            batch_size = min(self._MAX_LIMIT, points - len(collected))
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "interval": interval,
+                "limit": str(batch_size),
+            }
+            if end_time_ms is not None:
+                params["endTime"] = end_time_ms
+            async with session.get(self._ENDPOINT, params=params) as response:
+                if response.status != 200:
+                    body_preview = (await response.text())[:200]
+                    raise RuntimeError(f"HTTP {response.status} {body_preview}")
+                payload = await response.json()
+            if not isinstance(payload, list) or not payload:
+                break
+            chunk: List[Dict[str, float]] = []
+            for entry in payload:
+                try:
+                    open_time = float(entry[0]) / 1000.0
+                    close_time = float(entry[6]) / 1000.0
+                    chunk.append(
+                        {
+                            "open_time": open_time,
+                            "close_time": close_time,
+                            "open": float(entry[1]),
+                            "high": float(entry[2]),
+                            "low": float(entry[3]),
+                            "close": float(entry[4]),
+                            "volume": float(entry[5]),
+                        }
+                    )
+                except (IndexError, TypeError, ValueError):
+                    continue
+            if not chunk:
+                break
+            collected = chunk + collected
+            try:
+                end_time_ms = int(payload[0][0]) - 1
+            except (TypeError, ValueError):
+                end_time_ms = None
+            if len(payload) < batch_size:
+                break
+
+        if not collected:
+            return []
+        if len(collected) > points:
+            collected = collected[-points:]
+        series: List[Dict[str, float]] = []
+        for entry in collected:
+            ts = entry.get("close_time")
+            close_price = entry.get("close")
+            if isinstance(ts, (int, float)) and isinstance(close_price, (int, float)):
+                series.append({
+                    "ts": ts,
+                    "close": close_price,
+                })
+        return series
 
 
 @dataclass
@@ -1769,6 +1937,7 @@ class CoordinatorApp:
             if enable_volatility_monitor
             else None
         )
+        self._price_service = HistoricalPriceFetcher()
         self._dashboard_username = (dashboard_username or "").strip()
         self._dashboard_password = (dashboard_password or "").strip()
         self._session_cookie: str = "hedge_session"
@@ -1811,6 +1980,7 @@ class CoordinatorApp:
                 web.post("/grvt/adjust", self.handle_grvt_adjust),
                 web.post("/grvt/transfer", self.handle_grvt_transfer),
                 web.post("/grvt/adjust/ack", self.handle_grvt_adjust_ack),
+                web.get("/simulation/pnl", self.handle_simulation_pnl),
             ]
         )
         if self._vol_monitor:
@@ -1830,6 +2000,8 @@ class CoordinatorApp:
         del app  # unused
         if self._vol_monitor:
             await self._vol_monitor.stop()
+        if self._price_service:
+            await self._price_service.close()
 
     async def handle_dashboard_redirect(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request, redirect_on_fail=True)
@@ -1849,6 +2021,230 @@ class CoordinatorApp:
         if self._vol_monitor:
             payload["volatility"] = await self._vol_monitor.snapshot()
         return web.json_response(payload)
+
+    async def handle_simulation_pnl(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        if not self._price_service:
+            raise web.HTTPServiceUnavailable(text="historical price service unavailable")
+
+        params = request.rel_url.query
+
+        def _parse_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
+            raw = params.get(name)
+            if raw is None:
+                return default
+            try:
+                value = int(float(raw))
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text=f"{name} must be numeric")
+            if value < min_value:
+                value = min_value
+            if value > max_value:
+                value = max_value
+            return value
+
+        def _parse_float(name: str, default: float, *, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
+            raw = params.get(name)
+            if raw is None:
+                return default
+            try:
+                value = float(str(raw))
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text=f"{name} must be numeric")
+            if not math.isfinite(value):
+                raise web.HTTPBadRequest(text=f"{name} must be finite")
+            if min_value is not None and value < min_value:
+                value = min_value
+            if max_value is not None and value > max_value:
+                value = max_value
+            return value
+
+        long_symbol = self._normalize_symbol(params.get("long_symbol")) or "BTCUSDT"
+        short_symbol = self._normalize_symbol(params.get("short_symbol")) or "ETHUSDT"
+        normalized_interval = self._price_service.normalize_interval(params.get("interval"))
+        interval_minutes = self._price_service.interval_minutes(normalized_interval)
+        window_days = _parse_int("window_days", 365, min_value=30, max_value=365)
+        start_offset_days = _parse_float("start_offset_days", 0.0, min_value=0.0, max_value=float(window_days))
+        samples_per_day = max(1, int(round(1440 / max(interval_minutes, 1))))
+        target_points = max(samples_per_day * window_days, samples_per_day * 30)
+
+        def _resolve_amount(primary: str, alternate: Optional[str], fallback: float) -> float:
+            raw = params.get(primary)
+            label = primary
+            if raw is None and alternate:
+                raw = params.get(alternate)
+                if raw is not None:
+                    label = alternate
+            if raw is None:
+                return fallback
+            try:
+                value = float(str(raw))
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text=f"{label} must be numeric")
+            if not math.isfinite(value):
+                raise web.HTTPBadRequest(text=f"{label} must be finite")
+            value = abs(value)
+            return value if value > 0 else fallback
+
+        long_amount = _resolve_amount("long_amount", "btc_amount", 1.0)
+        short_amount = _resolve_amount("short_amount", "eth_amount", 1.5)
+
+        try:
+            long_series, short_series = await asyncio.gather(
+                self._price_service.get_series(long_symbol, interval=normalized_interval, points=target_points),
+                self._price_service.get_series(short_symbol, interval=normalized_interval, points=target_points),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.warning("Failed to download simulation history: %s", exc)
+            raise web.HTTPBadGateway(text="failed to download price history")
+
+        points = self._build_simulation_points(long_series, short_series)
+        if len(points) < samples_per_day * 7:
+            raise web.HTTPServiceUnavailable(text="insufficient overlapping price history")
+        max_start_index = max(0, len(points) - 2)
+        max_offset_days = max_start_index / max(samples_per_day, 1)
+        start_offset_days = min(start_offset_days, max_offset_days)
+        raw_start_index = int(start_offset_days * samples_per_day)
+        start_index = min(max(0, raw_start_index), max_start_index)
+
+        pnl_series = self._compute_pair_pnl_series(points, start_index, long_amount, short_amount)
+        start_anchor_ts = points[start_index]["ts"] if start_index < len(points) else None
+        latest_pnl = pnl_series[-1]["pnl"] if pnl_series else 0.0
+        range_info = self._build_range_payload(points)
+
+        payload = {
+            "source": "binance",
+            "long_symbol": long_symbol,
+            "short_symbol": short_symbol,
+            "long_label": VolatilityMonitor._base_label(long_symbol),
+            "short_label": VolatilityMonitor._base_label(short_symbol),
+            "interval": normalized_interval,
+            "window_days": window_days,
+            "samples_per_day": samples_per_day,
+            "point_count": len(points),
+            "range": range_info,
+            "default": {
+                "start_index": start_index,
+                "start_ts": start_anchor_ts,
+                "start_iso": self._format_iso_timestamp(start_anchor_ts),
+                "long_amount": long_amount,
+                "short_amount": short_amount,
+                "series": [
+                    {"ts": row["ts"], "pnl": row["pnl"], "long": row["long"], "short": row["short"]}
+                    for row in pnl_series
+                ],
+                "latest_pnl": latest_pnl,
+            },
+            "points": [
+                {"ts": entry["ts"], "long": entry["long"], "short": entry["short"]}
+                for entry in points
+            ],
+        }
+        return web.json_response(payload)
+
+    @staticmethod
+    def _build_simulation_points(
+        long_series: Sequence[Mapping[str, Any]],
+        short_series: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, float]]:
+        def _series_to_map(series: Sequence[Mapping[str, Any]]) -> Dict[int, float]:
+            mapping: Dict[int, float] = {}
+            for entry in series or []:
+                ts_raw = entry.get("ts")
+                price_raw = entry.get("close") if "close" in entry else entry.get("price")
+                if ts_raw is None or price_raw is None:
+                    continue
+                try:
+                    ts_value = int(round(float(ts_raw)))
+                    price_value = float(price_raw)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(price_value):
+                    continue
+                mapping[ts_value] = price_value
+            return mapping
+
+        long_map = _series_to_map(long_series)
+        short_map = _series_to_map(short_series)
+        timestamps = sorted(set(long_map.keys()) & set(short_map.keys()))
+        points: List[Dict[str, float]] = []
+        for ts in timestamps:
+            long_price = long_map.get(ts)
+            short_price = short_map.get(ts)
+            if long_price is None or short_price is None:
+                continue
+            points.append({
+                "ts": float(ts),
+                "long": float(long_price),
+                "short": float(short_price),
+            })
+        return points
+
+    @staticmethod
+    def _compute_pair_pnl_series(
+        points: Sequence[Mapping[str, float]],
+        start_index: int,
+        long_amount: float,
+        short_amount: float,
+    ) -> List[Dict[str, float]]:
+        if not points:
+            return []
+        bounded_index = max(0, min(start_index, len(points) - 1))
+        anchor = points[bounded_index]
+        base_long = float(anchor.get("long", 0.0))
+        base_short = float(anchor.get("short", 0.0))
+        series: List[Dict[str, float]] = []
+        for entry in points[bounded_index:]:
+            try:
+                ts = float(entry.get("ts", 0.0))
+                long_price = float(entry.get("long", 0.0))
+                short_price = float(entry.get("short", 0.0))
+            except (TypeError, ValueError):
+                continue
+            pnl = (long_price - base_long) * long_amount - (short_price - base_short) * short_amount
+            series.append({
+                "ts": ts,
+                "pnl": pnl,
+                "long": long_price,
+                "short": short_price,
+            })
+        return series
+
+    def _build_range_payload(self, points: Sequence[Mapping[str, float]]) -> Optional[Dict[str, Any]]:
+        if not points:
+            return None
+        start_ts = points[0].get("ts")
+        end_ts = points[-1].get("ts")
+        if start_ts is None or end_ts is None:
+            return None
+        try:
+            start_value = float(start_ts)
+            end_value = float(end_ts)
+        except (TypeError, ValueError):
+            return None
+        return {
+            "start_ts": start_value,
+            "end_ts": end_value,
+            "start_iso": self._format_iso_timestamp(start_value),
+            "end_iso": self._format_iso_timestamp(end_value),
+        }
+
+    @staticmethod
+    def _format_iso_timestamp(value: Optional[float]) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            ts = float(value)
+        except (TypeError, ValueError):
+            return None
+        if ts <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        except (OSError, OverflowError, ValueError):
+            return None
 
     async def handle_update(self, request: web.Request) -> web.Response:
         try:

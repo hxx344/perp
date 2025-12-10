@@ -73,6 +73,88 @@
         margin-top: 2.5rem;
       }
 
+      .sim-section {
+        margin-top: 2.5rem;
+      }
+
+      .sim-card {
+        background: #101522;
+        border-radius: 16px;
+        padding: 1.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        box-shadow: 0 22px 46px rgba(0, 0, 0, 0.4);
+      }
+
+      .sim-summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 1rem;
+        margin-bottom: 1.25rem;
+      }
+
+      .sim-label {
+        margin: 0;
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #7f8fa9;
+      }
+
+      .sim-value {
+        margin: 0.25rem 0 0;
+        font-size: 1.8rem;
+        font-weight: 600;
+      }
+
+      .sim-controls {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 1rem;
+        margin-bottom: 1.25rem;
+      }
+
+      .sim-controls label {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+        font-size: 0.85rem;
+        color: #c7d2e8;
+      }
+
+      .sim-controls input[type="number"],
+      .sim-controls input[type="range"] {
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: #0f131d;
+        color: #f5f7fb;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.95rem;
+      }
+
+      .sim-controls input[type="range"] {
+        appearance: none;
+        height: 4px;
+        padding: 0;
+        background: linear-gradient(120deg, #4f9cff, #7c4dff);
+      }
+
+      .sim-slider-note {
+        font-size: 0.78rem;
+        color: #8a94a6;
+      }
+
+      #sim-chart {
+        width: 100%;
+        height: 320px;
+      }
+
+      .sim-status {
+        margin-top: 0.65rem;
+        font-size: 0.85rem;
+        color: #8a94a6;
+      }
+
       .vol-card {
         background: #121621;
         border-radius: 16px;
@@ -1395,6 +1477,54 @@
       </div>
     </section>
 
+    <section class="sim-section">
+      <div class="section-header">
+        <div class="section-header-info">
+          <h2>BTC / ETH Pair Simulation</h2>
+          <div class="badge-group">
+            <span class="badge badge-muted" id="sim-date-range">等待模拟数据…</span>
+          </div>
+        </div>
+        <div class="section-header-controls">
+          <button type="button" class="button-ghost" id="sim-refresh">重新抓取</button>
+        </div>
+      </div>
+      <p class="empty" id="sim-empty">加载 Binance 历史行情…</p>
+      <div class="sim-card hidden" id="sim-card">
+        <div class="sim-summary">
+          <div>
+            <p class="sim-label">Net PnL</p>
+            <p class="sim-value" id="sim-pnl-value">--</p>
+          </div>
+          <div>
+            <p class="sim-label">Exposure</p>
+            <p class="sim-value" id="sim-exposure">--</p>
+          </div>
+          <div>
+            <p class="sim-label">Start</p>
+            <p class="sim-value" id="sim-start-display">--</p>
+          </div>
+        </div>
+        <div class="sim-controls">
+          <label>
+            起点 t（距最早样本的天数）
+            <input type="range" id="sim-start" min="0" max="0" step="1" value="0" />
+            <span class="sim-slider-note" id="sim-start-note">--</span>
+          </label>
+          <label>
+            Long BTC (X)
+            <input type="number" id="sim-btc-amount" min="0" step="0.1" value="1" />
+          </label>
+          <label>
+            Short ETH (Y)
+            <input type="number" id="sim-eth-amount" min="0" step="0.1" value="1.5" />
+          </label>
+        </div>
+        <canvas id="sim-chart" height="320"></canvas>
+        <p class="sim-status" id="sim-status">数据源：Binance 1h klines</p>
+      </div>
+    </section>
+
     <section class="grvt-section">
       <div class="section-header">
         <div class="section-header-info">
@@ -2043,6 +2173,19 @@
     const volErrorBadge = document.getElementById('vol-error-badge');
     const volHedgePair = document.getElementById('vol-hedge-pair');
     const volHedgeBody = document.getElementById('vol-hedge-body');
+    const simCard = document.getElementById('sim-card');
+    const simEmpty = document.getElementById('sim-empty');
+    const simChartCanvas = document.getElementById('sim-chart');
+    const simStartInput = document.getElementById('sim-start');
+    const simStartNote = document.getElementById('sim-start-note');
+    const simStartDisplay = document.getElementById('sim-start-display');
+    const simBtcInput = document.getElementById('sim-btc-amount');
+    const simEthInput = document.getElementById('sim-eth-amount');
+    const simPnLValue = document.getElementById('sim-pnl-value');
+    const simExposureValue = document.getElementById('sim-exposure');
+    const simDateRangeBadge = document.getElementById('sim-date-range');
+    const simStatus = document.getElementById('sim-status');
+    const simRefreshButton = document.getElementById('sim-refresh');
   const MAX_SPREAD_HISTORY_POINTS = 1800;
     const MAX_STRATEGY_EVENTS = 120;
   const MAX_GRVT_POSITIONS = 12;
@@ -2164,6 +2307,9 @@
     pendingDeltaPct: 0,
     pendingSince: null,
   };
+  let simulationDataset = null;
+  let simulationSeries = [];
+  let simulationBusy = false;
 
       const numberFormatter = new Intl.NumberFormat(undefined, {
         minimumFractionDigits: 2,
@@ -2585,6 +2731,259 @@
           return null;
         }
         return new Date(seconds * 1000).toLocaleString();
+      }
+
+      function formatDateLabel(ts, { includeTime = false } = {}) {
+        if (!Number.isFinite(ts) || ts <= 0) {
+          return '—';
+        }
+        const date = new Date(ts * 1000);
+        return includeTime ? date.toLocaleString() : date.toLocaleDateString();
+      }
+
+      function formatSimRange(data) {
+        if (!data || !Array.isArray(data.points) || !data.points.length) {
+          return '等待模拟数据…';
+        }
+        const firstTs = Number(data.points[0]?.ts);
+        const lastTs = Number(data.points[data.points.length - 1]?.ts);
+        if (!Number.isFinite(firstTs) || !Number.isFinite(lastTs)) {
+          return '—';
+        }
+        return `${formatDateLabel(firstTs)} — ${formatDateLabel(lastTs)}`;
+      }
+
+      function updateSimulationStatus() {
+        if (!simStatus || !simulationDataset) {
+          return;
+        }
+        const source = (simulationDataset.source || 'market').toUpperCase();
+        const interval = simulationDataset.interval || '1h';
+        const points = simulationDataset.point_count ?? (simulationDataset.points?.length ?? 0);
+        simStatus.textContent = `数据源：${source} · 间隔 ${interval} · 样本 ${points}`;
+      }
+
+      function configureSimulationControls(data) {
+        if (!data || !Array.isArray(data.points) || !data.points.length) {
+          return;
+        }
+        const samplesPerDay = Math.max(1, Number(data.samples_per_day) || 24);
+        const maxStartIndex = Math.max(0, data.points.length - 2);
+        const maxDays = Math.max(0, Math.floor(maxStartIndex / samplesPerDay));
+        if (simStartInput) {
+          simStartInput.min = '0';
+          simStartInput.max = String(maxDays);
+          simStartInput.step = maxDays > 180 ? '2' : '1';
+          const defaultIndex = Number(data.default?.start_index ?? 0);
+          const defaultDays = Math.max(0, Math.round(defaultIndex / samplesPerDay));
+          simStartInput.value = String(Math.min(maxDays, defaultDays));
+        }
+        if (simBtcInput) {
+          const longAmount = Number(data.default?.long_amount ?? 1);
+          simBtcInput.value = Number.isFinite(longAmount) ? longAmount : 1;
+        }
+        if (simEthInput) {
+          const shortAmount = Number(data.default?.short_amount ?? 1.5);
+          simEthInput.value = Number.isFinite(shortAmount) ? shortAmount : 1.5;
+        }
+      }
+
+      function computeSimulationSeries(points, startIndex, btcAmount, ethAmount) {
+        if (!Array.isArray(points) || !points.length) {
+          return [];
+        }
+        const clampedIndex = Math.max(0, Math.min(startIndex, points.length - 1));
+        const anchor = points[clampedIndex];
+        if (!anchor) {
+          return [];
+        }
+        const baseBtc = Number(anchor.long ?? anchor.btc ?? anchor.price ?? 0);
+        const baseEth = Number(anchor.short ?? anchor.eth ?? 0);
+        const series = [];
+        for (let index = clampedIndex; index < points.length; index += 1) {
+          const entry = points[index];
+          const btc = Number(entry.long ?? entry.btc ?? entry.price);
+          const eth = Number(entry.short ?? entry.eth);
+          const ts = Number(entry.ts);
+          if (!Number.isFinite(btc) || !Number.isFinite(eth) || !Number.isFinite(ts)) {
+            continue;
+          }
+          const pnl = (btc - baseBtc) * btcAmount - (eth - baseEth) * ethAmount;
+          series.push({ ts, pnl, btc, eth });
+        }
+        return series;
+      }
+
+      function updateSimulationSummary(series, { btcAmount, ethAmount, startIndex } = {}) {
+        if (!simulationDataset) {
+          return;
+        }
+        const anchor = Array.isArray(simulationDataset.points)
+          ? simulationDataset.points[Math.max(0, Math.min(startIndex ?? 0, simulationDataset.points.length - 1))]
+          : null;
+        if (simStartDisplay) {
+          const startText = anchor ? formatDateLabel(Number(anchor.ts), { includeTime: true }) : '—';
+          simStartDisplay.textContent = startText;
+        }
+        if (simStartNote && simStartInput) {
+          simStartNote.textContent = `t = ${simStartInput.value} 天`;
+        }
+        if (simExposureValue) {
+          const longLabel = simulationDataset.long_label || simulationDataset.long_symbol || 'BTC';
+          const shortLabel = simulationDataset.short_label || simulationDataset.short_symbol || 'ETH';
+          const longValue = Number(btcAmount);
+          const shortValue = Number(ethAmount);
+          const longText = Number.isFinite(longValue) ? longValue.toFixed(2) : '--';
+          const shortText = Number.isFinite(shortValue) ? shortValue.toFixed(2) : '--';
+          simExposureValue.textContent = `+${longText} ${longLabel} / -${shortText} ${shortLabel}`;
+        }
+        if (simPnLValue) {
+          const latest = series?.length ? series[series.length - 1].pnl : null;
+          simPnLValue.textContent = Number.isFinite(latest) ? numberFormatter.format(latest) : '--';
+        }
+      }
+
+      function renderSimulationChart(series) {
+        if (!simChartCanvas) {
+          return;
+        }
+        const setup = prepareCanvas(simChartCanvas);
+        if (!setup) {
+          return;
+        }
+        const { ctx, width, height } = setup;
+        ctx.fillStyle = '#0b0f18';
+        ctx.fillRect(0, 0, width, height);
+        if (!Array.isArray(series) || !series.length) {
+          ctx.fillStyle = '#6b7280';
+          ctx.font = '14px "Segoe UI", system-ui';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('等待模拟数据…', width / 2, height / 2);
+          return;
+        }
+        const values = series.map((point) => Number(point.pnl));
+        const bounds = getSeriesBounds(values);
+        if (!bounds.hasValue) {
+          return;
+        }
+        const layout = { top: 36, right: 28, bottom: 50, left: 86 };
+        const innerWidth = Math.max(10, width - layout.left - layout.right);
+        const innerHeight = Math.max(10, height - layout.top - layout.bottom);
+        const minTs = Number(series[0].ts);
+        const maxTs = Number(series[series.length - 1].ts);
+        const span = Math.max(1, maxTs - minTs);
+        const mapX = (ts) => layout.left + ((ts - minTs) / span) * innerWidth;
+        const mapY = (value) => {
+          const range = bounds.max - bounds.min || 1;
+          const ratio = (value - bounds.min) / range;
+          return layout.top + (1 - ratio) * innerHeight;
+        };
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        ctx.lineWidth = 1;
+        const horizontalLines = 4;
+        for (let i = 0; i <= horizontalLines; i += 1) {
+          const value = bounds.min + ((bounds.max - bounds.min) * i) / horizontalLines;
+          const y = mapY(value);
+          ctx.beginPath();
+          ctx.moveTo(layout.left, y);
+          ctx.lineTo(width - layout.right, y);
+          ctx.stroke();
+          ctx.fillStyle = '#8a94a6';
+          ctx.font = '12px "Segoe UI", system-ui';
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(numberFormatter.format(value), layout.left - 10, y);
+        }
+
+        if (bounds.min < 0 && bounds.max > 0) {
+          const zeroY = mapY(0);
+          ctx.strokeStyle = 'rgba(252, 211, 77, 0.35)';
+          ctx.beginPath();
+          ctx.moveTo(layout.left, zeroY);
+          ctx.lineTo(width - layout.right, zeroY);
+          ctx.stroke();
+        }
+
+        ctx.font = '12px "Segoe UI", system-ui';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        ctx.fillStyle = '#8a94a6';
+        const labels = 4;
+        for (let i = 0; i <= labels; i += 1) {
+          const ratio = i / labels;
+          const ts = minTs + ratio * span;
+          const x = mapX(ts);
+          ctx.fillText(formatDateLabel(ts), x, height - layout.bottom + 8);
+        }
+
+        const lineSeries = series.map((point) => ({ ts: point.ts, value: point.pnl }));
+        drawTimedSeries(ctx, lineSeries, mapX, mapY, 'rgba(252, 211, 77, 1)', 2.6);
+      }
+
+      async function loadSimulationData({ silent = false } = {}) {
+        if (!simChartCanvas || simulationBusy) {
+          return;
+        }
+        if (!silent && simStatus) {
+          simStatus.textContent = '加载 Binance 历史行情…';
+        }
+        simulationBusy = true;
+        try {
+          const response = await fetch('/simulation/pnl', { cache: 'no-store' });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const payload = await response.json();
+          simulationDataset = payload;
+          configureSimulationControls(payload);
+          if (simCard) {
+            simCard.classList.remove('hidden');
+          }
+          if (simEmpty) {
+            simEmpty.classList.add('hidden');
+          }
+          if (simDateRangeBadge) {
+            simDateRangeBadge.textContent = formatSimRange(payload);
+          }
+          updateSimulationStatus();
+          updateSimulationFromInputs();
+        } catch (error) {
+          if (simEmpty) {
+            simEmpty.textContent = `无法加载模拟：${error}`;
+            simEmpty.classList.remove('hidden');
+          }
+          if (simCard) {
+            simCard.classList.add('hidden');
+          }
+        } finally {
+          simulationBusy = false;
+        }
+      }
+
+      function updateSimulationFromInputs() {
+        if (!simulationDataset || !Array.isArray(simulationDataset.points) || !simulationDataset.points.length) {
+          return;
+        }
+        const samplesPerDay = Math.max(1, Number(simulationDataset.samples_per_day) || 24);
+        const maxDays = Number(simStartInput?.max || 0);
+        const sliderDays = simStartInput ? Number(simStartInput.value) : 0;
+        const clampedDays = clamp(sliderDays, 0, maxDays);
+        const startIndex = Math.min(simulationDataset.points.length - 1, Math.round(clampedDays * samplesPerDay));
+        let btcAmount = parseDecimal(simBtcInput?.value);
+        if (!Number.isFinite(btcAmount) || btcAmount <= 0) {
+          btcAmount = simulationDataset.default?.long_amount ?? 1;
+        }
+        let ethAmount = parseDecimal(simEthInput?.value);
+        if (!Number.isFinite(ethAmount) || ethAmount <= 0) {
+          ethAmount = simulationDataset.default?.short_amount ?? 1.5;
+        }
+        const series = computeSimulationSeries(simulationDataset.points, startIndex, btcAmount, ethAmount);
+        simulationSeries = series;
+        updateSimulationSummary(series, { btcAmount, ethAmount, startIndex });
+        renderSimulationChart(series);
       }
 
       function describeAdjustmentAction(action) {
@@ -6341,6 +6740,18 @@
         }
       }
 
+      if (simStartInput) {
+        simStartInput.addEventListener('input', () => updateSimulationFromInputs());
+      }
+      [simBtcInput, simEthInput].forEach((input) => {
+        if (!input) {
+          return;
+        }
+        input.addEventListener('input', () => updateSimulationFromInputs());
+      });
+      if (simRefreshButton) {
+        simRefreshButton.addEventListener('click', () => loadSimulationData({ silent: false }));
+      }
       if (pauseAllButton) {
         pauseAllButton.addEventListener('click', () => sendBatchControl('pause', pauseAllButton));
       }
@@ -6518,8 +6929,10 @@
   loadRiskHistory({ silent: true });
       loadAutoBalanceConfig({ silent: true });
       loadRiskSettings({ silent: true });
+  loadSimulationData({ silent: false });
       refreshMetrics();
       setInterval(refreshMetrics, 2000);
+  setInterval(() => loadSimulationData({ silent: true }), 300000);
     </script>
   </body>
 </html>
