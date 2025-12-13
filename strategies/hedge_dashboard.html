@@ -5833,7 +5833,7 @@
 
           const card = document.createElement('article');
           card.className = 'card grvt-account-card';
-          const totalText = Number.isFinite(entry.total) ? formatSignedNumber(entry.total) : '--';
+          const totalText = Number.isFinite(entry.total) ? formatSignedPercent(entry.total, 4) : '--';
           const equityText = Number.isFinite(entry.equity) ? numberFormatter.format(entry.equity) : '--';
           const walletText = Number.isFinite(entry.wallet) ? numberFormatter.format(entry.wallet) : '--';
           card.innerHTML = `
