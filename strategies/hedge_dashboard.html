@@ -5819,52 +5819,80 @@
         });
 
         for (const entry of flattenedAccounts) {
-          const positions = Array.isArray(entry.positions) ? entry.positions : [];
-          const trimmedPositions = positions.slice(0, MAX_PARA_POSITIONS);
-          const positionItems = trimmedPositions.map((pos) => {
-            const symbol = pos.symbol ?? '--';
-            const side = (pos.side ?? '').toString().toUpperCase();
-            const sizeValue = parseDecimal(pos.net_size ?? pos.size ?? pos.quantity);
-            const sizeText = Number.isFinite(sizeValue) ? formatDecimal(sizeValue, 6) : (pos.net_size ?? pos.size ?? '--');
-            const pnlValue = parseDecimal(pos.pnl);
-            const pnlText = Number.isFinite(pnlValue) ? formatSignedNumber(pnlValue) : (pos.pnl ?? '--');
-            const pnlClass = percentClass(pnlValue);
-            return `
-              <li class="grvt-position-row">
-                <span class="pill">${escapeHtml(symbol)}</span>
-                <span class="pill ${side === 'LONG' ? 'pill-long' : side === 'SHORT' ? 'pill-short' : ''}">${escapeHtml(side || '--')}</span>
-                <span>${escapeHtml(sizeText)}</span>
-                <span class="${pnlClass}">${escapeHtml(pnlText)}</span>
-              </li>
-            `;
-          }).join('');
+          const positions = Array.isArray(entry.positions)
+            ? entry.positions.slice().sort((a, b) => {
+                const aSymbol = (a.symbol ?? '').toString();
+                const bSymbol = (b.symbol ?? '').toString();
+                return aSymbol.localeCompare(bSymbol, undefined, { sensitivity: 'base' });
+              })
+            : [];
 
           const card = document.createElement('article');
-          card.className = 'card grvt-account-card';
-          const totalText = Number.isFinite(entry.total) ? formatSignedPercent(entry.total, 4) : '--';
+          card.className = 'grvt-account-card';
+
+          const totalText = Number.isFinite(entry.total) ? numberFormatter.format(entry.total) : '--';
           const equityText = Number.isFinite(entry.equity) ? numberFormatter.format(entry.equity) : '--';
           const walletText = Number.isFinite(entry.wallet) ? numberFormatter.format(entry.wallet) : '--';
+          const updatedText = formatTimestamp(entry.updatedTs) ?? '—';
+
           card.innerHTML = `
-            <div class="grvt-account-header">
-              <h4>${escapeHtml(entry.name ?? 'Account')}</h4>
-              <span class="badge badge-muted">${escapeHtml(entry.agentId ?? 'source')}</span>
-            </div>
-            <div class="grvt-account-stats">
+            <header>
               <div>
-                <p class="summary-sub">Total PnL</p>
-                <p class="value">${escapeHtml(totalText)}</p>
+                <span class="grvt-account-name">${escapeHtml(entry.name ?? 'Account')}</span>
+                <span class="badge badge-info grvt-source-badge">${escapeHtml(entry.agentId ?? 'source')}</span>
               </div>
-              <div>
-                <p class="summary-sub">Equity</p>
-                <p class="value">${escapeHtml(equityText)}</p>
-              </div>
-              <div>
-                <p class="summary-sub">Balance</p>
-                <p class="value">${escapeHtml(walletText)}</p>
-              </div>
-            </div>
-            <ul class="grvt-positions">${positionItems || '<li class="grvt-position-row">No positions</li>'}</ul>
+              <span class="grvt-account-updated">${escapeHtml(updatedText)}</span>
+            </header>
+            <dl class="grvt-account-metrics">
+              <div><dt>Total</dt><dd>${escapeHtml(totalText)}</dd></div>
+              <div><dt>Equity</dt><dd>${escapeHtml(equityText)}</dd></div>
+              <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
+            </dl>
           `;
+
+          if (positions.length) {
+            const table = document.createElement('table');
+            table.className = 'grvt-positions-table';
+            table.innerHTML = `
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Side</th>
+                  <th>Size</th>
+                  <th>PnL</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            `;
+            const body = table.querySelector('tbody');
+            const trimmed = positions.slice(0, MAX_PARA_POSITIONS);
+            for (const pos of trimmed) {
+              const symbol = pos.symbol ?? '--';
+              const side = (pos.side ?? '').toString().toUpperCase();
+              const sizeValue = parseDecimal(pos.net_size ?? pos.size ?? pos.quantity);
+              const sizeText = Number.isFinite(sizeValue)
+                ? numberFormatter.format(sizeValue)
+                : (pos.net_size ?? pos.size ?? '--');
+              const pnlValue = parseDecimal(pos.pnl);
+              const pnlText = Number.isFinite(pnlValue) ? formatSignedNumber(pnlValue, 6) : (pos.pnl ?? '--');
+              const pnlClass = percentClass(pnlValue);
+              const row = document.createElement('tr');
+              row.innerHTML = `
+                <td>${escapeHtml(symbol)}</td>
+                <td>${escapeHtml(side || '--')}</td>
+                <td>${escapeHtml(sizeText)}</td>
+                <td class="${pnlClass}">${escapeHtml(pnlText)}</td>
+              `;
+              body.appendChild(row);
+            }
+            card.appendChild(table);
+          } else {
+            const empty = document.createElement('p');
+            empty.className = 'grvt-positions-empty';
+            empty.textContent = 'No positions';
+            card.appendChild(empty);
+          }
+
           paraAccountGrid.appendChild(card);
         }
         } catch (err) {
