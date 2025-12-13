@@ -5599,8 +5599,27 @@
           return;
         }
 
-        const paraMap = data?.paradex_accounts ?? {};
-        const entries = Object.entries(paraMap);
+        // Prefer top-level paradex map, but fall back to agent payloads in case coordinator
+        // snapshots omit the flattened map (backward compatibility with older snapshots).
+        const mergedParaMap = {};
+        const directMap = data?.paradex_accounts;
+        if (directMap && typeof directMap === 'object') {
+          for (const [agentId, snapshot] of Object.entries(directMap)) {
+            if (snapshot) {
+              mergedParaMap[agentId] = snapshot;
+            }
+          }
+        }
+        if (!Object.keys(mergedParaMap).length && data?.agents && typeof data.agents === 'object') {
+          for (const [agentId, payload] of Object.entries(data.agents)) {
+            const snapshot = payload?.paradex_accounts;
+            if (snapshot) {
+              mergedParaMap[agentId] = snapshot;
+            }
+          }
+        }
+
+        const entries = Object.entries(mergedParaMap);
 
         if (!entries.length) {
           paraCard.classList.add('hidden');
