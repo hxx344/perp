@@ -5599,6 +5599,8 @@
           return;
         }
 
+        try {
+
         // Prefer top-level paradex map, but fall back to agent payloads in case coordinator
         // snapshots omit the flattened map (backward compatibility with older snapshots).
         const mergedParaMap = {};
@@ -5856,6 +5858,16 @@
             <ul class="grvt-positions">${positionItems || '<li class="grvt-position-row">No positions</li>'}</ul>
           `;
           paraAccountGrid.appendChild(card);
+        }
+        } catch (err) {
+          console.warn('renderPara error', err);
+          if (paraEmpty) {
+            paraEmpty.classList.remove('hidden');
+            paraEmpty.textContent = 'Per-account render failed; see console for details.';
+          }
+          if (paraCard) {
+            paraCard.classList.add('hidden');
+          }
         }
       }
 
