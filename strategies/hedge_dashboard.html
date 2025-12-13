@@ -6576,7 +6576,58 @@
       }
 
       function renderAgents(data) {
-        const entries = Object.entries(data?.agents ?? {});
+        let agentMap = data?.agents;
+        if (!agentMap || typeof agentMap !== 'object') {
+          agentMap = {};
+        }
+
+        // Fallback: if no agents payload, synthesize from other sections (PARA/GRVT) so Per-VPS pane
+        // still shows the sources we have data for.
+        if (Object.keys(agentMap).length === 0) {
+          const synthetic = {};
+          const paradexMap = data?.paradex_accounts;
+          if (paradexMap && typeof paradexMap === 'object') {
+            for (const [agentId, snapshot] of Object.entries(paradexMap)) {
+              if (!synthetic[agentId]) {
+                const summaryTs = Number(snapshot?.summary?.updated_at ?? snapshot?.updated_at ?? 0);
+                synthetic[agentId] = {
+                  position: 0,
+                  total_cycles: 0,
+                  cumulative_pnl: 0,
+                  cumulative_volume: 0,
+                  available_balance: snapshot?.summary?.balance,
+                  total_account_value: snapshot?.summary?.equity ?? snapshot?.summary?.available_equity,
+                  instrument: snapshot?.summary?.instrument ?? 'PARADEX',
+                  last_update_ts: Number.isFinite(summaryTs) ? summaryTs : undefined,
+                };
+              }
+            }
+          }
+          const grvtMap = data?.grvt_accounts;
+          if (grvtMap && typeof grvtMap === 'object') {
+            for (const [agentId, snapshot] of Object.entries(grvtMap)) {
+              if (!synthetic[agentId]) {
+                const summaryTs = Number(snapshot?.summary?.updated_at ?? snapshot?.updated_at ?? 0);
+                synthetic[agentId] = {
+                  position: 0,
+                  total_cycles: 0,
+                  cumulative_pnl: 0,
+                  cumulative_volume: 0,
+                  available_balance: snapshot?.summary?.total_equity ?? snapshot?.summary?.wallet_balance,
+                  total_account_value: snapshot?.summary?.total_equity,
+                  instrument: snapshot?.summary?.instrument ?? 'GRVT',
+                  last_update_ts: Number.isFinite(summaryTs) ? summaryTs : undefined,
+                };
+              }
+            }
+          }
+          const syntheticKeys = Object.keys(synthetic);
+          if (syntheticKeys.length) {
+            agentMap = synthetic;
+          }
+        }
+
+        const entries = Object.entries(agentMap ?? {});
         const staleSet = new Set(data?.stale_agents ?? []);
         const lastAgentId = data?.last_agent_id ?? null;
         const controls = data?.controls ?? {};
@@ -6586,8 +6637,13 @@
         if (!entries.length) {
           agentGrid.classList.add('hidden');
           agentEmpty.classList.remove('hidden');
-          agentEmpty.textContent = 'Waiting for VPS metrics…';
-          agentCount.textContent = '0 active';
+          const agentCountValue = toNumber(data?.agent_count);
+          if (agentCountValue > 0) {
+            agentEmpty.textContent = `有 ${agentCountValue} 台 VPS 在统计，但未收到明细；检查 /metrics 是否返回 agents 字段`;
+          } else {
+            agentEmpty.textContent = 'Waiting for VPS metrics…';
+          }
+          agentCount.textContent = `${agentCountValue || 0} active`;
           return;
         }
 
