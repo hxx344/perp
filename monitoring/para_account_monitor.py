@@ -51,6 +51,19 @@ BALANCE_TOTAL_PATHS: Tuple[Tuple[str, ...], ...] = (
     ("info", "equity"),
     ("balance",),
     ("equity",),
+    ("account_value",),
+    ("accountValue",),
+    ("accountValueUsd",),
+    ("account_value_usd",),
+    ("total_account_value",),
+    ("totalAccountValue",),
+    ("equity_value",),
+    ("equityValue",),
+    ("equity_value_usd",),
+    ("equityUsd",),
+    ("equity_usd",),
+    ("cash_balance",),
+    ("cashBalance",),
     ("USDT",),
     ("usdt",),
 )
@@ -68,6 +81,12 @@ BALANCE_AVAILABLE_PATHS: Tuple[Tuple[str, ...], ...] = (
     ("info", "available_balance"),
     ("info", "availableMargin"),
     ("info", "available_margin"),
+    ("freeCollateral",),
+    ("free_collateral",),
+    ("freeCollateralUsd",),
+    ("free_collateral_usd",),
+    ("available_equity",),
+    ("availableEquity",),
 )
 
 
@@ -155,6 +174,33 @@ def extract_from_paths(source: Dict[str, Any], *paths: Sequence[str]) -> Optiona
                 break
         if valid and cursor is not None:
             return cursor
+    return None
+
+
+def extract_nested_balance(source: Dict[str, Any], paths: Tuple[Tuple[str, ...], ...]) -> Optional[Decimal]:
+    if not isinstance(source, dict):
+        return None
+    nested_blocks: Tuple[str, ...] = (
+        "data",
+        "result",
+        "info",
+        "account",
+        "balance",
+        "balances",
+    )
+    for key in nested_blocks:
+        block = source.get(key)
+        if isinstance(block, dict):
+            value = extract_from_paths(block, *paths)
+            if value is not None:
+                return decimal_from(value)
+        elif isinstance(block, list):
+            for entry in block:
+                if not isinstance(entry, dict):
+                    continue
+                value = extract_from_paths(entry, *paths)
+                if value is not None:
+                    return decimal_from(value)
     return None
 
 
@@ -507,6 +553,8 @@ class ParadexAccountMonitor:
             total_raw = extract_from_paths(balance_payload, *BALANCE_TOTAL_PATHS)
             balance_total = decimal_from(total_raw)
             if balance_total is None:
+                balance_total = extract_nested_balance(balance_payload, BALANCE_TOTAL_PATHS)
+            if balance_total is None:
                 totals_block = balance_payload.get("total")
                 if isinstance(totals_block, dict):
                     for key in ("USDT", "USD", "usdt", "usd"):
@@ -515,6 +563,8 @@ class ParadexAccountMonitor:
                             break
             available_raw = extract_from_paths(balance_payload, *BALANCE_AVAILABLE_PATHS)
             balance_available = decimal_from(available_raw)
+            if balance_available is None:
+                balance_available = extract_nested_balance(balance_payload, BALANCE_AVAILABLE_PATHS)
             if balance_available is None:
                 free_block = balance_payload.get("free")
                 if isinstance(free_block, dict):
