@@ -538,10 +538,12 @@ class ParadexAccountMonitor:
                 LOGGER.debug("Paradex %s call failed: %s", name, exc)
                 continue
             if isinstance(payload, dict):
+                LOGGER.info("[DEBUG] raw balance payload via %s: %s", name, payload)
                 return payload
             if isinstance(payload, list) and payload:
                 first = payload[0]
                 if isinstance(first, dict):
+                    LOGGER.info("[DEBUG] raw balance payload via %s (list[0]): %s", name, first)
                     return first
         return {}
 
