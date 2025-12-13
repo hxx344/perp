@@ -5659,24 +5659,67 @@
         const flattenedAccounts = [];
 
         for (const [agentId, snapshot] of entries) {
-          if (!snapshot) {
-            continue;
-          }
-          const summary = snapshot.summary ?? {};
-          const accounts = Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
-          const snapshotTs = Number(summary.updated_at ?? snapshot.updated_at);
-          if (Number.isFinite(snapshotTs) && snapshotTs > latestUpdate) {
-            latestUpdate = snapshotTs;
-          }
+          try {
+            if (!snapshot || typeof snapshot !== 'object') {
+              continue;
+            }
+            const summaryRaw = snapshot.summary;
+            const summary = summaryRaw && typeof summaryRaw === 'object' ? summaryRaw : {};
+            const accountsRaw = snapshot.accounts;
+            const accounts = Array.isArray(accountsRaw) ? accountsRaw : [];
+            const snapshotTs = Number(summary.updated_at ?? snapshot.updated_at);
+            if (Number.isFinite(snapshotTs) && snapshotTs > latestUpdate) {
+              latestUpdate = snapshotTs;
+            }
 
-          if (accounts.length) {
-            aggregateAccountCount += accounts.length;
-            for (const account of accounts) {
-              const total = parseDecimal(account.total_pnl);
-              const eth = parseDecimal(account.eth_pnl);
-              const btc = parseDecimal(account.btc_pnl);
-              const equity = parseDecimal(account.equity ?? account.available_equity);
-              const wallet = parseDecimal(account.balance ?? account.available_balance);
+            if (accounts.length) {
+              aggregateAccountCount += accounts.length;
+              for (const account of accounts) {
+                const accountObj = account && typeof account === 'object' ? account : {};
+                const total = parseDecimal(accountObj.total_pnl);
+                const eth = parseDecimal(accountObj.eth_pnl);
+                const btc = parseDecimal(accountObj.btc_pnl);
+                const equity = parseDecimal(accountObj.equity ?? accountObj.available_equity);
+                const wallet = parseDecimal(accountObj.balance ?? accountObj.available_balance);
+                if (Number.isFinite(total)) {
+                  aggregateTotalPnl += total;
+                  hasTotal = true;
+                }
+                if (Number.isFinite(eth)) {
+                  aggregateEthPnl += eth;
+                  hasEth = true;
+                }
+                if (Number.isFinite(btc)) {
+                  aggregateBtcPnl += btc;
+                  hasBtc = true;
+                }
+                if (Number.isFinite(equity)) {
+                  aggregateEquity += equity;
+                  hasEquity = true;
+                }
+                if (Number.isFinite(wallet)) {
+                  aggregateWallet += wallet;
+                  hasWallet = true;
+                }
+                flattenedAccounts.push({
+                  agentId,
+                  name: accountObj.name ?? accountObj.account_id ?? accountObj.id ?? 'Account',
+                  total,
+                  eth,
+                  btc,
+                  equity,
+                  wallet,
+                  positions: Array.isArray(accountObj.positions) ? accountObj.positions : [],
+                  updatedTs: snapshotTs,
+                  sortKey: buildAccountSortKey(agentId, accountObj, summary),
+                });
+              }
+            } else {
+              const total = parseDecimal(summary.total_pnl);
+              const eth = parseDecimal(summary.eth_pnl);
+              const btc = parseDecimal(summary.btc_pnl);
+              const equity = parseDecimal(summary.equity ?? summary.available_equity);
+              const wallet = parseDecimal(summary.balance ?? summary.available_balance);
               if (Number.isFinite(total)) {
                 aggregateTotalPnl += total;
                 hasTotal = true;
@@ -5697,61 +5740,25 @@
                 aggregateWallet += wallet;
                 hasWallet = true;
               }
+              const accountCountFallback = Number(summary.account_count ?? 0);
+              if (Number.isFinite(accountCountFallback) && accountCountFallback > 0) {
+                aggregateAccountCount += accountCountFallback;
+              }
               flattenedAccounts.push({
                 agentId,
-                name: account.name ?? account.account_id ?? account.id ?? 'Account',
+                name: summary.name ?? summary.label ?? agentId,
                 total,
                 eth,
                 btc,
                 equity,
                 wallet,
-                positions: Array.isArray(account.positions) ? account.positions : [],
+                positions: [],
                 updatedTs: snapshotTs,
-                sortKey: buildAccountSortKey(agentId, account, summary),
+                sortKey: buildAccountSortKey(agentId, null, summary),
               });
             }
-          } else {
-            const total = parseDecimal(summary.total_pnl);
-            const eth = parseDecimal(summary.eth_pnl);
-            const btc = parseDecimal(summary.btc_pnl);
-            const equity = parseDecimal(summary.equity ?? summary.available_equity);
-            const wallet = parseDecimal(summary.balance ?? summary.available_balance);
-            if (Number.isFinite(total)) {
-              aggregateTotalPnl += total;
-              hasTotal = true;
-            }
-            if (Number.isFinite(eth)) {
-              aggregateEthPnl += eth;
-              hasEth = true;
-            }
-            if (Number.isFinite(btc)) {
-              aggregateBtcPnl += btc;
-              hasBtc = true;
-            }
-            if (Number.isFinite(equity)) {
-              aggregateEquity += equity;
-              hasEquity = true;
-            }
-            if (Number.isFinite(wallet)) {
-              aggregateWallet += wallet;
-              hasWallet = true;
-            }
-            const accountCountFallback = Number(summary.account_count ?? 0);
-            if (Number.isFinite(accountCountFallback) && accountCountFallback > 0) {
-              aggregateAccountCount += accountCountFallback;
-            }
-            flattenedAccounts.push({
-              agentId,
-              name: summary.name ?? summary.label ?? agentId,
-              total,
-              eth,
-              btc,
-              equity,
-              wallet,
-              positions: [],
-              updatedTs: snapshotTs,
-              sortKey: buildAccountSortKey(agentId, null, summary),
-            });
+          } catch (err) {
+            console.warn('PARA render error for agent', agentId, err);
           }
         }
 
@@ -5780,7 +5787,10 @@
         if (!flattenedAccounts.length) {
           if (paraAccountsEmpty) {
             paraAccountsEmpty.classList.remove('hidden');
-            paraAccountsEmpty.textContent = 'Waiting for account data…';
+            const sourcesLabel = entries.length === 1 ? 'source' : 'sources';
+            paraAccountsEmpty.textContent = entries.length
+              ? `Received ${entries.length} ${sourcesLabel} but no account rows; check monitor payload shape.`
+              : 'Waiting for account data…';
           }
           return;
         }
