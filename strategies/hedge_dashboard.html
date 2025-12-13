@@ -1919,6 +1919,50 @@
       </div>
     </section>
 
+    <section class="grvt-section">
+      <div class="section-header">
+        <div class="section-header-info">
+          <h2>PARA Multi-Account Monitor</h2>
+          <div class="badge-group">
+            <span class="badge badge-muted" id="para-account-count">0 accounts</span>
+          </div>
+        </div>
+        <div class="section-header-controls"></div>
+      </div>
+      <p class="empty" id="para-empty">Waiting for PARA monitor…</p>
+      <div class="grvt-card hidden" id="para-card">
+        <div class="grvt-summary-grid">
+          <article class="card grvt-summary-card">
+            <h3>Total PnL</h3>
+            <div class="value" id="para-total-pnl">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>ETH PnL</h3>
+            <div class="value" id="para-eth-pnl">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>BTC PnL</h3>
+            <div class="value" id="para-btc-pnl">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Net Equity</h3>
+            <div class="value" id="para-total-equity">--</div>
+            <p class="summary-sub" id="para-wallet-balance">Wallet --</p>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Last Update</h3>
+            <div class="value" id="para-summary-time">--</div>
+            <p class="grvt-summary-updated" id="para-summary-updated">Updated —</p>
+          </article>
+        </div>
+        <div>
+          <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">Per Account Net PnL</h3>
+          <div class="grvt-account-grid" id="para-account-grid"></div>
+          <p class="empty hidden" id="para-accounts-empty">No account data yet…</p>
+        </div>
+      </div>
+    </section>
+
     <section class="grid">
       <article class="card">
         <h2>Current Position</h2>
@@ -2112,6 +2156,19 @@
   const grvtSummaryUpdated = document.getElementById('grvt-summary-updated');
   const grvtAccountGrid = document.getElementById('grvt-account-grid');
   const grvtAccountsEmpty = document.getElementById('grvt-accounts-empty');
+
+  const paraAccountCount = document.getElementById('para-account-count');
+  const paraEmpty = document.getElementById('para-empty');
+  const paraCard = document.getElementById('para-card');
+  const paraTotalPnl = document.getElementById('para-total-pnl');
+  const paraEthPnl = document.getElementById('para-eth-pnl');
+  const paraBtcPnl = document.getElementById('para-btc-pnl');
+  const paraTotalEquity = document.getElementById('para-total-equity');
+  const paraWalletBalance = document.getElementById('para-wallet-balance');
+  const paraSummaryTime = document.getElementById('para-summary-time');
+  const paraSummaryUpdated = document.getElementById('para-summary-updated');
+  const paraAccountGrid = document.getElementById('para-account-grid');
+  const paraAccountsEmpty = document.getElementById('para-accounts-empty');
   const grvtRiskPanel = document.getElementById('grvt-risk-panel');
   const riskSettingsStatus = document.getElementById('risk-settings-status');
   const riskSettingsMessage = document.getElementById('risk-settings-message');
@@ -2227,6 +2284,7 @@
   const MAX_SPREAD_HISTORY_POINTS = 1800;
     const MAX_STRATEGY_EVENTS = 120;
   const MAX_GRVT_POSITIONS = 12;
+  const MAX_PARA_POSITIONS = 12;
   const RISK_GRADIENTS = [
     {
       max: 0.1,
@@ -5536,6 +5594,242 @@
         return `${safeAgent}::${String(identifier).toLowerCase()}`;
       }
 
+      function renderPara(data) {
+        if (!paraAccountCount || !paraEmpty || !paraCard) {
+          return;
+        }
+
+        const paraMap = data?.paradex_accounts ?? {};
+        const entries = Object.entries(paraMap);
+
+        if (!entries.length) {
+          paraCard.classList.add('hidden');
+          paraEmpty.classList.remove('hidden');
+          paraAccountCount.textContent = '0 accounts';
+          paraTotalPnl.textContent = '--';
+          paraEthPnl.textContent = '--';
+          paraBtcPnl.textContent = '--';
+          paraTotalEquity.textContent = '--';
+          paraWalletBalance.textContent = 'Wallet --';
+          paraSummaryTime.textContent = '--';
+          paraSummaryUpdated.textContent = 'Updated —';
+          if (paraAccountGrid) {
+            paraAccountGrid.innerHTML = '';
+          }
+          if (paraAccountsEmpty) {
+            paraAccountsEmpty.classList.add('hidden');
+          }
+          return;
+        }
+
+        paraEmpty.classList.add('hidden');
+        paraCard.classList.remove('hidden');
+
+        let aggregateAccountCount = 0;
+        let aggregateTotalPnl = 0;
+        let aggregateEthPnl = 0;
+        let aggregateBtcPnl = 0;
+        let aggregateEquity = 0;
+        let aggregateWallet = 0;
+        let hasTotal = false;
+        let hasEth = false;
+        let hasBtc = false;
+        let hasEquity = false;
+        let hasWallet = false;
+        let latestUpdate = 0;
+        const flattenedAccounts = [];
+
+        for (const [agentId, snapshot] of entries) {
+          if (!snapshot) {
+            continue;
+          }
+          const summary = snapshot.summary ?? {};
+          const accounts = Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
+          const snapshotTs = Number(summary.updated_at ?? snapshot.updated_at);
+          if (Number.isFinite(snapshotTs) && snapshotTs > latestUpdate) {
+            latestUpdate = snapshotTs;
+          }
+
+          if (accounts.length) {
+            aggregateAccountCount += accounts.length;
+            for (const account of accounts) {
+              const total = parseDecimal(account.total_pnl);
+              const eth = parseDecimal(account.eth_pnl);
+              const btc = parseDecimal(account.btc_pnl);
+              const equity = parseDecimal(account.equity ?? account.available_equity);
+              const wallet = parseDecimal(account.balance ?? account.available_balance);
+              if (Number.isFinite(total)) {
+                aggregateTotalPnl += total;
+                hasTotal = true;
+              }
+              if (Number.isFinite(eth)) {
+                aggregateEthPnl += eth;
+                hasEth = true;
+              }
+              if (Number.isFinite(btc)) {
+                aggregateBtcPnl += btc;
+                hasBtc = true;
+              }
+              if (Number.isFinite(equity)) {
+                aggregateEquity += equity;
+                hasEquity = true;
+              }
+              if (Number.isFinite(wallet)) {
+                aggregateWallet += wallet;
+                hasWallet = true;
+              }
+              flattenedAccounts.push({
+                agentId,
+                name: account.name ?? account.account_id ?? account.id ?? 'Account',
+                total,
+                eth,
+                btc,
+                equity,
+                wallet,
+                positions: Array.isArray(account.positions) ? account.positions : [],
+                updatedTs: snapshotTs,
+                sortKey: buildAccountSortKey(agentId, account, summary),
+              });
+            }
+          } else {
+            const total = parseDecimal(summary.total_pnl);
+            const eth = parseDecimal(summary.eth_pnl);
+            const btc = parseDecimal(summary.btc_pnl);
+            const equity = parseDecimal(summary.equity ?? summary.available_equity);
+            const wallet = parseDecimal(summary.balance ?? summary.available_balance);
+            if (Number.isFinite(total)) {
+              aggregateTotalPnl += total;
+              hasTotal = true;
+            }
+            if (Number.isFinite(eth)) {
+              aggregateEthPnl += eth;
+              hasEth = true;
+            }
+            if (Number.isFinite(btc)) {
+              aggregateBtcPnl += btc;
+              hasBtc = true;
+            }
+            if (Number.isFinite(equity)) {
+              aggregateEquity += equity;
+              hasEquity = true;
+            }
+            if (Number.isFinite(wallet)) {
+              aggregateWallet += wallet;
+              hasWallet = true;
+            }
+            const accountCountFallback = Number(summary.account_count ?? 0);
+            if (Number.isFinite(accountCountFallback) && accountCountFallback > 0) {
+              aggregateAccountCount += accountCountFallback;
+            }
+            flattenedAccounts.push({
+              agentId,
+              name: summary.name ?? summary.label ?? agentId,
+              total,
+              eth,
+              btc,
+              equity,
+              wallet,
+              positions: [],
+              updatedTs: snapshotTs,
+              sortKey: buildAccountSortKey(agentId, null, summary),
+            });
+          }
+        }
+
+        const sourcesLabel = entries.length === 1 ? 'source' : 'sources';
+        const accountLabel = aggregateAccountCount === 1 ? 'account' : 'accounts';
+        paraAccountCount.textContent = `${aggregateAccountCount} ${accountLabel} across ${entries.length} ${sourcesLabel}`;
+
+        paraTotalPnl.textContent = hasTotal ? numberFormatter.format(aggregateTotalPnl) : '--';
+        paraEthPnl.textContent = hasEth ? numberFormatter.format(aggregateEthPnl) : '--';
+        paraBtcPnl.textContent = hasBtc ? numberFormatter.format(aggregateBtcPnl) : '--';
+        paraTotalEquity.textContent = hasEquity ? numberFormatter.format(aggregateEquity) : '--';
+        paraWalletBalance.textContent = hasWallet
+          ? `Wallet ${numberFormatter.format(aggregateWallet)}`
+          : 'Wallet --';
+
+        const updatedText = formatTimestamp(latestUpdate);
+        paraSummaryTime.textContent = updatedText ?? '--';
+        paraSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
+
+        if (!paraAccountGrid) {
+          return;
+        }
+
+        paraAccountGrid.innerHTML = '';
+
+        if (!flattenedAccounts.length) {
+          if (paraAccountsEmpty) {
+            paraAccountsEmpty.classList.remove('hidden');
+            paraAccountsEmpty.textContent = 'Waiting for account data…';
+          }
+          return;
+        }
+
+        if (paraAccountsEmpty) {
+          paraAccountsEmpty.classList.add('hidden');
+        }
+
+        flattenedAccounts.sort((a, b) => {
+          const aKey = a.sortKey ?? '';
+          const bKey = b.sortKey ?? '';
+          if (aKey !== bKey) {
+            return aKey.localeCompare(bKey);
+          }
+          return (Number(b.updatedTs ?? 0) || 0) - (Number(a.updatedTs ?? 0) || 0);
+        });
+
+        for (const entry of flattenedAccounts) {
+          const positions = Array.isArray(entry.positions) ? entry.positions : [];
+          const trimmedPositions = positions.slice(0, MAX_PARA_POSITIONS);
+          const positionItems = trimmedPositions.map((pos) => {
+            const symbol = pos.symbol ?? '--';
+            const side = (pos.side ?? '').toString().toUpperCase();
+            const sizeValue = parseDecimal(pos.net_size ?? pos.size ?? pos.quantity);
+            const sizeText = Number.isFinite(sizeValue) ? formatDecimal(sizeValue, 6) : (pos.net_size ?? pos.size ?? '--');
+            const pnlValue = parseDecimal(pos.pnl);
+            const pnlText = Number.isFinite(pnlValue) ? formatSignedNumber(pnlValue) : (pos.pnl ?? '--');
+            const pnlClass = percentClass(pnlValue);
+            return `
+              <li class="grvt-position-row">
+                <span class="pill">${escapeHtml(symbol)}</span>
+                <span class="pill ${side === 'LONG' ? 'pill-long' : side === 'SHORT' ? 'pill-short' : ''}">${escapeHtml(side || '--')}</span>
+                <span>${escapeHtml(sizeText)}</span>
+                <span class="${pnlClass}">${escapeHtml(pnlText)}</span>
+              </li>
+            `;
+          }).join('');
+
+          const card = document.createElement('article');
+          card.className = 'card grvt-account-card';
+          const totalText = Number.isFinite(entry.total) ? formatSignedNumber(entry.total) : '--';
+          const equityText = Number.isFinite(entry.equity) ? numberFormatter.format(entry.equity) : '--';
+          const walletText = Number.isFinite(entry.wallet) ? numberFormatter.format(entry.wallet) : '--';
+          card.innerHTML = `
+            <div class="grvt-account-header">
+              <h4>${escapeHtml(entry.name ?? 'Account')}</h4>
+              <span class="badge badge-muted">${escapeHtml(entry.agentId ?? 'source')}</span>
+            </div>
+            <div class="grvt-account-stats">
+              <div>
+                <p class="summary-sub">Total PnL</p>
+                <p class="value">${escapeHtml(totalText)}</p>
+              </div>
+              <div>
+                <p class="summary-sub">Equity</p>
+                <p class="value">${escapeHtml(equityText)}</p>
+              </div>
+              <div>
+                <p class="summary-sub">Balance</p>
+                <p class="value">${escapeHtml(walletText)}</p>
+              </div>
+            </div>
+            <ul class="grvt-positions">${positionItems || '<li class="grvt-position-row">No positions</li>'}</ul>
+          `;
+          paraAccountGrid.appendChild(card);
+        }
+      }
+
       function renderGrvt(data) {
         if (!grvtAccountCount || !grvtEmpty || !grvtCard) {
           return;
@@ -6943,6 +7237,7 @@
           renderPriceChart(data);
           renderTransferChart(data);
           renderAgents(data);
+          renderPara(data);
           renderGrvt(data);
           renderGrvtAdjustments(data?.grvt_adjustments);
           renderAutoBalance(data?.auto_balance, data?.agents);

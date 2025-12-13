@@ -977,6 +977,7 @@ class HedgeState:
     spread_metrics: Optional[Dict[str, Any]] = None
     strategy_metrics: Optional[Dict[str, Any]] = None
     grvt_accounts: Optional[Dict[str, Any]] = None
+    paradex_accounts: Optional[Dict[str, Any]] = None
 
     def update_from_payload(self, payload: Dict[str, Any]) -> None:
         position_raw = payload.get("position")
@@ -994,6 +995,7 @@ class HedgeState:
         spread_metrics_raw = payload.get("spread_metrics")
         strategy_metrics_raw = payload.get("strategy_metrics")
         grvt_accounts_raw = payload.get("grvt_accounts")
+        paradex_accounts_raw = payload.get("paradex_accounts")
 
         if position_raw is not None:
             try:
@@ -1087,6 +1089,13 @@ class HedgeState:
                 normalized_grvt["accounts"] = accounts_block[:50]
             self.grvt_accounts = normalized_grvt
 
+        if isinstance(paradex_accounts_raw, dict):
+            normalized_para = copy.deepcopy(paradex_accounts_raw)
+            accounts_block = normalized_para.get("accounts")
+            if isinstance(accounts_block, list) and len(accounts_block) > 50:
+                normalized_para["accounts"] = accounts_block[:50]
+            self.paradex_accounts = normalized_para
+
         self.last_update_ts = time.time()
 
     def serialize(self) -> Dict[str, Any]:
@@ -1110,6 +1119,8 @@ class HedgeState:
             payload["strategy_metrics"] = copy.deepcopy(self.strategy_metrics)
         if self.grvt_accounts is not None:
             payload["grvt_accounts"] = copy.deepcopy(self.grvt_accounts)
+        if self.paradex_accounts is not None:
+            payload["paradex_accounts"] = copy.deepcopy(self.paradex_accounts)
         return payload
 
     @classmethod
@@ -1656,6 +1667,13 @@ class HedgeCoordinator:
         }
         if grvt_map:
             snapshot["grvt_accounts"] = grvt_map
+        paradex_map = {
+            agent_id: copy.deepcopy(state.paradex_accounts)
+            for agent_id, state in self._states.items()
+            if state.paradex_accounts
+        }
+        if paradex_map:
+            snapshot["paradex_accounts"] = paradex_map
         if self._global_risk_stats is None:
             self._recalculate_global_risk()
         if self._global_risk_stats is not None:
