@@ -2472,6 +2472,14 @@
         return `${prefix}${value.toFixed(digits)}%`;
       }
 
+      function formatSignedNumber(value, digits = 6) {
+        if (!Number.isFinite(value)) {
+          return '—';
+        }
+        const prefix = value > 0 ? '+' : '';
+        return `${prefix}${value.toFixed(digits)}`;
+      }
+
       function percentClass(value) {
         if (!Number.isFinite(value) || Math.abs(value) < 1e-9) {
           return 'vol-neutral';
