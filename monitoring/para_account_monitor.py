@@ -563,6 +563,21 @@ class ParadexAccountMonitor:
                         balance_total = decimal_from(totals_block.get(key))
                         if balance_total is not None:
                             break
+            if balance_total is None:
+                results_block = balance_payload.get("results")
+                if isinstance(results_block, list):
+                    for entry in results_block:
+                        if not isinstance(entry, dict):
+                            continue
+                        token = str(entry.get("token") or "").upper()
+                        size_value = decimal_from(entry.get("size") or entry.get("balance") or entry.get("equity"))
+                        if size_value is None:
+                            continue
+                        if token in {"USDC", "USDT", "USD"}:
+                            balance_total = size_value
+                            break
+                        if balance_total is None:
+                            balance_total = size_value
             available_raw = extract_from_paths(balance_payload, *BALANCE_AVAILABLE_PATHS)
             balance_available = decimal_from(available_raw)
             if balance_available is None:
@@ -574,6 +589,21 @@ class ParadexAccountMonitor:
                         balance_available = decimal_from(free_block.get(key))
                         if balance_available is not None:
                             break
+            if balance_available is None:
+                results_block = balance_payload.get("results")
+                if isinstance(results_block, list):
+                    for entry in results_block:
+                        if not isinstance(entry, dict):
+                            continue
+                        token = str(entry.get("token") or "").upper()
+                        size_value = decimal_from(entry.get("size") or entry.get("balance") or entry.get("equity"))
+                        if size_value is None:
+                            continue
+                        if token in {"USDC", "USDT", "USD"}:
+                            balance_available = size_value
+                            break
+                        if balance_available is None:
+                            balance_available = size_value
 
         if balance_total is None and balance_available is not None:
             balance_total = balance_available
