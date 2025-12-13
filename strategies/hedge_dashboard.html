@@ -6576,10 +6576,11 @@
       }
 
       function renderAgents(data) {
-        let agentMap = data?.agents;
-        if (!agentMap || typeof agentMap !== 'object') {
-          agentMap = {};
-        }
+        try {
+          let agentMap = data?.agents;
+          if (!agentMap || typeof agentMap !== 'object') {
+            agentMap = {};
+          }
 
         // Fallback: if no agents payload, synthesize from other sections (PARA/GRVT) so Per-VPS pane
         // still shows the sources we have data for.
@@ -6627,25 +6628,25 @@
           }
         }
 
-        const entries = Object.entries(agentMap ?? {});
-        const staleSet = new Set(data?.stale_agents ?? []);
-        const lastAgentId = data?.last_agent_id ?? null;
-        const controls = data?.controls ?? {};
+          const entries = Object.entries(agentMap ?? {});
+          const staleSet = new Set(data?.stale_agents ?? []);
+          const lastAgentId = data?.last_agent_id ?? null;
+          const controls = data?.controls ?? {};
 
-        agentGrid.innerHTML = '';
+          agentGrid.innerHTML = '';
 
-        if (!entries.length) {
-          agentGrid.classList.add('hidden');
-          agentEmpty.classList.remove('hidden');
-          const agentCountValue = toNumber(data?.agent_count);
-          if (agentCountValue > 0) {
-            agentEmpty.textContent = `有 ${agentCountValue} 台 VPS 在统计，但未收到明细；检查 /metrics 是否返回 agents 字段`;
-          } else {
-            agentEmpty.textContent = 'Waiting for VPS metrics…';
+          if (!entries.length) {
+            agentGrid.classList.add('hidden');
+            agentEmpty.classList.remove('hidden');
+            const agentCountValue = toNumber(data?.agent_count);
+            if (agentCountValue > 0) {
+              agentEmpty.textContent = `有 ${agentCountValue} 台 VPS 在统计，但未收到明细；检查 /metrics 是否返回 agents 字段`;
+            } else {
+              agentEmpty.textContent = 'Waiting for VPS metrics…';
+            }
+            agentCount.textContent = `${agentCountValue || 0} active`;
+            return;
           }
-          agentCount.textContent = `${agentCountValue || 0} active`;
-          return;
-        }
 
         agentGrid.classList.remove('hidden');
         agentEmpty.classList.add('hidden');
@@ -6779,13 +6780,23 @@
         summaryParts.push(`${entries.length} total`);
         agentCount.textContent = summaryParts.join(' · ');
 
-          const defaultPaused = Boolean(data?.default_paused);
-          if (defaultPauseIndicator) {
-            defaultPauseIndicator.classList.toggle('hidden', !defaultPaused);
-          }
+        const defaultPaused = Boolean(data?.default_paused);
+        if (defaultPauseIndicator) {
+          defaultPauseIndicator.classList.toggle('hidden', !defaultPaused);
+        }
 
-          lastDefaultPaused = defaultPaused;
-          updateBatchButtons();
+        lastDefaultPaused = defaultPaused;
+        updateBatchButtons();
+        } catch (err) {
+          console.warn('renderAgents error', err);
+          if (agentEmpty) {
+            agentEmpty.classList.remove('hidden');
+            agentEmpty.textContent = 'Per-VPS section failed to render; check console for details.';
+          }
+          if (agentGrid) {
+            agentGrid.classList.add('hidden');
+          }
+        }
       }
 
       function describeStrategyAction(action) {
