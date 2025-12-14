@@ -282,33 +282,70 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
         ("positionAmt",),
         ("net_size",),
         ("position_size",),
+        ("positionSize",),
+        ("position_qty",),
+        ("positionQty",),
+        ("netSize",),
         ("quantity",),
         ("info", "position_size"),
         ("info", "contracts"),
+        ("info", "size"),
+        ("info", "positionQty"),
     ]
     entry_price_candidates = [
         ("entry_price",),
         ("entryPrice",),
         ("average_price",),
         ("avg_entry_price",),
+        ("avgEntryPrice",),
+        ("avgEntry",),
+        ("averageEntryPrice",),
+        ("averageEntry",),
+        ("entryPx",),
+        ("avgPrice",),
         ("info", "entry_price"),
         ("info", "average_entry_price"),
+        ("info", "avgEntryPrice"),
+        ("info", "avg_entry_price"),
+        ("info", "entryPx"),
     ]
     mark_price_candidates = [
         ("mark_price",),
         ("markPrice",),
         ("last_price",),
+        ("lastPrice",),
+        ("index_price",),
+        ("indexPrice",),
+        ("oracle_price",),
+        ("oraclePrice",),
+        ("lastTradedPrice",),
+        ("last_traded_price",),
+        ("price",),
         ("info", "mark_price"),
         ("info", "markPrice"),
         ("info", "last_price"),
+        ("info", "lastPrice"),
+        ("info", "index_price"),
+        ("info", "indexPrice"),
+        ("info", "oracle_price"),
+        ("info", "oraclePrice"),
+        ("info", "lastTradedPrice"),
+        ("info", "last_traded_price"),
+        ("info", "price"),
     ]
     pnl_candidates = [
         ("unrealizedPnl",),
         ("unrealized_pnl",),
         ("pnl",),
+        ("unrealizedPnL",),
+        ("unrealized_pnl_usd",),
+        ("unrealizedPnlUsd",),
+        ("profit",),
+        ("info", "unrealizedPnL"),
         ("info", "unrealizedPnl"),
         ("info", "unrealized_pnl"),
         ("info", "pnl"),
+        ("info", "profit"),
     ]
 
     raw_size = extract_from_paths(entry, *size_candidates)
@@ -322,6 +359,11 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
     mark_price = decimal_from(raw_mark)
     raw_pnl = extract_from_paths(entry, *pnl_candidates)
     pnl_value = decimal_from(raw_pnl)
+
+    if mark_price is None and entry_price is not None:
+        mark_price = entry_price
+    if entry_price is None and mark_price is not None:
+        entry_price = mark_price
 
     if pnl_value is None and None not in (signed_size, entry_price, mark_price):
         try:
