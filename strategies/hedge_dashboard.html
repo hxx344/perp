@@ -2052,6 +2052,78 @@
               </table>
             </div>
           </div>
+          <div class="grvt-auto-panel" id="para-auto-panel">
+            <div class="grvt-adjust-header">
+              <div>
+                <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">PARA 自动平衡</h3>
+                <p class="summary-sub" style="margin: 0;">根据阈值在两个 PARA 账户间自动划转</p>
+              </div>
+              <span class="grvt-auto-pair" id="para-auto-pair">未配置</span>
+            </div>
+            <div class="grvt-auto-grid">
+              <label class="grvt-auto-toggle">
+                <span>启用自动平衡</span>
+                <small>开启后根据阈值自动在两个账户之间划转</small>
+                <input type="checkbox" id="para-auto-enabled" />
+              </label>
+              <label>
+                账户 A
+                <select id="para-auto-agent-a"></select>
+              </label>
+              <label>
+                账户 B
+                <select id="para-auto-agent-b"></select>
+              </label>
+              <label>
+                阈值（%）
+                <input type="number" id="para-auto-threshold" min="0" step="0.1" placeholder="15" />
+              </label>
+              <label>
+                最小划转
+                <input type="number" id="para-auto-min-transfer" min="0" step="0.01" placeholder="1000" />
+              </label>
+              <label>
+                最大划转（可选）
+                <input type="number" id="para-auto-max-transfer" min="0" step="0.01" placeholder="5000" />
+              </label>
+              <label>
+                币种
+                <input type="text" id="para-auto-currency" value="USDC" />
+              </label>
+              <label>
+                冷却（秒）
+                <input type="number" id="para-auto-cooldown" min="0" step="1" placeholder="900" />
+              </label>
+              <label>
+                使用可划转余额
+                <div class="grvt-auto-checkbox">
+                  <input type="checkbox" id="para-auto-use-available" />
+                  <span>prefer transferable balance</span>
+                </div>
+                <small>优先比较 available_equity，波动大时更稳健</small>
+              </label>
+            </div>
+            <div class="grvt-auto-actions">
+              <button type="button" id="para-auto-save">保存配置</button>
+              <button type="button" class="button-danger" id="para-auto-disable">停用</button>
+              <button type="button" class="button-ghost" id="para-auto-refresh">刷新状态</button>
+              <p id="para-auto-status">等待配置…</p>
+            </div>
+            <div class="grvt-auto-status-grid">
+              <div>
+                <h4>实时测量</h4>
+                <ul class="grvt-auto-list" id="para-auto-measurement">
+                  <li>尚未收到差值数据</li>
+                </ul>
+              </div>
+              <div>
+                <h4>最近执行</h4>
+                <ul class="grvt-auto-list" id="para-auto-last-action">
+                  <li>无执行记录</li>
+                </ul>
+              </div>
+            </div>
+          </div>
       </div>
     </section>
 
@@ -2325,6 +2397,23 @@
   const paraTransferSubmitButton = document.getElementById('para-transfer-submit');
   const paraTransferStatus = document.getElementById('para-transfer-status');
   const paraTransferHistoryBody = document.getElementById('para-transfer-history');
+  const paraAutoPanel = document.getElementById('para-auto-panel');
+  const paraAutoEnabledInput = document.getElementById('para-auto-enabled');
+  const paraAutoAgentASelect = document.getElementById('para-auto-agent-a');
+  const paraAutoAgentBSelect = document.getElementById('para-auto-agent-b');
+  const paraAutoThresholdInput = document.getElementById('para-auto-threshold');
+  const paraAutoMinTransferInput = document.getElementById('para-auto-min-transfer');
+  const paraAutoMaxTransferInput = document.getElementById('para-auto-max-transfer');
+  const paraAutoCurrencyInput = document.getElementById('para-auto-currency');
+  const paraAutoCooldownInput = document.getElementById('para-auto-cooldown');
+  const paraAutoUseAvailableInput = document.getElementById('para-auto-use-available');
+  const paraAutoSaveButton = document.getElementById('para-auto-save');
+  const paraAutoDisableButton = document.getElementById('para-auto-disable');
+  const paraAutoRefreshButton = document.getElementById('para-auto-refresh');
+  const paraAutoStatus = document.getElementById('para-auto-status');
+  const paraAutoMeasurement = document.getElementById('para-auto-measurement');
+  const paraAutoLastAction = document.getElementById('para-auto-last-action');
+  const paraAutoPairLabel = document.getElementById('para-auto-pair');
   const grvtAutoPanel = document.getElementById('grvt-auto-panel');
   const grvtAutoEnabledInput = document.getElementById('grvt-auto-enabled');
   const grvtAutoAgentASelect = document.getElementById('grvt-auto-agent-a');
@@ -2502,6 +2591,11 @@
   let autoBalanceBusy = false;
   let autoBalanceDirty = false;
   let autoBalanceLastConfig = null;
+  let paraAutoAgentsKey = '';
+  let paraAutoConfigKey = '';
+  let paraAutoBusy = false;
+  let paraAutoDirty = false;
+  let paraAutoLastConfig = null;
   let riskSettingsBusy = false;
   let riskSettingsDirty = false;
   let riskSettingsSnapshot = null;
@@ -4240,6 +4334,12 @@
         }
       }
 
+      function setParaAutoBalanceStatusMessage(message) {
+        if (paraAutoStatus) {
+          paraAutoStatus.textContent = message || '等待配置…';
+        }
+      }
+
       function updateAutoBalanceButtons() {
         [grvtAutoSaveButton, grvtAutoDisableButton, grvtAutoRefreshButton].forEach((button) => {
           if (button) {
@@ -4248,10 +4348,25 @@
         });
       }
 
+      function updateParaAutoBalanceButtons() {
+        [paraAutoSaveButton, paraAutoDisableButton, paraAutoRefreshButton].forEach((button) => {
+          if (button) {
+            button.disabled = paraAutoBusy;
+          }
+        });
+      }
+
       function markAutoBalanceDirty() {
         autoBalanceDirty = true;
         if (!autoBalanceBusy) {
           setAutoBalanceStatusMessage('配置未保存');
+        }
+      }
+
+      function markParaAutoBalanceDirty() {
+        paraAutoDirty = true;
+        if (!paraAutoBusy) {
+          setParaAutoBalanceStatusMessage('配置未保存');
         }
       }
 
@@ -4318,6 +4433,61 @@
         }
         if (!grvtAutoAgentBSelect.value && autoBalanceLastConfig?.agent_b && hasOption(grvtAutoAgentBSelect, autoBalanceLastConfig.agent_b)) {
           grvtAutoAgentBSelect.value = autoBalanceLastConfig.agent_b;
+        }
+      }
+
+      function updateParaAutoBalanceAgentOptions(agentMap) {
+        if (!paraAutoAgentASelect || !paraAutoAgentBSelect) {
+          return;
+        }
+        const entries = agentMap && typeof agentMap === 'object'
+          ? Object.entries(agentMap)
+          : [];
+        const options = entries
+          .map(([agentId, metrics]) => {
+            const instrument = metrics?.instrument ? ` · ${metrics.instrument}` : '';
+            return { agentId, label: `${agentId}${instrument}` };
+          })
+          .sort((a, b) => a.agentId.localeCompare(b.agentId, undefined, { sensitivity: 'base' }));
+        const key = options.map((option) => `${option.agentId}:${option.label}`).join('|');
+        if (key === paraAutoAgentsKey) {
+          return;
+        }
+        paraAutoAgentsKey = key;
+        const hasOption = (select, value) => {
+          if (!select || !value) {
+            return false;
+          }
+          return Array.from(select.options || []).some((option) => option.value === value);
+        };
+        const rebuild = (select, previous) => {
+          if (!select) {
+            return;
+          }
+          select.innerHTML = '';
+          const placeholder = document.createElement('option');
+          placeholder.value = '';
+          placeholder.textContent = '选择 VPS';
+          select.appendChild(placeholder);
+          for (const option of options) {
+            const element = document.createElement('option');
+            element.value = option.agentId;
+            element.textContent = option.label;
+            select.appendChild(element);
+          }
+          if (previous && options.some((option) => option.agentId === previous)) {
+            select.value = previous;
+          } else {
+            select.value = '';
+          }
+        };
+        rebuild(paraAutoAgentASelect, paraAutoAgentASelect.value);
+        rebuild(paraAutoAgentBSelect, paraAutoAgentBSelect.value);
+        if (!paraAutoAgentASelect.value && paraAutoLastConfig?.agent_a && hasOption(paraAutoAgentASelect, paraAutoLastConfig.agent_a)) {
+          paraAutoAgentASelect.value = paraAutoLastConfig.agent_a;
+        }
+        if (!paraAutoAgentBSelect.value && paraAutoLastConfig?.agent_b && hasOption(paraAutoAgentBSelect, paraAutoLastConfig.agent_b)) {
+          paraAutoAgentBSelect.value = paraAutoLastConfig.agent_b;
         }
       }
 
@@ -4647,6 +4817,324 @@
         } finally {
           autoBalanceBusy = false;
           updateAutoBalanceButtons();
+        }
+      }
+
+      function applyParaAutoBalanceConfig(config, { markClean = false } = {}) {
+        if (!paraAutoEnabledInput) {
+          return;
+        }
+        const enabled = Boolean(config);
+        paraAutoEnabledInput.checked = enabled;
+        const setValue = (element, value, fallback = '') => {
+          if (!element) {
+            return;
+          }
+          if (value === null || value === undefined || value === '') {
+            element.value = fallback;
+          } else {
+            element.value = value;
+          }
+        };
+        if (paraAutoAgentASelect) {
+          paraAutoAgentASelect.value = config?.agent_a ?? '';
+        }
+        if (paraAutoAgentBSelect) {
+          paraAutoAgentBSelect.value = config?.agent_b ?? '';
+        }
+        const thresholdPercentRaw = config?.threshold_percent;
+        let thresholdPercent = Number(thresholdPercentRaw);
+        if (!Number.isFinite(thresholdPercent)) {
+          const ratio = Number(config?.threshold_ratio);
+          thresholdPercent = Number.isFinite(ratio) ? ratio * 100 : NaN;
+        }
+        setValue(
+          paraAutoThresholdInput,
+          Number.isFinite(thresholdPercent) ? thresholdPercent.toString() : ''
+        );
+        setValue(paraAutoMinTransferInput, config?.min_transfer ?? '');
+        setValue(paraAutoMaxTransferInput, config?.max_transfer ?? '');
+        setValue(paraAutoCurrencyInput, config?.currency ?? 'USDC', 'USDC');
+        setValue(
+          paraAutoCooldownInput,
+          config && Number.isFinite(Number(config.cooldown_seconds))
+            ? String(config.cooldown_seconds)
+            : ''
+        );
+        if (paraAutoUseAvailableInput) {
+          paraAutoUseAvailableInput.checked = Boolean(config?.use_available_equity);
+        }
+        if (paraAutoPairLabel) {
+          if (config?.agent_a && config?.agent_b) {
+            paraAutoPairLabel.textContent = `${config.agent_a} ↔ ${config.agent_b}`;
+          } else {
+            paraAutoPairLabel.textContent = '未配置';
+          }
+        }
+        paraAutoLastConfig = config ? { ...config } : null;
+        if (markClean) {
+          paraAutoDirty = false;
+          paraAutoConfigKey = JSON.stringify(config || null);
+        }
+      }
+
+      function buildParaAutoBalancePayload() {
+        const enabled = paraAutoEnabledInput?.checked ?? false;
+        if (!enabled) {
+          return { enabled: false };
+        }
+        const agentA = paraAutoAgentASelect?.value || '';
+        const agentB = paraAutoAgentBSelect?.value || '';
+        if (!agentA || !agentB || agentA === agentB) {
+          throw new Error('请选择两台不同的 PARA VPS');
+        }
+        const thresholdText = getInputValue(paraAutoThresholdInput);
+        const thresholdPercent = Number(thresholdText);
+        if (!Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
+          throw new Error('阈值百分比必须大于 0');
+        }
+        const minTransferText = getInputValue(paraAutoMinTransferInput);
+        const minTransferValue = Number(minTransferText);
+        if (!minTransferText || !Number.isFinite(minTransferValue) || minTransferValue <= 0) {
+          throw new Error('最小划转金额必须大于 0');
+        }
+        const payload = {
+          enabled: true,
+          agent_a: agentA,
+          agent_b: agentB,
+          threshold_percent: thresholdPercent,
+          min_transfer: minTransferText,
+          currency: (getInputValue(paraAutoCurrencyInput) || 'USDC').toUpperCase(),
+          use_available_equity: Boolean(paraAutoUseAvailableInput?.checked),
+        };
+        const maxTransferText = getInputValue(paraAutoMaxTransferInput);
+        if (maxTransferText) {
+          const maxTransferValue = Number(maxTransferText);
+          if (!Number.isFinite(maxTransferValue) || maxTransferValue <= 0) {
+            throw new Error('最大划转金额需大于 0');
+          }
+          payload.max_transfer = maxTransferText;
+        }
+        const cooldownText = getInputValue(paraAutoCooldownInput);
+        if (cooldownText) {
+          const cooldownValue = Number(cooldownText);
+          if (!Number.isFinite(cooldownValue) || cooldownValue < 0) {
+            throw new Error('冷却时间需为非负数字');
+          }
+          payload.cooldown_seconds = cooldownValue;
+        }
+        return payload;
+      }
+
+      function renderParaAutoBalanceStatus(status, agentCount = 0) {
+        if (!paraAutoPanel) {
+          return;
+        }
+        if (!status) {
+          setParaAutoBalanceStatusMessage('后端尚未提供自动平衡状态');
+          renderAutoBalanceList(paraAutoMeasurement, [], '暂无实时测量');
+          renderAutoBalanceList(paraAutoLastAction, [], '暂无执行记录');
+          if (paraAutoPairLabel) {
+            paraAutoPairLabel.textContent = '未配置';
+          }
+          return;
+        }
+        const summaryParts = [];
+        summaryParts.push(status.enabled ? '已启用' : '未启用');
+        const config = status.config || null;
+        if (config?.threshold_percent !== undefined) {
+          const thresholdValue = Number(config.threshold_percent);
+          if (Number.isFinite(thresholdValue)) {
+            summaryParts.push(`阈值 ${thresholdValue.toFixed(2)}%`);
+          }
+        }
+        if (agentCount > 0 && agentCount < 2) {
+          summaryParts.push('至少需要两台 PARA VPS');
+        }
+        const cooldownUntil = Number(status.cooldown_until);
+        if (status.cooldown_active && Number.isFinite(cooldownUntil)) {
+          const remaining = Math.max(0, cooldownUntil - Date.now() / 1000);
+          summaryParts.push(`冷却中 ${formatDuration(remaining)}`);
+        }
+        if (status.last_error) {
+          summaryParts.push(`错误：${status.last_error}`);
+        }
+        setParaAutoBalanceStatusMessage(summaryParts.join(' · '));
+        if (paraAutoPairLabel) {
+          if (config?.agent_a && config?.agent_b) {
+            paraAutoPairLabel.textContent = `${config.agent_a} ↔ ${config.agent_b}`;
+          } else {
+            paraAutoPairLabel.textContent = '未配置';
+          }
+        }
+        const currency = (config?.currency || 'USDC').toUpperCase();
+        const measurement = status.measurement || null;
+        const measurementItems = [];
+        if (measurement) {
+          const ratioPercent = Number.isFinite(Number(measurement.ratio))
+            ? `${(Number(measurement.ratio) * 100).toFixed(2)}%`
+            : '—';
+          const thresholdText = Number.isFinite(Number(config?.threshold_percent))
+            ? `${Number(config.threshold_percent).toFixed(2)}%`
+            : '—';
+          measurementItems.push(`权益差值 ${formatAutoBalanceNumber(measurement.difference)} ${currency}`);
+          measurementItems.push(`差值比例 ${ratioPercent} / 阈值 ${thresholdText}`);
+          measurementItems.push(`计划划转 ${formatAutoBalanceNumber(measurement.transfer_amount)} ${currency}`);
+          measurementItems.push(`方向 ${measurement.source_agent || '?'} → ${measurement.target_agent || '?'}`);
+        }
+        renderAutoBalanceList(paraAutoMeasurement, measurementItems, '暂无实时测量');
+        const lastItems = [];
+        if (status.last_transfer_amount && status.last_direction) {
+          const from = status.last_direction.from || '?';
+          const to = status.last_direction.to || '?';
+          lastItems.push(`上次划转 ${status.last_transfer_amount} ${currency} · ${from} → ${to}`);
+        }
+        const lastActionTs = Number(status.last_action_at);
+        if (Number.isFinite(lastActionTs) && lastActionTs > 0) {
+          lastItems.push(`执行时间 ${formatTimestamp(lastActionTs) || '—'}`);
+        }
+        if (status.last_request_id) {
+          lastItems.push(`请求编号 ${status.last_request_id}`);
+        }
+        if (!status.cooldown_active && Number.isFinite(cooldownUntil) && cooldownUntil > 0) {
+          lastItems.push(`冷却截止 ${formatTimestamp(cooldownUntil) || '—'}`);
+        }
+        if (status.last_error) {
+          lastItems.push(`最近错误 ${status.last_error}`);
+        }
+        renderAutoBalanceList(
+          paraAutoLastAction,
+          lastItems,
+          status.enabled ? '尚无执行记录' : '停用状态'
+        );
+      }
+
+      function renderParaAutoBalance(statusPayload, agentsMap) {
+        if (!paraAutoPanel) {
+          return;
+        }
+        updateParaAutoBalanceAgentOptions(agentsMap);
+        const agentCount = agentsMap && typeof agentsMap === 'object'
+          ? Object.keys(agentsMap).length
+          : 0;
+        renderParaAutoBalanceStatus(statusPayload, agentCount);
+        if (!statusPayload || paraAutoDirty || paraAutoBusy) {
+          return;
+        }
+        const config = statusPayload.config || null;
+        const serialized = JSON.stringify(config || null);
+        if (serialized !== paraAutoConfigKey) {
+          applyParaAutoBalanceConfig(config, { markClean: true });
+        }
+      }
+
+      async function submitParaAutoBalanceConfig() {
+        if (paraAutoBusy) {
+          return;
+        }
+        let payload;
+        try {
+          payload = buildParaAutoBalancePayload();
+        } catch (error) {
+          setParaAutoBalanceStatusMessage(error.message || String(error));
+          return;
+        }
+        paraAutoBusy = true;
+        updateParaAutoBalanceButtons();
+        setParaAutoBalanceStatusMessage('提交自动平衡配置…');
+        try {
+          const response = await fetch('/para/auto_balance/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          applyParaAutoBalanceConfig(result.config, { markClean: true });
+          const agentCount = lastMetricsSnapshot && lastMetricsSnapshot.agents
+            ? Object.keys(lastMetricsSnapshot.agents).length
+            : 0;
+          renderParaAutoBalanceStatus(result.status, agentCount);
+          setParaAutoBalanceStatusMessage('配置已保存');
+          await refreshMetrics();
+        } catch (error) {
+          setParaAutoBalanceStatusMessage(`保存失败：${error}`);
+        } finally {
+          paraAutoBusy = false;
+          updateParaAutoBalanceButtons();
+        }
+      }
+
+      async function disableParaAutoBalance() {
+        if (paraAutoBusy) {
+          return;
+        }
+        paraAutoBusy = true;
+        updateParaAutoBalanceButtons();
+        setParaAutoBalanceStatusMessage('停用自动平衡…');
+        try {
+          const response = await fetch('/para/auto_balance/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: false }),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          applyParaAutoBalanceConfig(null, { markClean: true });
+          const agentCount = lastMetricsSnapshot && lastMetricsSnapshot.agents
+            ? Object.keys(lastMetricsSnapshot.agents).length
+            : 0;
+          renderParaAutoBalanceStatus(result.status, agentCount);
+          setParaAutoBalanceStatusMessage('已停用');
+          await refreshMetrics();
+        } catch (error) {
+          setParaAutoBalanceStatusMessage(`停用失败：${error}`);
+        } finally {
+          paraAutoBusy = false;
+          updateParaAutoBalanceButtons();
+        }
+      }
+
+      async function loadParaAutoBalanceConfig({ silent = false } = {}) {
+        if (paraAutoBusy) {
+          return;
+        }
+        paraAutoBusy = true;
+        updateParaAutoBalanceButtons();
+        if (!silent) {
+          setParaAutoBalanceStatusMessage('刷新自动平衡配置…');
+        }
+        try {
+          const response = await fetch('/para/auto_balance/config', { cache: 'no-store' });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          applyParaAutoBalanceConfig(result.config, { markClean: true });
+          const agentCount = lastMetricsSnapshot && lastMetricsSnapshot.agents
+            ? Object.keys(lastMetricsSnapshot.agents).length
+            : 0;
+          renderParaAutoBalanceStatus(result.status, agentCount);
+          if (!silent) {
+            setParaAutoBalanceStatusMessage('配置已更新');
+          }
+        } catch (error) {
+          if (!silent) {
+            setParaAutoBalanceStatusMessage(`刷新失败：${error}`);
+          }
+        } finally {
+          paraAutoBusy = false;
+          updateParaAutoBalanceButtons();
         }
       }
 
@@ -8084,6 +8572,7 @@
           renderParaAdjustments(data?.para_adjustments);
           renderGrvtAdjustments(data?.grvt_adjustments);
           renderAutoBalance(data?.auto_balance, data?.agents);
+          renderParaAutoBalance(data?.para_auto_balance, data?.paradex_accounts || data?.agents);
           renderSpread(data);
           renderStrategy(data);
           maybeRefreshRiskHistory();
@@ -8274,6 +8763,21 @@
           loadAutoBalanceConfig({ silent: false });
         });
       }
+      if (paraAutoSaveButton) {
+        paraAutoSaveButton.addEventListener('click', () => {
+          submitParaAutoBalanceConfig();
+        });
+      }
+      if (paraAutoDisableButton) {
+        paraAutoDisableButton.addEventListener('click', () => {
+          disableParaAutoBalance();
+        });
+      }
+      if (paraAutoRefreshButton) {
+        paraAutoRefreshButton.addEventListener('click', () => {
+          loadParaAutoBalanceConfig({ silent: false });
+        });
+      }
       const autoBalanceInputs = [
         grvtAutoEnabledInput,
         grvtAutoAgentASelect,
@@ -8291,6 +8795,24 @@
         }
         input.addEventListener('input', markAutoBalanceDirty);
         input.addEventListener('change', markAutoBalanceDirty);
+      });
+      const paraAutoBalanceInputs = [
+        paraAutoEnabledInput,
+        paraAutoAgentASelect,
+        paraAutoAgentBSelect,
+        paraAutoThresholdInput,
+        paraAutoMinTransferInput,
+        paraAutoMaxTransferInput,
+        paraAutoCurrencyInput,
+        paraAutoCooldownInput,
+        paraAutoUseAvailableInput,
+      ];
+      paraAutoBalanceInputs.forEach((input) => {
+        if (!input) {
+          return;
+        }
+        input.addEventListener('input', markParaAutoBalanceDirty);
+        input.addEventListener('change', markParaAutoBalanceDirty);
       });
       if (riskSaveButton) {
         riskSaveButton.addEventListener('click', () => {
@@ -8359,19 +8881,21 @@
       if (riskBarkAppendInput) {
         riskBarkAppendInput.addEventListener('change', markRiskSettingsDirty);
       }
-      updateGrvtSymbolOptions([]);
-      updateParaSymbolOptions([]);
-      updateGrvtTransferButtons();
-  updateParaTransferButtons();
-      updateAutoBalanceButtons();
-      updateRiskButtons();
-  loadRiskHistory({ silent: true });
-      loadAutoBalanceConfig({ silent: true });
-      loadRiskSettings({ silent: true });
-  loadSimulationData({ silent: false });
-      refreshMetrics();
-      setInterval(refreshMetrics, 2000);
-  setInterval(() => loadSimulationData({ silent: true }), 300000);
+    updateGrvtSymbolOptions([]);
+    updateParaSymbolOptions([]);
+    updateGrvtTransferButtons();
+    updateParaTransferButtons();
+    updateAutoBalanceButtons();
+    updateParaAutoBalanceButtons();
+    updateRiskButtons();
+    loadRiskHistory({ silent: true });
+    loadAutoBalanceConfig({ silent: true });
+    loadParaAutoBalanceConfig({ silent: true });
+    loadRiskSettings({ silent: true });
+    loadSimulationData({ silent: false });
+    refreshMetrics();
+    setInterval(refreshMetrics, 2000);
+    setInterval(() => loadSimulationData({ silent: true }), 300000);
     </script>
   </body>
 </html>

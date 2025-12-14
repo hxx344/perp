@@ -1991,6 +1991,21 @@ class CoordinatorApp:
             "cooldown_active": False,
             "measurement": None,
         }
+        self._para_auto_balance_cfg: Optional[AutoBalanceConfig] = None
+        self._para_auto_balance_lock = asyncio.Lock()
+        self._para_auto_balance_cooldown_until: Optional[float] = None
+        self._para_auto_balance_status: Dict[str, Any] = {
+            "enabled": False,
+            "config": None,
+            "last_request_id": None,
+            "last_action_at": None,
+            "last_error": None,
+            "last_transfer_amount": None,
+            "last_direction": None,
+            "cooldown_until": None,
+            "cooldown_active": False,
+            "measurement": None,
+        }
         self._para_adjustments = GrvtAdjustmentManager()
         self._app = web.Application()
         self._app.add_routes(
@@ -2006,6 +2021,8 @@ class CoordinatorApp:
                 web.post("/control", self.handle_control_update),
                 web.get("/auto_balance/config", self.handle_auto_balance_get),
                 web.post("/auto_balance/config", self.handle_auto_balance_update),
+                web.get("/para/auto_balance/config", self.handle_para_auto_balance_get),
+                web.post("/para/auto_balance/config", self.handle_para_auto_balance_update),
                 web.get("/risk_alert/settings", self.handle_risk_alert_settings),
                 web.post("/risk_alert/settings", self.handle_risk_alert_update),
                 web.get("/risk_alert/history", self.handle_risk_alert_history),
@@ -2057,6 +2074,7 @@ class CoordinatorApp:
         payload["grvt_adjustments"] = await self._adjustments.summary()
         payload["para_adjustments"] = await self._para_adjustments.summary()
         payload["auto_balance"] = self._auto_balance_status_snapshot()
+        payload["para_auto_balance"] = self._para_auto_balance_status_snapshot()
         if self._vol_monitor:
             payload["volatility"] = await self._vol_monitor.snapshot()
         return web.json_response(payload)
@@ -2320,6 +2338,7 @@ class CoordinatorApp:
 
         state = await self._coordinator.update(body)
         await self._maybe_auto_balance(state)
+        await self._maybe_para_auto_balance(state)
         return web.json_response(state)
 
     async def handle_control_get(self, request: web.Request) -> web.Response:
@@ -2425,6 +2444,44 @@ class CoordinatorApp:
         return web.json_response({
             "config": self._auto_balance_config_as_payload(),
             "status": self._auto_balance_status_snapshot(),
+        })
+
+    async def handle_para_auto_balance_get(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        payload = {
+            "config": self._para_auto_balance_config_as_payload(),
+            "status": self._para_auto_balance_status_snapshot(),
+        }
+        return web.json_response(payload)
+
+    async def handle_para_auto_balance_update(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="auto balance payload must be JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="auto balance payload must be an object")
+
+        action_raw = body.get("action")
+        action = str(action_raw).strip().lower() if isinstance(action_raw, str) else None
+        enabled_flag = body.get("enabled")
+        if enabled_flag is False or action == "disable":
+            self._update_para_auto_balance_config(None)
+            return web.json_response({
+                "config": None,
+                "status": self._para_auto_balance_status_snapshot(),
+            })
+
+        try:
+            config = self._parse_auto_balance_config(body, default_currency="USDC")
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+
+        self._update_para_auto_balance_config(config)
+        return web.json_response({
+            "config": self._para_auto_balance_config_as_payload(),
+            "status": self._para_auto_balance_status_snapshot(),
         })
 
     async def handle_risk_alert_settings(self, request: web.Request) -> web.Response:
@@ -2673,6 +2730,7 @@ class CoordinatorApp:
             body,
             created_by=request.remote or "dashboard",
             adjustments_manager=self._para_adjustments,
+            defaults_provider=self._coordinator.get_para_transfer_defaults,
         )
         return web.json_response({"request": payload})
 
@@ -2682,6 +2740,7 @@ class CoordinatorApp:
         *,
         created_by: str,
         adjustments_manager: Optional[GrvtAdjustmentManager] = None,
+        defaults_provider: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
     ) -> Dict[str, Any]:
         def _clean_required(value: Any, field: str) -> str:
             try:
@@ -2723,13 +2782,29 @@ class CoordinatorApp:
         if len(agent_ids) > 1:
             raise web.HTTPBadRequest(text="Paradex transfers support a single source agent per request")
 
-        target_l2_address = _clean_required(
+        source_agent_id = agent_ids[0]
+        target_agent_id = _clean_optional(
+            body.get("target_agent_id")
+            or body.get("destination_agent_id")
+            or body.get("to_agent_id")
+            or body.get("target_agent")
+        )
+        defaults_lookup = defaults_provider or self._coordinator.get_para_transfer_defaults
+        source_defaults = await defaults_lookup(source_agent_id) if defaults_lookup else None
+        target_defaults: Optional[Dict[str, Any]] = None
+        if target_agent_id and defaults_lookup:
+            target_defaults = await defaults_lookup(target_agent_id)
+
+        target_l2_address = _clean_optional(
             body.get("target_l2_address")
             or body.get("recipient")
             or body.get("recipient_address")
-            or body.get("to_address"),
-            "target_l2_address",
+            or body.get("to_address")
         )
+        if not target_l2_address and target_defaults:
+            target_l2_address = _clean_optional(target_defaults.get("l2_address"))
+        if not target_l2_address:
+            raise web.HTTPBadRequest(text="target_l2_address is required")
 
         metadata = body.get("transfer_metadata") or {}
         if metadata and not isinstance(metadata, dict):
@@ -2737,7 +2812,13 @@ class CoordinatorApp:
         metadata = dict(metadata or {})
         if body.get("reason") and not metadata.get("reason"):
             metadata["reason"] = str(body["reason"])
-        metadata.setdefault("agent_id", agent_ids[0])
+        metadata.setdefault("agent_id", source_agent_id)
+        if source_defaults and source_defaults.get("agent_label"):
+            metadata.setdefault("agent_label", str(source_defaults["agent_label"]))
+        if target_agent_id:
+            metadata.setdefault("target_agent_id", target_agent_id)
+            if target_defaults and target_defaults.get("agent_label"):
+                metadata.setdefault("target_agent_label", str(target_defaults["agent_label"]))
         metadata.setdefault("direction", "l2_transfer")
 
         transfer_payload: Dict[str, Any] = {
@@ -3122,6 +3203,160 @@ class CoordinatorApp:
             transfer_amount=transfer_amount,
         )
 
+    def _para_auto_balance_status_snapshot(self) -> Dict[str, Any]:
+        snapshot = copy.deepcopy(self._para_auto_balance_status)
+        snapshot["enabled"] = bool(self._para_auto_balance_cfg)
+        snapshot["config"] = self._para_auto_balance_config_as_payload()
+        return snapshot
+
+    async def _maybe_para_auto_balance(self, snapshot: Dict[str, Any]) -> None:
+        if not self._para_auto_balance_cfg:
+            return
+        async with self._para_auto_balance_lock:
+            cfg = self._para_auto_balance_cfg
+            measurement = self._compute_para_auto_balance_measurement(snapshot)
+            self._para_auto_balance_status["measurement"] = measurement.as_payload() if measurement else None
+            now = time.time()
+            cooldown_until = self._para_auto_balance_cooldown_until
+            if cooldown_until is not None and now < cooldown_until:
+                self._para_auto_balance_status["cooldown_until"] = cooldown_until
+                self._para_auto_balance_status["cooldown_active"] = True
+                return
+            self._para_auto_balance_status["cooldown_active"] = False
+            self._para_auto_balance_status["cooldown_until"] = cooldown_until
+            if not measurement:
+                return
+            if measurement.ratio < cfg.threshold_ratio:
+                return
+            requested_amount = measurement.transfer_amount
+            if requested_amount < cfg.min_transfer:
+                return
+            if cfg.max_transfer is not None and requested_amount > cfg.max_transfer:
+                requested_amount = cfg.max_transfer
+            if requested_amount < cfg.min_transfer:
+                return
+
+            measurement_payload = measurement.as_payload()
+            metadata = {
+                "auto_balance": {
+                    "venue": "paradex",
+                    "ratio": measurement_payload["ratio"],
+                    "threshold": cfg.threshold_ratio,
+                    "difference": measurement_payload["difference"],
+                    "agent_a_equity": measurement_payload["equity_a"],
+                    "agent_b_equity": measurement_payload["equity_b"],
+                    "computed_amount": measurement_payload["transfer_amount"],
+                    "requested_amount": self._decimal_to_str(requested_amount),
+                    "currency": cfg.currency,
+                    "source_agent": measurement.source_agent,
+                    "target_agent": measurement.target_agent,
+                    "snapshot_ts": now,
+                }
+            }
+            reason = f"para_auto_balance {measurement.source_agent}->{measurement.target_agent}"
+            request_body = {
+                "agent_ids": [measurement.source_agent],
+                "target_agent_id": measurement.target_agent,
+                "currency": cfg.currency,
+                "num_tokens": self._decimal_to_str(requested_amount),
+                "transfer_metadata": metadata,
+                "reason": reason,
+            }
+            try:
+                response = await self._process_para_transfer_request(
+                    request_body,
+                    created_by="para_auto_balance",
+                    adjustments_manager=self._para_adjustments,
+                    defaults_provider=self._coordinator.get_para_transfer_defaults,
+                )
+            except web.HTTPError as exc:
+                error_text = getattr(exc, "text", None) or str(exc)
+                self._para_auto_balance_status["last_error"] = error_text
+                if cfg.cooldown_seconds > 0:
+                    self._para_auto_balance_cooldown_until = now + cfg.cooldown_seconds
+                else:
+                    self._para_auto_balance_cooldown_until = None
+                self._para_auto_balance_status["cooldown_until"] = self._para_auto_balance_cooldown_until
+                self._para_auto_balance_status["cooldown_active"] = (
+                    self._para_auto_balance_cooldown_until is not None and now < self._para_auto_balance_cooldown_until
+                )
+                LOGGER.warning("PARA auto balance transfer failed: %s", error_text)
+                return
+
+            self._para_auto_balance_status["last_error"] = None
+            self._para_auto_balance_status["last_request_id"] = response.get("request_id")
+            self._para_auto_balance_status["last_action_at"] = now
+            self._para_auto_balance_status["last_transfer_amount"] = self._decimal_to_str(requested_amount)
+            self._para_auto_balance_status["last_direction"] = {
+                "from": measurement.source_agent,
+                "to": measurement.target_agent,
+            }
+            if cfg.cooldown_seconds > 0:
+                self._para_auto_balance_cooldown_until = now + cfg.cooldown_seconds
+            else:
+                self._para_auto_balance_cooldown_until = None
+            self._para_auto_balance_status["cooldown_until"] = self._para_auto_balance_cooldown_until
+            self._para_auto_balance_status["cooldown_active"] = (
+                self._para_auto_balance_cooldown_until is not None and now < self._para_auto_balance_cooldown_until
+            )
+
+    def _compute_para_auto_balance_measurement(self, snapshot: Dict[str, Any]) -> Optional[AutoBalanceMeasurement]:
+        if not self._para_auto_balance_cfg:
+            return None
+        agents_block = snapshot.get("agents")
+        if not isinstance(agents_block, dict):
+            return None
+        entry_a = agents_block.get(self._para_auto_balance_cfg.agent_a)
+        entry_b = agents_block.get(self._para_auto_balance_cfg.agent_b)
+        if not isinstance(entry_a, dict) or not isinstance(entry_b, dict):
+            return None
+        equity_a = self._extract_para_equity_from_agent(entry_a, prefer_available=self._para_auto_balance_cfg.use_available_equity)
+        equity_b = self._extract_para_equity_from_agent(entry_b, prefer_available=self._para_auto_balance_cfg.use_available_equity)
+        if equity_a is None or equity_b is None:
+            return None
+        if equity_a <= 0 or equity_b <= 0:
+            return None
+        difference = abs(equity_a - equity_b)
+        if difference <= 0:
+            return None
+        max_equity = equity_a if equity_a >= equity_b else equity_b
+        if max_equity <= 0:
+            return None
+        ratio = float(difference / max_equity)
+        source_agent = self._para_auto_balance_cfg.agent_a if equity_a >= equity_b else self._para_auto_balance_cfg.agent_b
+        target_agent = self._para_auto_balance_cfg.agent_b if source_agent == self._para_auto_balance_cfg.agent_a else self._para_auto_balance_cfg.agent_a
+        transfer_amount = difference / Decimal("2")
+        if transfer_amount <= 0:
+            return None
+        return AutoBalanceMeasurement(
+            agent_a=self._para_auto_balance_cfg.agent_a,
+            agent_b=self._para_auto_balance_cfg.agent_b,
+            equity_a=equity_a,
+            equity_b=equity_b,
+            difference=difference,
+            ratio=ratio,
+            source_agent=source_agent,
+            target_agent=target_agent,
+            transfer_amount=transfer_amount,
+        )
+
+    def _extract_para_equity_from_agent(self, agent_payload: Dict[str, Any], *, prefer_available: bool) -> Optional[Decimal]:
+        para_block = agent_payload.get("paradex_accounts")
+        if not isinstance(para_block, dict):
+            return None
+        summary = para_block.get("summary")
+        summary_block = summary if isinstance(summary, dict) else None
+        if summary_block is None:
+            return None
+        fields_available = ("available_equity", "available_balance", "equity", "balance")
+        fields_equity_first = ("equity", "balance", "available_equity", "available_balance")
+        fields = fields_available if prefer_available else fields_equity_first
+        for field in fields:
+            value = HedgeCoordinator._decimal_from(summary_block.get(field))
+            if value is not None:
+                return value
+        return None
+
     def _extract_equity_from_agent(self, agent_payload: Dict[str, Any], *, prefer_available: bool) -> Optional[Decimal]:
         grvt_block = agent_payload.get("grvt_accounts")
         if not isinstance(grvt_block, dict):
@@ -3160,8 +3395,8 @@ class CoordinatorApp:
         except Exception:
             return str(value)
 
-    def _auto_balance_config_as_payload(self) -> Optional[Dict[str, Any]]:
-        cfg = self._auto_balance_cfg
+    def _auto_balance_config_as_payload(self, config: Optional[AutoBalanceConfig] = None) -> Optional[Dict[str, Any]]:
+        cfg = config if config is not None else self._auto_balance_cfg
         if not cfg:
             return None
         payload: Dict[str, Any] = {
@@ -3179,6 +3414,9 @@ class CoordinatorApp:
         else:
             payload["max_transfer"] = None
         return payload
+
+    def _para_auto_balance_config_as_payload(self) -> Optional[Dict[str, Any]]:
+        return self._auto_balance_config_as_payload(self._para_auto_balance_cfg)
 
     def _update_auto_balance_config(self, config: Optional[AutoBalanceConfig]) -> None:
         self._auto_balance_cfg = config
@@ -3209,7 +3447,36 @@ class CoordinatorApp:
                 config.currency,
             )
 
-    def _parse_auto_balance_config(self, body: Dict[str, Any]) -> AutoBalanceConfig:
+    def _update_para_auto_balance_config(self, config: Optional[AutoBalanceConfig]) -> None:
+        self._para_auto_balance_cfg = config
+        self._para_auto_balance_cooldown_until = None
+        self._para_auto_balance_status["enabled"] = bool(config)
+        self._para_auto_balance_status["config"] = self._para_auto_balance_config_as_payload()
+        self._para_auto_balance_status["cooldown_until"] = None
+        self._para_auto_balance_status["cooldown_active"] = False
+        self._para_auto_balance_status["measurement"] = None
+        self._para_auto_balance_status["last_error"] = None
+        self._para_auto_balance_status["last_request_id"] = None
+        self._para_auto_balance_status["last_action_at"] = None
+        self._para_auto_balance_status["last_transfer_amount"] = None
+        self._para_auto_balance_status["last_direction"] = None
+        if not config:
+            LOGGER.info("PARA auto balance disabled via dashboard")
+        else:
+            try:
+                min_text = self._decimal_to_str(config.min_transfer)
+            except Exception:
+                min_text = str(config.min_transfer)
+            LOGGER.info(
+                "PARA auto balance configured via dashboard: %s ↔ %s (threshold %.2f%%, min %s %s)",
+                config.agent_a,
+                config.agent_b,
+                config.threshold_ratio * 100,
+                min_text,
+                config.currency,
+            )
+
+    def _parse_auto_balance_config(self, body: Dict[str, Any], *, default_currency: str = "USDT") -> AutoBalanceConfig:
         agent_a = HedgeCoordinator._normalize_agent_id(body.get("agent_a"))
         agent_b = HedgeCoordinator._normalize_agent_id(body.get("agent_b") or body.get("target_agent"))
         if not agent_a or not agent_b:
@@ -3265,8 +3532,8 @@ class CoordinatorApp:
             if cooldown_seconds < 0:
                 cooldown_seconds = 0.0
 
-        currency_raw = body.get("currency") or "USDT"
-        currency = str(currency_raw).strip().upper() or "USDT"
+        currency_raw = body.get("currency") or default_currency or "USDT"
+        currency = str(currency_raw).strip().upper() or str(default_currency or "USDT").strip().upper() or "USDT"
         use_available = self._interpret_bool(body.get("use_available_equity"))
 
         return AutoBalanceConfig(
