@@ -135,6 +135,19 @@ class ParadexCredentials:
     l2_address: Optional[str] = None
 
 
+def _normalize_rpc_version(value: Optional[str]) -> Optional[str]:
+    """Normalize rpc_version formats (e.g. v0.8 / 0.8 / v0_8)."""
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    text = text.replace(".", "_").replace("-", "_")
+    if not text.startswith("v"):
+        text = f"v{text}"
+    return text
+
+
 def decimal_from(value: Any) -> Optional[Decimal]:
     if value is None:
         return None
@@ -433,7 +446,7 @@ def build_paradex_client(creds: ParadexCredentials) -> Any:
     except Exception as exc:  # pragma: no cover - user input validation
         raise ValueError(f"Invalid PARADEX_L2_PRIVATE_KEY: {exc}") from exc
 
-    env_rpc_version = (os.getenv("PARADEX_RPC_VERSION") or "").strip()
+    env_rpc_version = _normalize_rpc_version(os.getenv("PARADEX_RPC_VERSION"))
     rpc_version = env_rpc_version or DEFAULT_RPC_VERSION
     client = Paradex(env=env, logger=None)
 
@@ -445,8 +458,13 @@ def build_paradex_client(creds: ParadexCredentials) -> Any:
         sig = inspect.signature(client.init_account)
         if "rpc_version" in sig.parameters:
             kwargs["rpc_version"] = rpc_version
+            LOGGER.info("Paradex init_account using rpc_version=%s", rpc_version)
         else:
-            LOGGER.warning("PARADEX_RPC_VERSION provided but init_account does not support rpc_version; ignoring")
+            LOGGER.warning(
+                "rpc_version=%s provided but init_account does not support rpc_version; "
+                "upgrade paradex-py to enable versioned RPC (avoids Invalid block id)",
+                rpc_version,
+            )
 
     client.init_account(**kwargs)
     return client
