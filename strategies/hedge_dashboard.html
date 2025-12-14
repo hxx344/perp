@@ -1961,6 +1961,10 @@
           <p class="empty hidden" id="para-accounts-empty">No account data yet…</p>
         </div>
           <div class="grvt-adjust-panel" id="para-adjust-panel">
+            <div class="grvt-adjust-header">
+              <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">PARA Position Adjustments</h3>
+              <p class="summary-sub" style="margin: 0;">广播加/减仓指令到 PARA VPS</p>
+            </div>
             <div class="grvt-adjust-controls">
               <label>
                 调整数量
@@ -1980,10 +1984,10 @@
               <table>
                 <thead>
                   <tr>
-                    <th>时间</th><th>动作</th><th>数量</th><th>币种</th><th>状态</th>
+                    <th>时间</th><th>动作</th><th>数量</th><th>币种</th><th>状态</th><th>节点</th>
                   </tr>
                 </thead>
-                <tbody id="para-adjust-history"><tr><td colspan="5">暂无记录</td></tr></tbody>
+                <tbody id="para-adjust-history"><tr><td colspan="6">暂无记录</td></tr></tbody>
               </table>
             </div>
           </div>
@@ -5016,7 +5020,7 @@
         updateParaAdjustButtons();
 
         if (!adjustmentRequests.length) {
-          paraAdjustHistoryBody.innerHTML = '<tr><td colspan="5">暂无广播记录</td></tr>';
+          paraAdjustHistoryBody.innerHTML = '<tr><td colspan="6">暂无广播记录</td></tr>';
         } else {
           const historyRows = [];
           for (const request of adjustmentRequests.slice(0, 6)) {
@@ -5034,6 +5038,18 @@
               statusMeta.push(`失败 ${failedAgents.length}`);
             }
             const statusCombined = statusMeta.length ? `${statusText}（${statusMeta.join(' / ')}）` : statusText;
+            const badges = agents
+              .map((agent) => {
+                const status = normalizeStatus(agent.status || 'pending');
+                const label = escapeHtml(agent.agent_id || 'agent');
+                const cls = status === 'completed'
+                  ? 'badge-success'
+                  : status === 'failed'
+                    ? 'badge-danger'
+                    : 'badge-muted';
+                return `<span class="badge ${cls}" title="${escapeHtml(status)}">${label}</span>`;
+              })
+              .join(' ');
             historyRows.push(`
               <tr>
                 <td>${escapeHtml(createdText)}</td>
@@ -5041,6 +5057,7 @@
                 <td>${escapeHtml(String(request.magnitude ?? '--'))}</td>
                 <td>${escapeHtml(scopeText)}</td>
                 <td>${escapeHtml(statusCombined)}</td>
+                <td>${badges || '—'}</td>
               </tr>
             `);
           }

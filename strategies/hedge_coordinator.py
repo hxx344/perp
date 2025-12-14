@@ -1938,7 +1938,7 @@ class CoordinatorApp:
         *,
         dashboard_username: Optional[str] = None,
         dashboard_password: Optional[str] = None,
-        dashboard_session_ttl: float = 12 * 3600,
+        dashboard_session_ttl: float = 7 * 24 * 3600,
         alert_settings: Optional[RiskAlertSettings] = None,
         enable_volatility_monitor: bool = True,
         volatility_symbols: Optional[Sequence[str]] = None,
@@ -3605,8 +3605,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dashboard-session-ttl",
         type=float,
-        default=_env_float("DASHBOARD_SESSION_TTL", 12 * 3600),
-        help="Seconds that a dashboard login session remains valid (default 12h).",
+        default=_env_float("DASHBOARD_SESSION_TTL", 7 * 24 * 3600),
+        help="Seconds that a dashboard login session remains valid (default 7 days).",
     )
     parser.add_argument(
         "--risk-alert-threshold",
