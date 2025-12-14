@@ -2021,7 +2021,7 @@
               </label>
               <label>
                 币种
-                <input type="text" id="para-transfer-currency" value="USDT" />
+                <input type="text" id="para-transfer-currency" value="USDC" />
               </label>
               <label>
                 Transfer 类型
@@ -3895,7 +3895,7 @@
           const payload = request.payload || {};
           const sourceAgents = Array.isArray(request.target_agents) ? request.target_agents.join(', ') : '—';
           const targetLabel = resolveTargetLabel(payload) || '—';
-          const amountValue = `${numberFormatter.format(toNumber(payload.num_tokens ?? request.magnitude ?? 0))} ${(payload.currency || 'USDT').toUpperCase()}`;
+          const amountValue = `${numberFormatter.format(toNumber(payload.num_tokens ?? request.magnitude ?? 0))} ${(payload.currency || 'USDC').toUpperCase()}`;
           const routeText = formatTransferRoute(payload);
           const statusText = request.overall_status || 'pending';
           const reasonText = payload?.transfer_metadata?.reason || payload.reason || '';
@@ -4068,7 +4068,7 @@
         const defaults = paraTransferDefaults.get(agentId) || {};
         if (role === 'source') {
           if (paraTransferCurrencyInput && (forceAll || !paraTransferCurrencyInput.value)) {
-            paraTransferCurrencyInput.value = (defaults.currency || 'USDT').toUpperCase();
+            paraTransferCurrencyInput.value = (defaults.currency || 'USDC').toUpperCase();
           }
           if (paraTransferTypeInput && (forceAll || !paraTransferTypeInput.value)) {
             paraTransferTypeInput.value = defaults.transfer_type || 'spot';
@@ -4111,7 +4111,7 @@
           setParaTransferStatus('请输入目标 L2 地址');
           return;
         }
-        const currencyValue = (getInputValue(paraTransferCurrencyInput) || 'USDT').toUpperCase();
+  const currencyValue = (getInputValue(paraTransferCurrencyInput) || 'USDC').toUpperCase();
         const payload = {
           agent_ids: [sourceAgentId],
           target_agent_id: targetAgentId,
