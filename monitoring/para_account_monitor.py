@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -433,11 +434,19 @@ def build_paradex_client(creds: ParadexCredentials) -> Any:
 
     rpc_version = (os.getenv("PARADEX_RPC_VERSION") or "").strip() or None
     client = Paradex(env=env, logger=None)
-    client.init_account(
-        l1_address=creds.l1_address,
-        l2_private_key=l2_private_key,
-        rpc_version=rpc_version,
-    )
+
+    kwargs = {
+        "l1_address": creds.l1_address,
+        "l2_private_key": l2_private_key,
+    }
+    if rpc_version:
+        sig = inspect.signature(client.init_account)
+        if "rpc_version" in sig.parameters:
+            kwargs["rpc_version"] = rpc_version
+        else:
+            LOGGER.warning("PARADEX_RPC_VERSION provided but init_account does not support rpc_version; ignoring")
+
+    client.init_account(**kwargs)
     return client
 
 
