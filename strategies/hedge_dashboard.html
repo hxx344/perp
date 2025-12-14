@@ -1960,6 +1960,33 @@
           <div class="grvt-account-grid" id="para-account-grid"></div>
           <p class="empty hidden" id="para-accounts-empty">No account data yet…</p>
         </div>
+          <div class="grvt-adjust-panel" id="para-adjust-panel">
+            <div class="grvt-adjust-controls">
+              <label>
+                调整数量
+                <input type="number" id="para-adjust-size" min="0" step="1" value="1" />
+              </label>
+              <label>
+                目标合约（可选）
+                <input type="text" id="para-adjust-symbol" placeholder="如 BTC-USD-PERP" />
+              </label>
+              <div class="grvt-adjust-buttons">
+                <button type="button" id="para-adjust-add">加仓</button>
+                <button type="button" class="button-danger" id="para-adjust-reduce">减仓</button>
+              </div>
+              <p class="grvt-adjust-status" id="para-adjust-status">等待指令…</p>
+            </div>
+            <div class="grvt-adjust-history">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th><th>动作</th><th>数量</th><th>币种</th><th>状态</th>
+                  </tr>
+                </thead>
+                <tbody id="para-adjust-history"><tr><td colspan="5">暂无记录</td></tr></tbody>
+              </table>
+            </div>
+          </div>
       </div>
     </section>
 
@@ -2169,6 +2196,13 @@
   const paraSummaryUpdated = document.getElementById('para-summary-updated');
   const paraAccountGrid = document.getElementById('para-account-grid');
   const paraAccountsEmpty = document.getElementById('para-accounts-empty');
+  const paraAdjustPanel = document.getElementById('para-adjust-panel');
+  const paraAdjustSizeInput = document.getElementById('para-adjust-size');
+  const paraAdjustSymbolInput = document.getElementById('para-adjust-symbol');
+  const paraAdjustAddButton = document.getElementById('para-adjust-add');
+  const paraAdjustReduceButton = document.getElementById('para-adjust-reduce');
+  const paraAdjustStatus = document.getElementById('para-adjust-status');
+  const paraAdjustHistoryBody = document.getElementById('para-adjust-history');
   const grvtRiskPanel = document.getElementById('grvt-risk-panel');
   const riskSettingsStatus = document.getElementById('risk-settings-status');
   const riskSettingsMessage = document.getElementById('risk-settings-message');
@@ -2378,6 +2412,8 @@
       let lastMetricsSnapshot = null;
   let grvtAdjustLocked = false;
   let grvtPendingRequestId = null;
+  let paraAdjustLocked = false;
+  let paraPendingRequestId = null;
   let grvtTransferLocked = false;
   let grvtTransferOptionsKey = '';
   const grvtTransferDefaults = new Map();
@@ -4858,6 +4894,158 @@
         }
         grvtAdjustSymbolsSelect.value = '';
         grvtAdjustSymbolsSelect.selectedIndex = -1;
+      }
+
+      function parseParaSymbolsInput() {
+        const raw = paraAdjustSymbolInput?.value ?? '';
+        const normalized = raw
+          .split(/[,\s]+/)
+          .map((item) => normalizeSymbolLabel(item))
+          .filter(Boolean);
+        return normalized.length ? normalized : null;
+      }
+
+      function updateParaAdjustButtons() {
+        const disabled = paraAdjustLocked;
+        [paraAdjustAddButton, paraAdjustReduceButton].forEach((button) => {
+          if (button) {
+            button.disabled = disabled;
+          }
+        });
+      }
+
+      async function sendParaAdjustment(action) {
+        if (!action || paraAdjustLocked) {
+          return;
+        }
+        const rawMagnitude = parseFloat(paraAdjustSizeInput?.value ?? '1');
+        const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : 1;
+        paraAdjustLocked = true;
+        updateParaAdjustButtons();
+        if (paraAdjustStatus) {
+          paraAdjustStatus.textContent = `提交${describeAdjustmentAction(action)}请求…`;
+        }
+
+        const payload = { action, magnitude };
+        const symbols = parseParaSymbolsInput();
+        if (symbols) {
+          payload.symbols = symbols;
+        }
+
+        try {
+          const response = await fetch('/para/adjust', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const responsePayload = await response.json();
+          paraPendingRequestId = responsePayload?.request?.request_id ?? null;
+          if (paraAdjustStatus) {
+            paraAdjustStatus.textContent = '等待 VPS ACK…';
+          }
+          await refreshMetrics();
+        } catch (error) {
+          paraAdjustLocked = false;
+          updateParaAdjustButtons();
+          if (paraAdjustStatus) {
+            paraAdjustStatus.textContent = `请求失败：${error}`;
+          }
+        }
+      }
+
+      function renderParaAdjustments(summary) {
+        if (!paraAdjustPanel || !paraAdjustHistoryBody) {
+          return;
+        }
+        const allRequests = Array.isArray(summary?.requests) ? summary.requests : [];
+        const adjustmentRequests = allRequests.filter((request) => (request?.action || '').toLowerCase() !== 'transfer');
+        const active = summary?.active_request;
+        const activeIsAdjustment = (active?.action || '').toLowerCase() !== 'transfer';
+        const effectiveActive = activeIsAdjustment ? active : null;
+        let locked = false;
+
+        const normalizeStatus = (value) => String(value || '').toLowerCase();
+        const scopeFor = (request) => describeSymbolScope(request?.target_symbols ?? request?.symbols);
+
+        if (effectiveActive && ['pending', 'in_progress'].includes(normalizeStatus(effectiveActive.overall_status))) {
+          locked = true;
+          paraPendingRequestId = effectiveActive.request_id || null;
+          const agents = Array.isArray(effectiveActive.agents) ? effectiveActive.agents : [];
+          const pendingAgents = agents.filter((agent) => normalizeStatus(agent.status) === 'pending');
+          if (paraAdjustStatus) {
+            const total = agents.length || 0;
+            const pendingCount = pendingAgents.length;
+            const scopeText = scopeFor(effectiveActive);
+            paraAdjustStatus.textContent = `等待 ${pendingCount}/${total || '-'} 个 VPS ACK（${scopeText}）`;
+          }
+        } else if (adjustmentRequests.length) {
+          const latest = adjustmentRequests[0];
+          const statusText = normalizeStatus(latest.overall_status || 'pending');
+          if (['pending', 'in_progress'].includes(statusText)) {
+            locked = true;
+            paraPendingRequestId = latest.request_id || null;
+            const agents = Array.isArray(latest.agents) ? latest.agents : [];
+            const pendingAgents = agents.filter((agent) => normalizeStatus(agent.status) === 'pending');
+            if (paraAdjustStatus) {
+              const scopeText = scopeFor(latest);
+              paraAdjustStatus.textContent = `等待 ${pendingAgents.length}/${agents.length || '-'} 个 VPS ACK（${scopeText}）`;
+            }
+          } else if (paraAdjustStatus) {
+            const scopeText = scopeFor(latest);
+            if (statusText === 'completed') {
+              paraAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)}（${scopeText}）已完成`;
+            } else if (statusText === 'failed') {
+              paraAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)}（${scopeText}）部分失败`;
+            } else {
+              paraAdjustStatus.textContent = `最近状态：${statusText}（${scopeText}）`;
+            }
+          }
+        } else if (paraAdjustStatus) {
+          paraAdjustStatus.textContent = '等待指令…（默认全部币种）';
+        }
+
+        paraAdjustLocked = locked;
+        if (!locked) {
+          paraPendingRequestId = null;
+        }
+        updateParaAdjustButtons();
+
+        if (!adjustmentRequests.length) {
+          paraAdjustHistoryBody.innerHTML = '<tr><td colspan="5">暂无广播记录</td></tr>';
+        } else {
+          const historyRows = [];
+          for (const request of adjustmentRequests.slice(0, 6)) {
+            const statusText = request.overall_status || 'pending';
+            const createdText = formatTimestamp(request.created_at) ?? '--';
+            const agents = Array.isArray(request.agents) ? request.agents : [];
+            const scopeText = scopeFor(request);
+            const pendingAgents = agents.filter((agent) => normalizeStatus(agent.status) === 'pending');
+            const failedAgents = agents.filter((agent) => normalizeStatus(agent.status) === 'failed');
+            const statusMeta = [];
+            if (pendingAgents.length) {
+              statusMeta.push(`待ACK ${pendingAgents.length}`);
+            }
+            if (failedAgents.length) {
+              statusMeta.push(`失败 ${failedAgents.length}`);
+            }
+            const statusCombined = statusMeta.length ? `${statusText}（${statusMeta.join(' / ')}）` : statusText;
+            historyRows.push(`
+              <tr>
+                <td>${escapeHtml(createdText)}</td>
+                <td>${escapeHtml(describeAdjustmentAction(request.action))}</td>
+                <td>${escapeHtml(String(request.magnitude ?? '--'))}</td>
+                <td>${escapeHtml(scopeText)}</td>
+                <td>${escapeHtml(statusCombined)}</td>
+              </tr>
+            `);
+          }
+          paraAdjustHistoryBody.innerHTML = historyRows.join('');
+        }
       }
 
       function updateGrvtAdjustButtons() {
@@ -7383,6 +7571,7 @@
           renderAgents(data);
           renderPara(data);
           renderGrvt(data);
+          renderParaAdjustments(data?.para_adjustments);
           renderGrvtAdjustments(data?.grvt_adjustments);
           renderAutoBalance(data?.auto_balance, data?.agents);
           renderSpread(data);
@@ -7474,6 +7663,12 @@
       }
       if (grvtAdjustReduceButton) {
         grvtAdjustReduceButton.addEventListener('click', () => sendGrvtAdjustment('reduce'));
+      }
+      if (paraAdjustAddButton) {
+        paraAdjustAddButton.addEventListener('click', () => sendParaAdjustment('add'));
+      }
+      if (paraAdjustReduceButton) {
+        paraAdjustReduceButton.addEventListener('click', () => sendParaAdjustment('reduce'));
       }
       if (grvtResetSymbolButton) {
         grvtResetSymbolButton.addEventListener('click', () => {

@@ -1977,6 +1977,7 @@ class CoordinatorApp:
             "cooldown_active": False,
             "measurement": None,
         }
+        self._para_adjustments = GrvtAdjustmentManager()
         self._app = web.Application()
         self._app.add_routes(
             [
@@ -1999,6 +2000,9 @@ class CoordinatorApp:
                 web.post("/grvt/adjust", self.handle_grvt_adjust),
                 web.post("/grvt/transfer", self.handle_grvt_transfer),
                 web.post("/grvt/adjust/ack", self.handle_grvt_adjust_ack),
+                web.get("/para/adjustments", self.handle_para_adjustments),
+                web.post("/para/adjust", self.handle_para_adjust),
+                web.post("/para/adjust/ack", self.handle_para_adjust_ack),
                 web.get("/simulation/pnl", self.handle_simulation_pnl),
             ]
         )
@@ -2036,6 +2040,7 @@ class CoordinatorApp:
         self._enforce_dashboard_auth(request)
         payload = await self._coordinator.snapshot()
         payload["grvt_adjustments"] = await self._adjustments.summary()
+        payload["para_adjustments"] = await self._para_adjustments.summary()
         payload["auto_balance"] = self._auto_balance_status_snapshot()
         if self._vol_monitor:
             payload["volatility"] = await self._vol_monitor.snapshot()
@@ -2307,7 +2312,9 @@ class CoordinatorApp:
         agent_id = request.rel_url.query.get("agent_id")
         snapshot = await self._coordinator.control_snapshot(agent_id)
         if agent_id:
-            pending = await self._adjustments.pending_for_agent(agent_id)
+            pending = []
+            pending += await self._adjustments.pending_for_agent(agent_id)
+            pending += await self._para_adjustments.pending_for_agent(agent_id)
             if pending:
                 agent_block = snapshot.get("agent")
                 if isinstance(agent_block, dict):
@@ -2490,6 +2497,11 @@ class CoordinatorApp:
         summary = await self._adjustments.summary()
         return web.json_response(summary)
 
+    async def handle_para_adjustments(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        summary = await self._para_adjustments.summary()
+        return web.json_response(summary)
+
     async def handle_grvt_adjust(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
         try:
@@ -2541,6 +2553,68 @@ class CoordinatorApp:
         action = cast(AdjustmentAction, action_raw)
         try:
             payload = await self._adjustments.create_request(
+                action=action,
+                magnitude=magnitude,
+                agent_ids=agent_ids,
+                symbols=symbols,
+                created_by=created_by,
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+
+        return web.json_response({"request": payload})
+
+    async def handle_para_adjust(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="adjustment payload must be JSON")
+
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="adjustment payload must be an object")
+
+        action_raw = (body.get("action") or "").strip().lower()
+        if action_raw not in {"add", "reduce"}:
+            raise web.HTTPBadRequest(text="action must be 'add' or 'reduce'")
+
+        magnitude_raw = body.get("magnitude", 1)
+        try:
+            magnitude = float(magnitude_raw)
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(text="magnitude must be numeric")
+
+        agent_ids_raw = body.get("agent_ids")
+        if agent_ids_raw is None:
+            agent_ids = await self._coordinator.list_agent_ids()
+        elif isinstance(agent_ids_raw, list):
+            agent_ids = [str(agent).strip() for agent in agent_ids_raw if str(agent).strip()]
+        else:
+            raise web.HTTPBadRequest(text="agent_ids must be an array of strings")
+
+        if not agent_ids:
+            raise web.HTTPBadRequest(text="No agent IDs available for adjustment; ensure bots are reporting metrics")
+
+        symbols_raw = body.get("symbols")
+        if symbols_raw is None and body.get("symbol"):
+            symbols_raw = [body.get("symbol")]
+
+        if symbols_raw is None:
+            symbols: Optional[List[str]] = None
+        elif isinstance(symbols_raw, list):
+            normalized_symbols: List[str] = []
+            for item in symbols_raw:
+                value = self._normalize_symbol(item)
+                if value and value not in normalized_symbols:
+                    normalized_symbols.append(value)
+            symbols = normalized_symbols
+        else:
+            raise web.HTTPBadRequest(text="symbols must be an array of strings")
+
+        created_by = request.remote or "dashboard"
+        action = cast(AdjustmentAction, action_raw)
+        try:
+            payload = await self._para_adjustments.create_request(
                 action=action,
                 magnitude=magnitude,
                 agent_ids=agent_ids,
@@ -3237,6 +3311,39 @@ class CoordinatorApp:
 
         try:
             payload = await self._adjustments.acknowledge(
+                request_id=request_id,
+                agent_id=agent_id,
+                status=status,
+                note=(note if isinstance(note, str) else None),
+            )
+        except KeyError as exc:
+            raise web.HTTPNotFound(text=str(exc))
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+
+        return web.json_response({"request": payload})
+
+    async def handle_para_adjust_ack(self, request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="ack payload must be JSON")
+
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="ack payload must be an object")
+
+        request_id = (body.get("request_id") or "").strip()
+        agent_id = (body.get("agent_id") or "").strip()
+        status = body.get("status") or "acknowledged"
+        note = body.get("note")
+
+        if not request_id:
+            raise web.HTTPBadRequest(text="request_id is required")
+        if not agent_id:
+            raise web.HTTPBadRequest(text="agent_id is required")
+
+        try:
+            payload = await self._para_adjustments.acknowledge(
                 request_id=request_id,
                 agent_id=agent_id,
                 status=status,
