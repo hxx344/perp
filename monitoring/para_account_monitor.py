@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover - dependency guard
 getcontext().prec = 28
 
 LOGGER = logging.getLogger("monitor.paradex_accounts")
-DEFAULT_RPC_VERSION = "v0_8"
+DEFAULT_RPC_VERSION = "v0_9"
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_ACCOUNT_POSITIONS = 12
