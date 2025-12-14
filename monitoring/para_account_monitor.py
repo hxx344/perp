@@ -37,6 +37,7 @@ except ImportError:  # pragma: no cover - dependency guard
 getcontext().prec = 28
 
 LOGGER = logging.getLogger("monitor.paradex_accounts")
+DEFAULT_RPC_VERSION = "v0_8"
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_ACCOUNT_POSITIONS = 12
@@ -410,9 +411,9 @@ def load_single_account(*, label: str) -> ParadexCredentials:
 def build_paradex_client(creds: ParadexCredentials) -> Any:
     """Construct Paradex client with optional RPC version override.
 
-    PARADEX_RPC_VERSION env var (e.g. v0_9) is passed through to starknet fullnode RPC.
-    This helps avoid "Invalid block id" errors when the node requires an explicit versioned
-    RPC path.
+    PARADEX_RPC_VERSION env var (e.g. v0_8) is passed through to starknet fullnode RPC.
+    If unset, defaults to v0_8 as recommended. This helps avoid "Invalid block id" errors when
+    the node requires an explicit versioned RPC path.
     """
     if Paradex is None or TESTNET is None or PROD is None or int_from_hex is None:
         raise ImportError(
@@ -432,7 +433,8 @@ def build_paradex_client(creds: ParadexCredentials) -> Any:
     except Exception as exc:  # pragma: no cover - user input validation
         raise ValueError(f"Invalid PARADEX_L2_PRIVATE_KEY: {exc}") from exc
 
-    rpc_version = (os.getenv("PARADEX_RPC_VERSION") or "").strip() or None
+    env_rpc_version = (os.getenv("PARADEX_RPC_VERSION") or "").strip()
+    rpc_version = env_rpc_version or DEFAULT_RPC_VERSION
     client = Paradex(env=env, logger=None)
 
     kwargs = {
