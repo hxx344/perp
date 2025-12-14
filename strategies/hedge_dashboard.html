@@ -1966,13 +1966,19 @@
               <p class="summary-sub" style="margin: 0;">广播加/减仓指令到 PARA VPS</p>
             </div>
             <div class="grvt-adjust-controls">
-              <label>
-                调整数量
-                <input type="number" id="para-adjust-size" min="0" step="1" value="1" />
+              <label for="para-adjust-symbols" class="grvt-adjust-symbols">
+                <div class="grvt-symbol-label">
+                  <span>目标币种</span>
+                  <small>选择需要调整的币种；未选中时广播所有</small>
+                </div>
+                <div class="grvt-symbol-input">
+                  <select id="para-adjust-symbols"></select>
+                  <button type="button" class="grvt-symbol-reset" id="para-reset-symbol">清空</button>
+                </div>
               </label>
               <label>
-                目标合约（可选）
-                <input type="text" id="para-adjust-symbol" placeholder="如 BTC-USD-PERP" />
+                Size
+                <input type="number" id="para-adjust-size" min="0.01" step="0.01" value="1" />
               </label>
               <div class="grvt-adjust-buttons">
                 <button type="button" id="para-adjust-add">加仓</button>
@@ -2202,7 +2208,8 @@
   const paraAccountsEmpty = document.getElementById('para-accounts-empty');
   const paraAdjustPanel = document.getElementById('para-adjust-panel');
   const paraAdjustSizeInput = document.getElementById('para-adjust-size');
-  const paraAdjustSymbolInput = document.getElementById('para-adjust-symbol');
+  const paraAdjustSymbolsSelect = document.getElementById('para-adjust-symbols');
+  const paraResetSymbolButton = document.getElementById('para-reset-symbol');
   const paraAdjustAddButton = document.getElementById('para-adjust-add');
   const paraAdjustReduceButton = document.getElementById('para-adjust-reduce');
   const paraAdjustStatus = document.getElementById('para-adjust-status');
@@ -4900,13 +4907,52 @@
         grvtAdjustSymbolsSelect.selectedIndex = -1;
       }
 
-      function parseParaSymbolsInput() {
-        const raw = paraAdjustSymbolInput?.value ?? '';
-        const normalized = raw
-          .split(/[,\s]+/)
-          .map((item) => normalizeSymbolLabel(item))
-          .filter(Boolean);
-        return normalized.length ? normalized : null;
+      function updateParaSymbolOptions(symbols) {
+        if (!paraAdjustSymbolsSelect) {
+          return;
+        }
+        const normalized = Array.from(
+          new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => normalizeSymbolLabel(symbol)).filter(Boolean))
+        ).sort();
+        const previousValue = normalizeSymbolLabel(paraAdjustSymbolsSelect.value);
+        paraAdjustSymbolsSelect.innerHTML = '';
+        paraAdjustSymbolsSelect.disabled = normalized.length === 0;
+        if (paraResetSymbolButton) {
+          paraResetSymbolButton.disabled = normalized.length === 0;
+        }
+        let matched = false;
+        for (const symbol of normalized) {
+          const option = document.createElement('option');
+          option.value = symbol;
+          option.textContent = symbol;
+          if (previousValue === symbol) {
+            option.selected = true;
+            matched = true;
+          }
+          paraAdjustSymbolsSelect.appendChild(option);
+        }
+        if (!matched) {
+          paraAdjustSymbolsSelect.selectedIndex = -1;
+        }
+      }
+
+      function getSelectedParaSymbols() {
+        if (!paraAdjustSymbolsSelect) {
+          return null;
+        }
+        const value = paraAdjustSymbolsSelect.value;
+        if (!value) {
+          return null;
+        }
+        return [value];
+      }
+
+      function clearParaSymbolSelection() {
+        if (!paraAdjustSymbolsSelect) {
+          return;
+        }
+        paraAdjustSymbolsSelect.value = '';
+        paraAdjustSymbolsSelect.selectedIndex = -1;
       }
 
       function updateParaAdjustButtons() {
@@ -4931,7 +4977,7 @@
         }
 
         const payload = { action, magnitude };
-        const symbols = parseParaSymbolsInput();
+        const symbols = getSelectedParaSymbols();
         if (symbols) {
           payload.symbols = symbols;
         }
@@ -5853,6 +5899,7 @@
           if (paraAccountsEmpty) {
             paraAccountsEmpty.classList.add('hidden');
           }
+          updateParaSymbolOptions([]);
           return;
         }
 
@@ -5872,6 +5919,7 @@
         let hasWallet = false;
         let latestUpdate = 0;
         const flattenedAccounts = [];
+  const symbolCandidates = new Set();
 
         for (const [agentId, snapshot] of entries) {
           try {
@@ -6073,6 +6121,9 @@
             const trimmed = positions.slice(0, MAX_PARA_POSITIONS);
             for (const pos of trimmed) {
               const symbol = pos.symbol ?? '--';
+              if (symbol) {
+                symbolCandidates.add(normalizeSymbolLabel(symbol));
+              }
               const side = (pos.side ?? '').toString().toUpperCase();
               const sizeValue = parseDecimal(pos.net_size ?? pos.size ?? pos.quantity);
               const sizeText = Number.isFinite(sizeValue)
@@ -6100,6 +6151,8 @@
 
           paraAccountGrid.appendChild(card);
         }
+
+        updateParaSymbolOptions(Array.from(symbolCandidates));
         } catch (err) {
           console.warn('renderPara error', err);
           if (paraEmpty) {
@@ -7692,9 +7745,9 @@
           clearGrvtSymbolSelection();
         });
       }
-      if (grvtTransferSubmitButton) {
-        grvtTransferSubmitButton.addEventListener('click', () => {
-          sendGrvtTransfer();
+      if (paraResetSymbolButton) {
+        paraResetSymbolButton.addEventListener('click', () => {
+          clearParaSymbolSelection();
         });
       }
       const selectAlternativeTarget = () => {
@@ -7830,6 +7883,7 @@
         riskBarkAppendInput.addEventListener('change', markRiskSettingsDirty);
       }
       updateGrvtSymbolOptions([]);
+      updateParaSymbolOptions([]);
       updateGrvtTransferButtons();
       updateAutoBalanceButtons();
       updateRiskButtons();
