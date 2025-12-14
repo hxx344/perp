@@ -9,6 +9,7 @@ can display per-agent health.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
@@ -16,7 +17,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -880,7 +881,12 @@ class ParadexAccountMonitor:
             reason = metadata.get("reason")
 
         try:
-            self._client.account.transfer_on_l2(target_address, amount)
+            transfer_coro = self._client.account.transfer_on_l2(target_address, amount)
+            if asyncio.iscoroutine(transfer_coro):
+                self._run_coro_sync(transfer_coro)
+            else:
+                # paradex-py 可能未来改为同步接口，直接调用即可
+                transfer_coro  # type: ignore[misc]
         except Exception as exc:
             raise RuntimeError(f"Paradex L2 transfer failed: {exc}") from exc
 
@@ -890,6 +896,25 @@ class ParadexAccountMonitor:
         if reason:
             note_parts.append(f"reason={reason}")
         return "succeeded", "; ".join(note_parts)
+
+    @staticmethod
+    def _run_coro_sync(coro: Awaitable[Any]) -> Any:
+        """Run an awaitable from a sync context, reusing event loop when possible."""
+        if not asyncio.iscoroutine(coro):
+            async def _wrapper() -> Any:
+                return await coro
+            coro = _wrapper()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)  # type: ignore[arg-type]
+
+        if loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, loop)  # type: ignore[arg-type]
+            return future.result()
+
+        return loop.run_until_complete(coro)
 
     def _execute_adjustment(self, entry: Dict[str, Any]) -> Tuple[str, str]:
         action = str(entry.get("action", "")).strip().lower()
