@@ -2052,6 +2052,84 @@
               </table>
             </div>
           </div>
+            <div class="grvt-risk-panel" id="para-risk-panel">
+              <div class="grvt-adjust-header">
+                <div>
+                  <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Bark 告警（PARA）</h3>
+                  <p class="summary-sub" style="margin: 0;">针对 PARA 账户权益风险的 Bark 推送配置</p>
+                </div>
+                <div class="risk-status-pill" id="para-risk-settings-status">加载中…</div>
+              </div>
+              <div class="risk-settings-grid">
+                <section class="risk-settings-card">
+                  <div class="risk-toggle">
+                    <input type="checkbox" id="para-risk-alert-enabled" />
+                    <span>启用风险告警</span>
+                  </div>
+                  <div class="risk-slider">
+                    <label class="risk-slider-label" for="para-risk-threshold-slider">
+                      <span id="para-risk-threshold-label">阈值 --%</span>
+                    </label>
+                    <input type="range" id="para-risk-threshold-slider" min="5" max="90" step="0.5" value="30" />
+                    <div class="risk-slider-scale">
+                      <span>5%</span>
+                      <span>25%</span>
+                      <span>50%</span>
+                      <span>90%</span>
+                    </div>
+                  </div>
+                  <div class="risk-inline-inputs">
+                    <label>
+                      触发阈值 (%)
+                      <input type="number" id="para-risk-threshold-input" min="1" max="90" step="0.5" />
+                    </label>
+                    <label>
+                      重置阈值 (%)
+                      <input type="number" id="para-risk-reset-input" min="1" max="90" step="0.5" />
+                    </label>
+                    <label>
+                      冷却 (分钟)
+                      <input type="number" id="para-risk-cooldown-input" min="0" max="360" step="1" />
+                    </label>
+                  </div>
+                  <p class="risk-meta" id="para-risk-ratio-meta">等待风险数据…</p>
+                </section>
+                <section class="risk-settings-card">
+                  <div class="risk-bark-grid">
+                    <label>
+                      Bark URL
+                      <input type="text" id="para-risk-bark-url" placeholder="https://api.day.app/xxxxx/%7Btitle%7D/%7Bbody%7D" />
+                    </label>
+                    <label class="risk-toggle">
+                      <input type="checkbox" id="para-risk-bark-append" checked />
+                      <span>缺少 {title}/{body} 时自动附加</span>
+                    </label>
+                    <label>
+                      请求超时 (秒)
+                      <input type="number" id="para-risk-bark-timeout" min="1" max="60" step="0.5" />
+                    </label>
+                    <label>
+                      标题模板
+                      <textarea id="para-risk-title-template" rows="2"></textarea>
+                    </label>
+                    <label>
+                      正文模板
+                      <textarea id="para-risk-body-template" rows="3"></textarea>
+                    </label>
+                  </div>
+                </section>
+              </div>
+              <div class="risk-settings-actions">
+                <div class="risk-actions-left">
+                  <button type="button" id="para-risk-settings-save">保存配置</button>
+                  <button type="button" class="button-success" id="para-risk-settings-test">测试 Bark</button>
+                  <button type="button" class="button-ghost" id="para-risk-settings-refresh">重新读取</button>
+                  <button type="button" class="button-danger" id="para-risk-settings-disable">关闭告警</button>
+                </div>
+                <p class="risk-settings-message" id="para-risk-settings-message">未加载</p>
+                <p class="risk-settings-message" id="para-risk-test-message"></p>
+              </div>
+            </div>
           <div class="grvt-auto-panel" id="para-auto-panel">
             <div class="grvt-adjust-header">
               <div>
@@ -2341,6 +2419,26 @@
   const paraAdjustReduceButton = document.getElementById('para-adjust-reduce');
   const paraAdjustStatus = document.getElementById('para-adjust-status');
   const paraAdjustHistoryBody = document.getElementById('para-adjust-history');
+  const paraRiskPanel = document.getElementById('para-risk-panel');
+  const paraRiskSettingsStatus = document.getElementById('para-risk-settings-status');
+  const paraRiskSettingsMessage = document.getElementById('para-risk-settings-message');
+  const paraRiskTestMessage = document.getElementById('para-risk-test-message');
+  const paraRiskAlertEnabledInput = document.getElementById('para-risk-alert-enabled');
+  const paraRiskThresholdSlider = document.getElementById('para-risk-threshold-slider');
+  const paraRiskThresholdInput = document.getElementById('para-risk-threshold-input');
+  const paraRiskResetInput = document.getElementById('para-risk-reset-input');
+  const paraRiskCooldownInput = document.getElementById('para-risk-cooldown-input');
+  const paraRiskThresholdLabel = document.getElementById('para-risk-threshold-label');
+  const paraRiskMeta = document.getElementById('para-risk-ratio-meta');
+  const paraRiskBarkUrlInput = document.getElementById('para-risk-bark-url');
+  const paraRiskBarkAppendInput = document.getElementById('para-risk-bark-append');
+  const paraRiskBarkTimeoutInput = document.getElementById('para-risk-bark-timeout');
+  const paraRiskTitleTemplateInput = document.getElementById('para-risk-title-template');
+  const paraRiskBodyTemplateInput = document.getElementById('para-risk-body-template');
+  const paraRiskSaveButton = document.getElementById('para-risk-settings-save');
+  const paraRiskDisableButton = document.getElementById('para-risk-settings-disable');
+  const paraRiskRefreshButton = document.getElementById('para-risk-settings-refresh');
+  const paraRiskTestButton = document.getElementById('para-risk-settings-test');
   const grvtRiskPanel = document.getElementById('grvt-risk-panel');
   const riskSettingsStatus = document.getElementById('risk-settings-status');
   const riskSettingsMessage = document.getElementById('risk-settings-message');
@@ -4340,6 +4438,55 @@
         }
       }
 
+      function getRiskViews() {
+        return [
+          {
+            panel: grvtRiskPanel,
+            statusPill: riskSettingsStatus,
+            message: riskSettingsMessage,
+            testMessage: document.getElementById('risk-test-message'),
+            enabledInput: riskAlertEnabledInput,
+            thresholdSlider: riskThresholdSlider,
+            thresholdInput: riskThresholdInput,
+            resetInput: riskResetInput,
+            cooldownInput: riskCooldownInput,
+            thresholdLabel: riskThresholdLabel,
+            meta: riskMeta,
+            barkUrlInput: riskBarkUrlInput,
+            barkAppendInput: riskBarkAppendInput,
+            barkTimeoutInput: riskBarkTimeoutInput,
+            titleTemplateInput: riskTitleTemplateInput,
+            bodyTemplateInput: riskBodyTemplateInput,
+            saveButton: riskSaveButton,
+            disableButton: riskDisableButton,
+            refreshButton: riskRefreshButton,
+            testButton: riskTestButton,
+          },
+          {
+            panel: paraRiskPanel,
+            statusPill: paraRiskSettingsStatus,
+            message: paraRiskSettingsMessage,
+            testMessage: paraRiskTestMessage,
+            enabledInput: paraRiskAlertEnabledInput,
+            thresholdSlider: paraRiskThresholdSlider,
+            thresholdInput: paraRiskThresholdInput,
+            resetInput: paraRiskResetInput,
+            cooldownInput: paraRiskCooldownInput,
+            thresholdLabel: paraRiskThresholdLabel,
+            meta: paraRiskMeta,
+            barkUrlInput: paraRiskBarkUrlInput,
+            barkAppendInput: paraRiskBarkAppendInput,
+            barkTimeoutInput: paraRiskBarkTimeoutInput,
+            titleTemplateInput: paraRiskTitleTemplateInput,
+            bodyTemplateInput: paraRiskBodyTemplateInput,
+            saveButton: paraRiskSaveButton,
+            disableButton: paraRiskDisableButton,
+            refreshButton: paraRiskRefreshButton,
+            testButton: paraRiskTestButton,
+          },
+        ].filter((view) => view.panel);
+      }
+
       function updateAutoBalanceButtons() {
         [grvtAutoSaveButton, grvtAutoDisableButton, grvtAutoRefreshButton].forEach((button) => {
           if (button) {
@@ -5164,20 +5311,19 @@
       }
 
       function updateRiskThresholdLabel(value) {
-        if (!riskThresholdLabel) {
-          return;
-        }
-        if (Number.isFinite(value)) {
-          riskThresholdLabel.textContent = `阈值 ${value.toFixed(1)}%`;
-        } else {
-          riskThresholdLabel.textContent = '阈值 --%';
-        }
+        getRiskViews().forEach((view) => {
+          if (!view.thresholdLabel) {
+            return;
+          }
+          if (Number.isFinite(value)) {
+            view.thresholdLabel.textContent = `阈值 ${value.toFixed(1)}%`;
+          } else {
+            view.thresholdLabel.textContent = '阈值 --%';
+          }
+        });
       }
 
       function updateRiskMeta() {
-        if (!riskMeta) {
-          return;
-        }
         const parts = [];
         if (Number.isFinite(latestGlobalRiskRatio)) {
           parts.push(`当前风险 ${(latestGlobalRiskRatio * 100).toFixed(2)}%`);
@@ -5194,20 +5340,28 @@
         if (Number.isFinite(cooldownRemaining) && cooldownRemaining > 0.5) {
           parts.push(`冷却剩余 ${formatDuration(cooldownRemaining)}`);
         }
-        riskMeta.textContent = parts.length ? parts.join(' · ') : '等待风险数据…';
+        const text = parts.length ? parts.join(' · ') : '等待风险数据…';
+        getRiskViews().forEach((view) => {
+          if (view.meta) {
+            view.meta.textContent = text;
+          }
+        });
       }
 
       function setRiskStatusMessage(message) {
-        if (riskSettingsMessage) {
-          riskSettingsMessage.textContent = message || '';
-        }
+        getRiskViews().forEach((view) => {
+          if (view.message) {
+            view.message.textContent = message || '未加载';
+          }
+        });
       }
 
       function setRiskTestMessage(message) {
-        const element = document.getElementById('risk-test-message');
-        if (element) {
-          element.textContent = message || '';
-        }
+        getRiskViews().forEach((view) => {
+          if (view.testMessage) {
+            view.testMessage.textContent = message || '';
+          }
+        });
       }
 
       function describeRiskAlertSource(entry) {
@@ -5299,36 +5453,40 @@
       }
 
       function updateRiskInputsState() {
-        const enabled = Boolean(riskAlertEnabledInput?.checked);
-        const disableThreshold = riskSettingsBusy || !enabled;
-        [riskThresholdSlider, riskThresholdInput, riskResetInput, riskCooldownInput].forEach((input) => {
-          if (input) {
-            input.disabled = disableThreshold && input !== riskAlertEnabledInput;
-          }
-        });
-        [riskBarkUrlInput, riskBarkTimeoutInput, riskTitleTemplateInput, riskBodyTemplateInput, riskBarkAppendInput].forEach((input) => {
-          if (input) {
-            input.disabled = riskSettingsBusy;
-          }
+        getRiskViews().forEach((view) => {
+          const enabled = Boolean(view.enabledInput?.checked);
+          const disableThreshold = riskSettingsBusy || !enabled;
+          [view.thresholdSlider, view.thresholdInput, view.resetInput, view.cooldownInput].forEach((input) => {
+            if (input) {
+              input.disabled = disableThreshold && input !== view.enabledInput;
+            }
+          });
+          [view.barkUrlInput, view.barkTimeoutInput, view.titleTemplateInput, view.bodyTemplateInput, view.barkAppendInput].forEach((input) => {
+            if (input) {
+              input.disabled = riskSettingsBusy;
+            }
+          });
         });
       }
 
       function updateRiskButtons() {
         const disabled = riskSettingsBusy;
-        [riskSaveButton, riskRefreshButton].forEach((button) => {
-          if (button) {
-            button.disabled = disabled;
+        getRiskViews().forEach((view) => {
+          [view.saveButton, view.refreshButton].forEach((button) => {
+            if (button) {
+              button.disabled = disabled;
+            }
+          });
+          if (view.disableButton) {
+            const enabled = Boolean(view.enabledInput?.checked);
+            view.disableButton.disabled = disabled || !enabled;
+          }
+          if (view.testButton) {
+            const hasDestination = Boolean(riskSettingsSnapshot?.bark_url);
+            view.testButton.disabled = riskSettingsBusy || riskTestBusy || !hasDestination;
+            view.testButton.textContent = riskTestBusy ? '测试中…' : '测试 Bark';
           }
         });
-        if (riskDisableButton) {
-          const enabled = Boolean(riskAlertEnabledInput?.checked);
-          riskDisableButton.disabled = disabled || !enabled;
-        }
-        if (riskTestButton) {
-          const hasDestination = Boolean(riskSettingsSnapshot?.bark_url);
-          riskTestButton.disabled = riskSettingsBusy || riskTestBusy || !hasDestination;
-          riskTestButton.textContent = riskTestBusy ? '测试中…' : '测试 Bark';
-        }
         updateRiskInputsState();
       }
 
@@ -5343,50 +5501,51 @@
       function applyRiskSettings(settings, { markClean = false } = {}) {
         riskSettingsSnapshot = settings ? { ...settings } : null;
         const enabled = Boolean(riskSettingsSnapshot?.enabled && riskSettingsSnapshot?.threshold);
-        if (riskAlertEnabledInput) {
-          riskAlertEnabledInput.checked = enabled;
-        }
         const thresholdPercent = Number(riskSettingsSnapshot?.threshold_percent ?? (riskSettingsSnapshot?.threshold ?? 0) * 100);
         const resetPercent = Number(riskSettingsSnapshot?.reset_ratio_percent ?? (riskSettingsSnapshot?.reset_ratio ?? 0) * 100);
         const cooldownMinutes = Number(riskSettingsSnapshot?.cooldown)
           ? Number(riskSettingsSnapshot.cooldown) / 60
           : 0;
-
-        if (riskThresholdSlider) {
-          const sliderValue = Number.isFinite(thresholdPercent) ? clamp(thresholdPercent, 5, 90) : 30;
-          riskThresholdSlider.value = sliderValue;
-        }
-        if (riskThresholdInput) {
-          riskThresholdInput.value = Number.isFinite(thresholdPercent) ? thresholdPercent.toFixed(1) : '';
-        }
-        if (riskResetInput) {
-          riskResetInput.value = Number.isFinite(resetPercent) ? resetPercent.toFixed(1) : '';
-        }
-        if (riskCooldownInput) {
-          riskCooldownInput.value = Number.isFinite(cooldownMinutes) ? Math.max(0, cooldownMinutes).toFixed(1) : '';
-        }
-        if (riskBarkUrlInput) {
-          riskBarkUrlInput.value = riskSettingsSnapshot?.bark_url ?? '';
-        }
-        if (riskBarkAppendInput) {
-          riskBarkAppendInput.checked = Boolean(riskSettingsSnapshot?.bark_append_payload ?? true);
-        }
-        if (riskBarkTimeoutInput) {
-          riskBarkTimeoutInput.value = riskSettingsSnapshot?.bark_timeout ?? '';
-        }
-        if (riskTitleTemplateInput) {
-          riskTitleTemplateInput.value = riskSettingsSnapshot?.title_template ?? '';
-        }
-        if (riskBodyTemplateInput) {
-          riskBodyTemplateInput.value = riskSettingsSnapshot?.body_template ?? '';
-        }
+        getRiskViews().forEach((view) => {
+          if (view.enabledInput) {
+            view.enabledInput.checked = enabled;
+          }
+          if (view.thresholdSlider) {
+            const sliderValue = Number.isFinite(thresholdPercent) ? clamp(thresholdPercent, 5, 90) : 30;
+            view.thresholdSlider.value = sliderValue;
+          }
+          if (view.thresholdInput) {
+            view.thresholdInput.value = Number.isFinite(thresholdPercent) ? thresholdPercent.toFixed(1) : '';
+          }
+          if (view.resetInput) {
+            view.resetInput.value = Number.isFinite(resetPercent) ? resetPercent.toFixed(1) : '';
+          }
+          if (view.cooldownInput) {
+            view.cooldownInput.value = Number.isFinite(cooldownMinutes) ? Math.max(0, cooldownMinutes).toFixed(1) : '';
+          }
+          if (view.barkUrlInput) {
+            view.barkUrlInput.value = riskSettingsSnapshot?.bark_url ?? '';
+          }
+          if (view.barkAppendInput) {
+            view.barkAppendInput.checked = Boolean(riskSettingsSnapshot?.bark_append_payload ?? true);
+          }
+          if (view.barkTimeoutInput) {
+            view.barkTimeoutInput.value = riskSettingsSnapshot?.bark_timeout ?? '';
+          }
+          if (view.titleTemplateInput) {
+            view.titleTemplateInput.value = riskSettingsSnapshot?.title_template ?? '';
+          }
+          if (view.bodyTemplateInput) {
+            view.bodyTemplateInput.value = riskSettingsSnapshot?.body_template ?? '';
+          }
+          if (view.statusPill) {
+            view.statusPill.textContent = enabled ? `已启用 · ${getRiskThresholdSummary()}` : '未启用';
+          }
+        });
         updateRiskThresholdLabel(thresholdPercent);
         if (markClean) {
           riskSettingsDirty = false;
           setRiskStatusMessage('配置已同步');
-        }
-        if (riskSettingsStatus) {
-          riskSettingsStatus.textContent = enabled ? `已启用 · ${getRiskThresholdSummary()}` : '未启用';
         }
         updateRiskButtons();
         updateRiskMeta();
@@ -5394,39 +5553,41 @@
 
       function buildRiskSettingsPayload({ enabledOverride } = {}) {
         const payload = {};
-        const enabled = enabledOverride !== undefined ? enabledOverride : Boolean(riskAlertEnabledInput?.checked);
+        const views = getRiskViews();
+        const source = views.length ? views[0] : {};
+        const enabled = enabledOverride !== undefined ? enabledOverride : Boolean(source.enabledInput?.checked ?? riskAlertEnabledInput?.checked);
         payload.enabled = enabled;
-        const thresholdPercent = Number(getInputValue(riskThresholdInput));
+        const thresholdPercent = Number(getInputValue(source.thresholdInput || riskThresholdInput));
         if (enabled) {
           if (!Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
             throw new Error('请设置大于 0 的触发阈值');
           }
           payload.threshold_percent = thresholdPercent;
-          const resetPercent = Number(getInputValue(riskResetInput));
+          const resetPercent = Number(getInputValue(source.resetInput || riskResetInput));
           if (Number.isFinite(resetPercent) && resetPercent > 0) {
             payload.reset_ratio_percent = resetPercent;
           }
         }
-        const cooldownMinutes = Number(getInputValue(riskCooldownInput));
+        const cooldownMinutes = Number(getInputValue(source.cooldownInput || riskCooldownInput));
         if (Number.isFinite(cooldownMinutes) && cooldownMinutes >= 0) {
           payload.cooldown_minutes = cooldownMinutes;
         }
-        const barkUrl = getInputValue(riskBarkUrlInput);
+        const barkUrl = getInputValue(source.barkUrlInput || riskBarkUrlInput);
         if (barkUrl) {
           payload.bark_url = barkUrl;
         }
-        if (riskBarkAppendInput) {
-          payload.bark_append_payload = Boolean(riskBarkAppendInput.checked);
+        if (source.barkAppendInput || riskBarkAppendInput) {
+          payload.bark_append_payload = Boolean((source.barkAppendInput || riskBarkAppendInput).checked);
         }
-        const barkTimeout = Number(getInputValue(riskBarkTimeoutInput));
+        const barkTimeout = Number(getInputValue(source.barkTimeoutInput || riskBarkTimeoutInput));
         if (Number.isFinite(barkTimeout) && barkTimeout > 0) {
           payload.bark_timeout = barkTimeout;
         }
-        const titleTemplate = getInputValue(riskTitleTemplateInput);
+        const titleTemplate = getInputValue(source.titleTemplateInput || riskTitleTemplateInput);
         if (titleTemplate) {
           payload.title_template = titleTemplate;
         }
-        const bodyTemplate = getInputValue(riskBodyTemplateInput);
+        const bodyTemplate = getInputValue(source.bodyTemplateInput || riskBodyTemplateInput);
         if (bodyTemplate) {
           payload.body_template = bodyTemplate;
         }
@@ -5434,7 +5595,7 @@
       }
 
       async function loadRiskSettings({ silent = false } = {}) {
-        if (!grvtRiskPanel || riskSettingsBusy) {
+        if (!getRiskViews().length || riskSettingsBusy) {
           return;
         }
         riskSettingsBusy = true;
@@ -5463,7 +5624,7 @@
       }
 
       async function saveRiskSettings({ enabledOverride } = {}) {
-        if (!grvtRiskPanel || riskSettingsBusy) {
+        if (!getRiskViews().length || riskSettingsBusy) {
           return;
         }
         let payload;
@@ -5504,7 +5665,8 @@
       }
 
       async function triggerRiskTest() {
-        if (!riskTestButton || riskTestBusy) {
+        const hasTestButton = getRiskViews().some((view) => view.testButton);
+        if (!hasTestButton || riskTestBusy) {
           return;
         }
         riskTestBusy = true;
@@ -8819,8 +8981,18 @@
           saveRiskSettings();
         });
       }
+      if (paraRiskSaveButton) {
+        paraRiskSaveButton.addEventListener('click', () => {
+          saveRiskSettings();
+        });
+      }
       if (riskDisableButton) {
         riskDisableButton.addEventListener('click', () => {
+          disableRiskAlerts();
+        });
+      }
+      if (paraRiskDisableButton) {
+        paraRiskDisableButton.addEventListener('click', () => {
           disableRiskAlerts();
         });
       }
@@ -8829,8 +9001,18 @@
           triggerRiskTest();
         });
       }
+      if (paraRiskTestButton) {
+        paraRiskTestButton.addEventListener('click', () => {
+          triggerRiskTest();
+        });
+      }
       if (riskRefreshButton) {
         riskRefreshButton.addEventListener('click', () => {
+          loadRiskSettings({ silent: false });
+        });
+      }
+      if (paraRiskRefreshButton) {
+        paraRiskRefreshButton.addEventListener('click', () => {
           loadRiskSettings({ silent: false });
         });
       }
@@ -8845,6 +9027,12 @@
           markRiskSettingsDirty();
         });
       }
+      if (paraRiskAlertEnabledInput) {
+        paraRiskAlertEnabledInput.addEventListener('change', () => {
+          updateRiskInputsState();
+          markRiskSettingsDirty();
+        });
+      }
       if (riskThresholdSlider) {
         riskThresholdSlider.addEventListener('input', (event) => {
           const value = clamp(Number(event.target.value), 5, 90);
@@ -8855,11 +9043,31 @@
           markRiskSettingsDirty();
         });
       }
+      if (paraRiskThresholdSlider) {
+        paraRiskThresholdSlider.addEventListener('input', (event) => {
+          const value = clamp(Number(event.target.value), 5, 90);
+          if (paraRiskThresholdInput) {
+            paraRiskThresholdInput.value = value.toFixed(1);
+          }
+          updateRiskThresholdLabel(value);
+          markRiskSettingsDirty();
+        });
+      }
       if (riskThresholdInput) {
         riskThresholdInput.addEventListener('input', () => {
           const value = clamp(Number(riskThresholdInput.value), 1, 90);
           if (Number.isFinite(value) && riskThresholdSlider) {
             riskThresholdSlider.value = value;
+          }
+          updateRiskThresholdLabel(value);
+          markRiskSettingsDirty();
+        });
+      }
+      if (paraRiskThresholdInput) {
+        paraRiskThresholdInput.addEventListener('input', () => {
+          const value = clamp(Number(paraRiskThresholdInput.value), 1, 90);
+          if (Number.isFinite(value) && paraRiskThresholdSlider) {
+            paraRiskThresholdSlider.value = value;
           }
           updateRiskThresholdLabel(value);
           markRiskSettingsDirty();
@@ -8880,6 +9088,22 @@
       });
       if (riskBarkAppendInput) {
         riskBarkAppendInput.addEventListener('change', markRiskSettingsDirty);
+      }
+      [
+        paraRiskResetInput,
+        paraRiskCooldownInput,
+        paraRiskBarkUrlInput,
+        paraRiskBarkTimeoutInput,
+        paraRiskTitleTemplateInput,
+        paraRiskBodyTemplateInput,
+      ].forEach((input) => {
+        if (!input) {
+          return;
+        }
+        input.addEventListener('input', markRiskSettingsDirty);
+      });
+      if (paraRiskBarkAppendInput) {
+        paraRiskBarkAppendInput.addEventListener('change', markRiskSettingsDirty);
       }
     updateGrvtSymbolOptions([]);
     updateParaSymbolOptions([]);
