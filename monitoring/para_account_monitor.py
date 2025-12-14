@@ -923,12 +923,21 @@ class ParadexAccountMonitor:
 
         transfer_kwargs: Dict[str, Any] = {}
         user_auto_estimate = payload.get("auto_estimate") if isinstance(payload, dict) else None
-        if user_auto_estimate is not None:
-            transfer_kwargs["auto_estimate"] = bool(user_auto_estimate)
         resource_bounds = payload.get("resource_bounds") if isinstance(payload, dict) else None
-        if resource_bounds:
+
+        transfer_fn = getattr(self._client.account, "transfer_on_l2", None)
+        supported_params: set[str] = set()
+        if transfer_fn:
+            try:
+                supported_params = set(inspect.signature(transfer_fn).parameters)
+            except (TypeError, ValueError):
+                supported_params = set()
+
+        if resource_bounds and "resource_bounds" in supported_params:
             transfer_kwargs["resource_bounds"] = resource_bounds
-        if "resource_bounds" not in transfer_kwargs:
+        if user_auto_estimate is not None and "auto_estimate" in supported_params:
+            transfer_kwargs["auto_estimate"] = bool(user_auto_estimate)
+        if "resource_bounds" not in transfer_kwargs and "auto_estimate" in supported_params:
             transfer_kwargs.setdefault("auto_estimate", True)
 
         try:
