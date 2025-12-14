@@ -407,6 +407,12 @@ def load_single_account(*, label: str) -> ParadexCredentials:
 
 
 def build_paradex_client(creds: ParadexCredentials) -> Any:
+    """Construct Paradex client with optional RPC version override.
+
+    PARADEX_RPC_VERSION env var (e.g. v0_9) is passed through to starknet fullnode RPC.
+    This helps avoid "Invalid block id" errors when the node requires an explicit versioned
+    RPC path.
+    """
     if Paradex is None or TESTNET is None or PROD is None or int_from_hex is None:
         raise ImportError(
             "para_account_monitor requires paradex-py (and starknet-py) packages. "
@@ -424,8 +430,14 @@ def build_paradex_client(creds: ParadexCredentials) -> Any:
         l2_private_key = int_from_hex(creds.l2_private_key_hex)
     except Exception as exc:  # pragma: no cover - user input validation
         raise ValueError(f"Invalid PARADEX_L2_PRIVATE_KEY: {exc}") from exc
+
+    rpc_version = (os.getenv("PARADEX_RPC_VERSION") or "").strip() or None
     client = Paradex(env=env, logger=None)
-    client.init_account(l1_address=creds.l1_address, l2_private_key=l2_private_key)
+    client.init_account(
+        l1_address=creds.l1_address,
+        l2_private_key=l2_private_key,
+        rpc_version=rpc_version,
+    )
     return client
 
 
