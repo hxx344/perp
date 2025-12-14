@@ -921,8 +921,18 @@ class ParadexAccountMonitor:
         if metadata:
             reason = metadata.get("reason")
 
+        transfer_kwargs: Dict[str, Any] = {}
+        user_auto_estimate = payload.get("auto_estimate") if isinstance(payload, dict) else None
+        if user_auto_estimate is not None:
+            transfer_kwargs["auto_estimate"] = bool(user_auto_estimate)
+        resource_bounds = payload.get("resource_bounds") if isinstance(payload, dict) else None
+        if resource_bounds:
+            transfer_kwargs["resource_bounds"] = resource_bounds
+        if "resource_bounds" not in transfer_kwargs:
+            transfer_kwargs.setdefault("auto_estimate", True)
+
         try:
-            transfer_coro = self._client.account.transfer_on_l2(target_address, amount)
+            transfer_coro = self._client.account.transfer_on_l2(target_address, amount, **transfer_kwargs)
             if asyncio.iscoroutine(transfer_coro):
                 self._run_coro_sync(transfer_coro)
             else:
