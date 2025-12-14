@@ -296,6 +296,7 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
         ("entry_price",),
         ("entryPrice",),
         ("average_price",),
+        ("average_entry_price",),
         ("avg_entry_price",),
         ("avgEntryPrice",),
         ("avgEntry",),
@@ -565,6 +566,54 @@ class ParadexAccountMonitor:
             LOGGER.warning("Failed to fetch Paradex positions for %s: %s", self._label, exc)
         return []
 
+    def _fetch_market_summaries(self) -> List[Dict[str, Any]]:
+        api_client = getattr(self._client, "api_client", None)
+        if api_client is None:
+            return []
+        method = getattr(api_client, "fetch_markets_summary", None)
+        if method is None:
+            return []
+        try:
+            response = method({"market": "ALL"})  # type: ignore[arg-type]
+        except TypeError:
+            try:
+                response = method()
+            except Exception as exc:  # pragma: no cover - network path
+                LOGGER.warning("Failed to fetch Paradex market summaries for %s: %s", self._label, exc)
+                return []
+        except Exception as exc:  # pragma: no cover - network path
+            LOGGER.warning("Failed to fetch Paradex market summaries for %s: %s", self._label, exc)
+            return []
+        if isinstance(response, dict):
+            results = response.get("results")
+            if isinstance(results, list):
+                return results
+        if isinstance(response, list):
+            return response
+        return []
+
+    def _build_mark_price_map(self) -> Dict[str, Decimal]:
+        price_map: Dict[str, Decimal] = {}
+        for entry in self._fetch_market_summaries():
+            if not isinstance(entry, dict):
+                continue
+            market = entry.get("market") or entry.get("symbol") or entry.get("ticker")
+            mark_price = decimal_from(
+                entry.get("mark_price")
+                or entry.get("markPrice")
+                or entry.get("last_traded_price")
+                or entry.get("lastTradedPrice")
+                or entry.get("price")
+            )
+            if market is None or mark_price is None:
+                continue
+            normalized = self._normalize_symbol_label(market)
+            if not normalized:
+                continue
+            self._register_symbol_hint(str(market))
+            price_map[normalized] = mark_price
+        return price_map
+
     def _fetch_balances(self) -> Dict[str, Any]:
         candidate_methods = ("fetch_balances", "fetch_balance", "fetch_account", "fetch_accounts")
         api_client = getattr(self._client, "api_client", None)
@@ -662,9 +711,28 @@ class ParadexAccountMonitor:
         account_eth = Decimal("0")
         account_btc = Decimal("0")
         position_rows: List[Dict[str, Any]] = []
+        price_map = self._build_mark_price_map()
 
         for raw_position in positions:
-            pnl_value, position_payload, _ = compute_position_pnl(raw_position)
+            pnl_value, position_payload, signed_size = compute_position_pnl(raw_position)
+
+            symbol = position_payload.get("symbol")
+            normalized_symbol = self._normalize_symbol_label(symbol)
+            mark_override = price_map.get(normalized_symbol) if normalized_symbol else None
+            if position_payload.get("mark_price") is None and mark_override is not None:
+                position_payload["mark_price"] = decimal_to_str(mark_override)
+
+            entry_val = decimal_from(position_payload.get("entry_price"))
+            mark_val = decimal_from(position_payload.get("mark_price")) or mark_override
+            if (pnl_value is None or pnl_value == 0) and None not in (signed_size, entry_val, mark_val):
+                try:
+                    pnl_value = (mark_val - entry_val) * signed_size  # type: ignore[arg-type]
+                except Exception:
+                    pass
+            if pnl_value is None:
+                pnl_value = Decimal("0")
+            position_payload["pnl"] = decimal_to_str(pnl_value)
+
             account_total += pnl_value
             base = base_asset(position_payload.get("symbol", ""))
             if base == "ETH":
@@ -672,7 +740,7 @@ class ParadexAccountMonitor:
             elif base == "BTC":
                 account_btc += pnl_value
             position_rows.append(position_payload)
-            self._record_position(position_payload.get("symbol"), position_payload.get("net_size") and decimal_from(position_payload.get("net_size")))
+            self._record_position(symbol, signed_size if signed_size is not None else decimal_from(position_payload.get("net_size")))
 
         position_rows = position_rows[: self._max_positions]
 
