@@ -2000,7 +2000,7 @@
           <div class="grvt-transfer-panel hidden" id="para-transfer-panel">
             <div class="grvt-adjust-header">
               <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">PARA 账户间资金划转</h3>
-              <p class="summary-sub" style="margin: 0;">默认方向：来源账户 → 目标账户</p>
+              <p class="summary-sub" style="margin: 0;">默认方向：来源账户 → 目标 L2 地址</p>
             </div>
             <div class="grvt-transfer-grid">
               <label>
@@ -2010,6 +2010,10 @@
               <label>
                 目标账户
                 <select id="para-transfer-target"></select>
+              </label>
+              <label>
+                目标 L2 地址
+                <input type="text" id="para-transfer-target-address" placeholder="0x..." />
               </label>
               <label>
                 数量
@@ -2026,24 +2030,6 @@
               <label>
                 备注（可选）
                 <textarea id="para-transfer-reason" placeholder="记录用途或审批信息"></textarea>
-              </label>
-            </div>
-            <div class="grvt-transfer-grid">
-              <label>
-                From Account ID
-                <input type="text" id="para-transfer-from-account" />
-              </label>
-              <label>
-                From Sub Account ID
-                <input type="text" id="para-transfer-from-sub" />
-              </label>
-              <label>
-                To Account ID
-                <input type="text" id="para-transfer-to-account" />
-              </label>
-              <label>
-                To Sub Account ID
-                <input type="text" id="para-transfer-to-sub" />
               </label>
             </div>
             <div class="grvt-transfer-actions">
@@ -2331,14 +2317,11 @@
   const paraTransferPanel = document.getElementById('para-transfer-panel');
   const paraTransferSourceSelect = document.getElementById('para-transfer-source');
   const paraTransferTargetSelect = document.getElementById('para-transfer-target');
+  const paraTransferTargetAddressInput = document.getElementById('para-transfer-target-address');
   const paraTransferAmountInput = document.getElementById('para-transfer-amount');
   const paraTransferCurrencyInput = document.getElementById('para-transfer-currency');
   const paraTransferTypeInput = document.getElementById('para-transfer-type');
   const paraTransferReasonInput = document.getElementById('para-transfer-reason');
-  const paraTransferFromAccountInput = document.getElementById('para-transfer-from-account');
-  const paraTransferFromSubInput = document.getElementById('para-transfer-from-sub');
-  const paraTransferToAccountInput = document.getElementById('para-transfer-to-account');
-  const paraTransferToSubInput = document.getElementById('para-transfer-to-sub');
   const paraTransferSubmitButton = document.getElementById('para-transfer-submit');
   const paraTransferStatus = document.getElementById('para-transfer-status');
   const paraTransferHistoryBody = document.getElementById('para-transfer-history');
@@ -3493,12 +3476,18 @@
         if (normalized === 'main_to_main') {
           return '主账户 → 主账户';
         }
+        if (normalized === 'l2_transfer') {
+          return 'L2 转账';
+        }
         return normalized;
       }
 
       function formatTransferRoute(payload) {
         if (!payload) {
           return '—';
+        }
+        if (payload.target_l2_address) {
+          return `→ ${payload.target_l2_address}`;
         }
         const fromAccount = payload.from_account_id || payload.from_account || payload.from || '';
         const fromSub = payload.from_sub_account_id ?? payload.from_sub_account ?? '';
@@ -3942,7 +3931,8 @@
         }
         const sourceValue = paraTransferSourceSelect?.value || '';
         const targetValue = paraTransferTargetSelect?.value || '';
-        const selectionsReady = Boolean(sourceValue && targetValue && sourceValue !== targetValue);
+        const targetAddress = getInputValue(paraTransferTargetAddressInput);
+        const selectionsReady = Boolean(sourceValue && targetValue && sourceValue !== targetValue && targetAddress);
         paraTransferSubmitButton.disabled = paraTransferLocked || !selectionsReady;
       }
 
@@ -3968,6 +3958,11 @@
         }
         if (sourceValue === targetValue) {
           setParaTransferStatus('请为来源与目标选择不同的 VPS');
+          return;
+        }
+        const targetAddress = getInputValue(paraTransferTargetAddressInput);
+        if (!targetAddress) {
+          setParaTransferStatus('目标 L2 地址缺失');
           return;
         }
         setParaTransferStatus('等待指令…');
@@ -4078,46 +4073,18 @@
           if (paraTransferTypeInput && (forceAll || !paraTransferTypeInput.value)) {
             paraTransferTypeInput.value = defaults.transfer_type || 'spot';
           }
+        } else if (role === 'target') {
+          const targetAddr = defaults.l2_address || defaults.target_l2_address || '';
+          setInputValue(paraTransferTargetAddressInput, targetAddr, { force: forceAll });
         }
-        updateParaTransferRoute({ force: true });
         updateParaTransferButtons();
       }
 
       function updateParaTransferRoute({ force = false } = {}) {
-        const sourceId = paraTransferSourceSelect?.value;
         const targetId = paraTransferTargetSelect?.value;
-        const sourceDefaults = (sourceId && paraTransferDefaults.get(sourceId)) || {};
         const targetDefaults = (targetId && paraTransferDefaults.get(targetId)) || {};
-        const direction = 'main_to_main';
-        const sourceRoute = buildTransferRouteFromDefaults(sourceDefaults, direction) || {};
-        const targetRoute = buildTransferRouteFromDefaults(targetDefaults, direction) || {};
-        const fallbackFromAccount =
-          sourceRoute.from_account_id ||
-          sourceDefaults.main_account_id ||
-          sourceDefaults.from_account_id ||
-          '';
-        const fallbackFromSub =
-          sourceRoute.from_sub_account_id ||
-          sourceDefaults.main_sub_account_id ||
-          sourceDefaults.sub_account_id ||
-          sourceDefaults.from_sub_account_id ||
-          '0';
-        const fallbackToAccount =
-          targetRoute.to_account_id ||
-          targetDefaults.main_account_id ||
-          targetDefaults.to_account_id ||
-          sourceRoute.to_account_id ||
-          '';
-        const fallbackToSub =
-          targetRoute.to_sub_account_id ||
-          targetDefaults.main_sub_account_id ||
-          targetDefaults.to_sub_account_id ||
-          sourceRoute.to_sub_account_id ||
-          '0';
-        setInputValue(paraTransferFromAccountInput, fallbackFromAccount, { force });
-        setInputValue(paraTransferFromSubInput, fallbackFromSub, { force });
-        setInputValue(paraTransferToAccountInput, fallbackToAccount, { force });
-        setInputValue(paraTransferToSubInput, fallbackToSub, { force });
+        const targetAddr = targetDefaults.l2_address || targetDefaults.target_l2_address || '';
+        setInputValue(paraTransferTargetAddressInput, targetAddr, { force });
       }
 
       async function sendParaTransfer() {
@@ -4139,32 +4106,20 @@
           setParaTransferStatus('请输入合法的数量');
           return;
         }
+        const targetAddress = getInputValue(paraTransferTargetAddressInput);
+        if (!targetAddress) {
+          setParaTransferStatus('请输入目标 L2 地址');
+          return;
+        }
         const currencyValue = (getInputValue(paraTransferCurrencyInput) || 'USDT').toUpperCase();
         const payload = {
           agent_ids: [sourceAgentId],
           target_agent_id: targetAgentId,
           num_tokens: amountValue,
           currency: currencyValue,
-          direction: 'main_to_main',
-          from_account_id: getInputValue(paraTransferFromAccountInput),
-          from_sub_account_id: getInputValue(paraTransferFromSubInput),
-          to_account_id: getInputValue(paraTransferToAccountInput),
-          to_sub_account_id: getInputValue(paraTransferToSubInput),
+          target_l2_address: targetAddress,
           transfer_type: getInputValue(paraTransferTypeInput) || undefined,
         };
-
-        const missing = Object.entries({
-          from_account_id: payload.from_account_id,
-          from_sub_account_id: payload.from_sub_account_id,
-          to_account_id: payload.to_account_id,
-          to_sub_account_id: payload.to_sub_account_id,
-        })
-          .filter(([, value]) => !value)
-          .map(([key]) => key);
-        if (missing.length) {
-          setParaTransferStatus(`缺少字段：${missing.join(', ')}`);
-          return;
-        }
 
         if (!payload.transfer_type) {
           delete payload.transfer_type;

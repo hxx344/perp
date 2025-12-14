@@ -788,6 +788,17 @@ class ParadexAccountMonitor:
                 ],
             },
         }
+
+        account_obj = getattr(self._client, "account", None)
+        transfer_defaults: Dict[str, Any] = {}
+        if account_obj is not None:
+            try:
+                transfer_defaults["l2_address"] = hex(getattr(account_obj, "l2_address"))
+            except Exception:
+                pass
+            transfer_defaults.setdefault("transfer_type", "l2")
+        if transfer_defaults:
+            payload["paradex_accounts"]["transfer_defaults"] = transfer_defaults
         return payload
 
     def _push(self, payload: Dict[str, Any]) -> None:
@@ -842,6 +853,43 @@ class ParadexAccountMonitor:
             size=quantity,
         )
         return self._client.api_client.submit_order(order)
+
+    def _execute_transfer(self, entry: Dict[str, Any]) -> Tuple[str, str]:
+        if not self._client or not getattr(self._client, "account", None):
+            raise RuntimeError("Paradex account client not initialized")
+
+        payload_raw = entry.get("payload")
+        payload = payload_raw if isinstance(payload_raw, dict) else {}
+        amount = decimal_from(payload.get("num_tokens") or payload.get("amount") or entry.get("magnitude"))
+        if amount is None or amount <= 0:
+            raise ValueError("Transfer amount must be positive")
+
+        target_address_fields = (
+            payload.get("target_l2_address"),
+            payload.get("recipient"),
+            payload.get("recipient_address"),
+            payload.get("to_address"),
+        )
+        target_address = next((str(value).strip() for value in target_address_fields if value), "")
+        if not target_address:
+            raise ValueError("target_l2_address is required for Paradex transfer")
+
+        reason = None
+        metadata = payload.get("transfer_metadata") if isinstance(payload.get("transfer_metadata"), dict) else {}
+        if metadata:
+            reason = metadata.get("reason")
+
+        try:
+            self._client.account.transfer_on_l2(target_address, amount)
+        except Exception as exc:
+            raise RuntimeError(f"Paradex L2 transfer failed: {exc}") from exc
+
+        note_parts = [
+            f"sent {decimal_to_str(amount) or amount} to {target_address}",
+        ]
+        if reason:
+            note_parts.append(f"reason={reason}")
+        return "succeeded", "; ".join(note_parts)
 
     def _execute_adjustment(self, entry: Dict[str, Any]) -> Tuple[str, str]:
         action = str(entry.get("action", "")).strip().lower()
@@ -953,7 +1001,11 @@ class ParadexAccountMonitor:
             status = "failed"
             note: Optional[str] = None
             try:
-                status, note = self._execute_adjustment(entry)
+                action = str(entry.get("action") or "").strip().lower()
+                if action == "transfer":
+                    status, note = self._execute_transfer(entry)
+                else:
+                    status, note = self._execute_adjustment(entry)
             except Exception as exc:
                 status = "failed"
                 note = f"execution error: {exc}"

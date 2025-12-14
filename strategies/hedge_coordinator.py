@@ -2669,13 +2669,95 @@ class CoordinatorApp:
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="transfer payload must be an object")
 
-        payload = await self._process_transfer_request(
+        payload = await self._process_para_transfer_request(
             body,
             created_by=request.remote or "dashboard",
-            defaults_provider=self._coordinator.get_para_transfer_defaults,
             adjustments_manager=self._para_adjustments,
         )
         return web.json_response({"request": payload})
+
+    async def _process_para_transfer_request(
+        self,
+        body: Dict[str, Any],
+        *,
+        created_by: str,
+        adjustments_manager: Optional[GrvtAdjustmentManager] = None,
+    ) -> Dict[str, Any]:
+        def _clean_required(value: Any, field: str) -> str:
+            try:
+                text = str(value).strip()
+            except Exception:
+                text = ""
+            if not text:
+                raise web.HTTPBadRequest(text=f"{field} is required")
+            return text
+
+        def _clean_optional(value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            try:
+                text = str(value).strip()
+            except Exception:
+                return None
+            return text or None
+
+        amount_raw = body.get("num_tokens") or body.get("amount")
+        try:
+            amount = Decimal(str(amount_raw))
+        except Exception:
+            raise web.HTTPBadRequest(text="num_tokens must be numeric")
+        if amount <= 0:
+            raise web.HTTPBadRequest(text="num_tokens must be positive")
+
+        currency = _clean_required(body.get("currency") or "USDC", "currency").upper()
+
+        agent_ids_raw = body.get("agent_ids")
+        if agent_ids_raw is None:
+            agent_ids = await self._coordinator.list_agent_ids()
+        elif isinstance(agent_ids_raw, list):
+            agent_ids = [str(agent).strip() for agent in agent_ids_raw if str(agent).strip()]
+        else:
+            raise web.HTTPBadRequest(text="agent_ids must be an array of strings")
+        if not agent_ids:
+            raise web.HTTPBadRequest(text="No agent IDs available for transfer request")
+        if len(agent_ids) > 1:
+            raise web.HTTPBadRequest(text="Paradex transfers support a single source agent per request")
+
+        target_l2_address = _clean_required(
+            body.get("target_l2_address")
+            or body.get("recipient")
+            or body.get("recipient_address")
+            or body.get("to_address"),
+            "target_l2_address",
+        )
+
+        metadata = body.get("transfer_metadata") or {}
+        if metadata and not isinstance(metadata, dict):
+            raise web.HTTPBadRequest(text="transfer_metadata must be an object if provided")
+        metadata = dict(metadata or {})
+        if body.get("reason") and not metadata.get("reason"):
+            metadata["reason"] = str(body["reason"])
+        metadata.setdefault("agent_id", agent_ids[0])
+        metadata.setdefault("direction", "l2_transfer")
+
+        transfer_payload: Dict[str, Any] = {
+            "currency": currency,
+            "num_tokens": format(amount, "f"),
+            "target_l2_address": target_l2_address,
+        }
+        if metadata:
+            transfer_payload["transfer_metadata"] = metadata
+
+        manager = adjustments_manager or self._para_adjustments
+        payload = await manager.create_request(
+            action="transfer",
+            magnitude=float(amount),
+            agent_ids=agent_ids,
+            symbols=None,
+            created_by=created_by,
+            payload=transfer_payload,
+        )
+        return payload
 
     async def _process_transfer_request(
         self,
@@ -2742,9 +2824,9 @@ class CoordinatorApp:
         transfer_defaults = await defaults_lookup(source_agent_id)
         target_defaults: Optional[Dict[str, Any]] = None
         if target_agent_id:
+            # 对于 main_to_main 互转，允许目标端没有默认配置，只要请求体里提供了完整路由即可。
+            # 如有配置则填充 metadata，缺失时继续执行，由后续字段校验兜底。
             target_defaults = await defaults_lookup(target_agent_id)
-            if target_defaults is None:
-                raise web.HTTPBadRequest(text=f"target_agent_id {target_agent_id} has no transfer defaults")
 
         metadata = body.get("transfer_metadata") or {}
         if metadata and not isinstance(metadata, dict):
