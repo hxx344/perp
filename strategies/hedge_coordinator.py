@@ -41,7 +41,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import quote_plus
 
 from aiohttp import ClientSession, ClientTimeout, web
@@ -1729,6 +1729,20 @@ class HedgeCoordinator:
                 return copy.deepcopy(defaults)
             return None
 
+    async def get_para_transfer_defaults(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        normalized = self._normalize_agent_id(agent_id)
+        async with self._lock:
+            state = self._states.get(normalized)
+            if not state:
+                return None
+            para_block = state.paradex_accounts
+            if not isinstance(para_block, dict):
+                return None
+            defaults = para_block.get("transfer_defaults")
+            if isinstance(defaults, dict):
+                return copy.deepcopy(defaults)
+            return None
+
     def _prepare_risk_alerts(self, agent_id: str, grvt_payload: Optional[Dict[str, Any]]) -> Sequence[RiskAlertInfo]:
         del grvt_payload  # unused in global risk evaluation
         if self._bark_notifier is None or self._risk_alert_threshold is None:
@@ -2002,6 +2016,7 @@ class CoordinatorApp:
                 web.post("/grvt/adjust/ack", self.handle_grvt_adjust_ack),
                 web.get("/para/adjustments", self.handle_para_adjustments),
                 web.post("/para/adjust", self.handle_para_adjust),
+                web.post("/para/transfer", self.handle_para_transfer),
                 web.post("/para/adjust/ack", self.handle_para_adjust_ack),
                 web.get("/simulation/pnl", self.handle_simulation_pnl),
             ]
@@ -2636,10 +2651,40 @@ class CoordinatorApp:
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="transfer payload must be an object")
 
-        payload = await self._process_transfer_request(body, created_by=request.remote or "dashboard")
+        payload = await self._process_transfer_request(
+            body,
+            created_by=request.remote or "dashboard",
+            defaults_provider=self._coordinator.get_agent_transfer_defaults,
+            adjustments_manager=self._adjustments,
+        )
         return web.json_response({"request": payload})
 
-    async def _process_transfer_request(self, body: Dict[str, Any], *, created_by: str) -> Dict[str, Any]:
+    async def handle_para_transfer(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="transfer payload must be JSON")
+
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="transfer payload must be an object")
+
+        payload = await self._process_transfer_request(
+            body,
+            created_by=request.remote or "dashboard",
+            defaults_provider=self._coordinator.get_para_transfer_defaults,
+            adjustments_manager=self._para_adjustments,
+        )
+        return web.json_response({"request": payload})
+
+    async def _process_transfer_request(
+        self,
+        body: Dict[str, Any],
+        *,
+        created_by: str,
+        defaults_provider: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
+        adjustments_manager: Optional[GrvtAdjustmentManager] = None,
+    ) -> Dict[str, Any]:
         def _clean_required(value: Any, field: str) -> str:
             try:
                 text = str(value).strip()
@@ -2693,10 +2738,11 @@ class CoordinatorApp:
             or body.get("target_agent")
         )
 
-        transfer_defaults = await self._coordinator.get_agent_transfer_defaults(source_agent_id)
+        defaults_lookup = defaults_provider or self._coordinator.get_agent_transfer_defaults
+        transfer_defaults = await defaults_lookup(source_agent_id)
         target_defaults: Optional[Dict[str, Any]] = None
         if target_agent_id:
-            target_defaults = await self._coordinator.get_agent_transfer_defaults(target_agent_id)
+            target_defaults = await defaults_lookup(target_agent_id)
             if target_defaults is None:
                 raise web.HTTPBadRequest(text=f"target_agent_id {target_agent_id} has no transfer defaults")
 
@@ -2843,7 +2889,8 @@ class CoordinatorApp:
         if metadata:
             transfer_payload["transfer_metadata"] = metadata
 
-        payload = await self._adjustments.create_request(
+        manager = adjustments_manager or self._adjustments
+        payload = await manager.create_request(
             action="transfer",
             magnitude=float(amount),
             agent_ids=agent_ids,
