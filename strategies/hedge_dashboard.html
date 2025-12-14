@@ -6100,8 +6100,16 @@
               <div><dt>Total</dt><dd>${escapeHtml(totalText)}</dd></div>
               <div><dt>Equity</dt><dd>${escapeHtml(equityText)}</dd></div>
               <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
+              <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
             </dl>
           `;
+
+          let maintenanceRequirementTotal = 0;
+          const ratioBaseValue = Number.isFinite(entry.equity) && entry.equity > 0
+            ? entry.equity
+            : Number.isFinite(entry.wallet) && entry.wallet > 0
+              ? entry.wallet
+              : null;
 
           if (positions.length) {
             const table = document.createElement('table');
@@ -6112,7 +6120,12 @@
                   <th>Symbol</th>
                   <th>Side</th>
                   <th>Size</th>
+                  <th>Entry</th>
+                  <th>Mark</th>
                   <th>PnL</th>
+                  <th>Value</th>
+                  <th>Init Margin</th>
+                  <th>Maint. %</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -6129,15 +6142,35 @@
               const sizeText = Number.isFinite(sizeValue)
                 ? numberFormatter.format(sizeValue)
                 : (pos.net_size ?? pos.size ?? '--');
+              const entryPriceText = formatDecimal(pos.entry_price, 4);
+              const markPriceText = formatDecimal(pos.mark_price, 4);
               const pnlValue = parseDecimal(pos.pnl);
               const pnlText = Number.isFinite(pnlValue) ? formatSignedNumber(pnlValue, 6) : (pos.pnl ?? '--');
               const pnlClass = percentClass(pnlValue);
+              const marginInfo = computePositionMargin(pos);
+              if (marginInfo && Number.isFinite(marginInfo.maintenanceMargin)) {
+                maintenanceRequirementTotal += marginInfo.maintenanceMargin;
+              }
+              const notionalText = marginInfo && Number.isFinite(marginInfo.notional)
+                ? numberFormatter.format(marginInfo.notional)
+                : '--';
+              const initialMarginText = marginInfo && Number.isFinite(marginInfo.initialMargin)
+                ? numberFormatter.format(marginInfo.initialMargin)
+                : '--';
+              const maintenanceRateText = marginInfo && Number.isFinite(marginInfo.maintenanceRate)
+                ? formatPercent(marginInfo.maintenanceRate * 100, 2)
+                : '--';
               const row = document.createElement('tr');
               row.innerHTML = `
                 <td>${escapeHtml(symbol)}</td>
                 <td>${escapeHtml(side || '--')}</td>
                 <td>${escapeHtml(sizeText)}</td>
+                <td>${escapeHtml(entryPriceText)}</td>
+                <td>${escapeHtml(markPriceText)}</td>
                 <td class="${pnlClass}">${escapeHtml(pnlText)}</td>
+                <td>${escapeHtml(notionalText)}</td>
+                <td>${escapeHtml(initialMarginText)}</td>
+                <td>${escapeHtml(maintenanceRateText)}</td>
               `;
               body.appendChild(row);
             }
@@ -6147,6 +6180,18 @@
             empty.className = 'grvt-positions-empty';
             empty.textContent = 'No positions';
             card.appendChild(empty);
+          }
+
+          const maintenanceBadge = card.querySelector('[data-metric="maintenance"] .maintenance-ratio');
+          if (maintenanceBadge) {
+            if (ratioBaseValue && Number.isFinite(maintenanceRequirementTotal) && maintenanceRequirementTotal >= 0) {
+              const ratio = maintenanceRequirementTotal / ratioBaseValue;
+              maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
+            } else if (ratioBaseValue) {
+              maintenanceBadge.textContent = formatPercent(0, 2);
+            } else {
+              maintenanceBadge.textContent = '—';
+            }
           }
 
           paraAccountGrid.appendChild(card);
