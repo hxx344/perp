@@ -204,7 +204,7 @@ class GrvtAdjustmentManager:
 
     def _normalize_status(self, status: str) -> AdjustmentAgentStatus:
         text = (status or "").strip().lower()
-        if text in {"ack", "acked", "acknowledged", "done", "success"}:
+        if text in {"ack", "acked", "acknowledged", "done", "success", "succeeded"}:
             return "acknowledged"
         if text in {"fail", "failed", "error"}:
             return "failed"
