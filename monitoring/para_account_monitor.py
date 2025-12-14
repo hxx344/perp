@@ -940,6 +940,22 @@ class ParadexAccountMonitor:
         if "resource_bounds" not in transfer_kwargs and "auto_estimate" in supported_params:
             transfer_kwargs.setdefault("auto_estimate", True)
 
+        # For older paradex-py where transfer_on_l2 does not accept auto_estimate/resource_bounds,
+        # patch starknet.prepare_invoke to default auto_estimate=True when resource_bounds not provided.
+        if "auto_estimate" not in supported_params and "resource_bounds" not in supported_params:
+            starknet_obj = getattr(self._client.account, "starknet", None)
+            prepare_fn = getattr(starknet_obj, "prepare_invoke", None)
+            if starknet_obj and prepare_fn and not getattr(starknet_obj, "_auto_estimate_patched", False):
+                original_prepare = prepare_fn
+
+                async def _patched_prepare_invoke(calls, resource_bounds=None, auto_estimate=False, nonce=None):
+                    if resource_bounds is None:
+                        auto_estimate = True
+                    return await original_prepare(calls, resource_bounds=resource_bounds, auto_estimate=auto_estimate, nonce=nonce)
+
+                setattr(starknet_obj, "prepare_invoke", _patched_prepare_invoke)
+                setattr(starknet_obj, "_auto_estimate_patched", True)
+
         try:
             transfer_coro = self._client.account.transfer_on_l2(target_address, amount, **transfer_kwargs)
             if asyncio.iscoroutine(transfer_coro):
