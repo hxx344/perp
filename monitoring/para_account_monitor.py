@@ -377,14 +377,18 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
     raw_pnl = extract_from_paths(entry, *pnl_candidates)
     pnl_value = decimal_from(raw_pnl)
 
-    if mark_price is None and entry_price is not None:
-        mark_price = entry_price
-    if entry_price is None and mark_price is not None:
-        entry_price = mark_price
+    # Keep payload mark_price as None when missing so downstream logic can replace it
+    # with a fresher market summary. Use local fallbacks only for PnL calculation.
+    calc_entry = entry_price
+    calc_mark = mark_price
+    if calc_entry is None and calc_mark is not None:
+        calc_entry = calc_mark
+    if calc_mark is None and calc_entry is not None:
+        calc_mark = calc_entry
 
-    if pnl_value is None and None not in (signed_size, entry_price, mark_price):
+    if pnl_value is None and None not in (signed_size, calc_entry, calc_mark):
         try:
-            pnl_value = (mark_price - entry_price) * signed_size  # type: ignore[arg-type]
+            pnl_value = (calc_mark - calc_entry) * signed_size  # type: ignore[arg-type]
         except Exception:
             pnl_value = Decimal("0")
 
