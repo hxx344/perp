@@ -5675,9 +5675,18 @@
           payload.bark_url = barkUrl;
         }
 
-        const barkAppendInput = [...views.map((v) => v.barkAppendInput), riskBarkAppendInput, paraRiskBarkAppendInput].find(Boolean);
-        if (barkAppendInput) {
-          payload.bark_append_payload = Boolean(barkAppendInput.checked);
+        const pickCheckbox = (...inputs) => {
+          let candidate = null;
+          for (const input of inputs) {
+            if (!input) continue;
+            candidate = Boolean(input.checked);
+          }
+          return candidate;
+        };
+
+        const barkAppendValue = pickCheckbox(...views.map((v) => v.barkAppendInput), riskBarkAppendInput, paraRiskBarkAppendInput);
+        if (barkAppendValue !== null) {
+          payload.bark_append_payload = barkAppendValue;
         }
 
         const barkTimeout = pickNumber(...views.map((v) => v.barkTimeoutInput), riskBarkTimeoutInput, paraRiskBarkTimeoutInput);
