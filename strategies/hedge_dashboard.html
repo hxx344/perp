@@ -5623,13 +5623,18 @@
               continue;
             }
             const raw = getInputValue(input);
+            if (raw === '') {
+              continue;
+            }
             const parsed = parseDecimal(raw);
             if (Number.isFinite(parsed)) {
               return parsed;
             }
-            const numeric = Number(input.value);
-            if (Number.isFinite(numeric)) {
-              return numeric;
+            if (input.value !== undefined && input.value !== null && String(input.value).trim() !== '') {
+              const numeric = Number(input.value);
+              if (Number.isFinite(numeric)) {
+                return numeric;
+              }
             }
           }
           return null;
