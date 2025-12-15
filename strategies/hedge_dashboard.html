@@ -5617,23 +5617,48 @@
           return '';
         };
 
+        const pickNumber = (...inputs) => {
+          for (const input of inputs) {
+            if (!input) {
+              continue;
+            }
+            const raw = getInputValue(input);
+            const parsed = parseDecimal(raw);
+            if (Number.isFinite(parsed)) {
+              return parsed;
+            }
+            const numeric = Number(input.value);
+            if (Number.isFinite(numeric)) {
+              return numeric;
+            }
+          }
+          return null;
+        };
+
         const enabledFromInputs = views.some((view) => Boolean(view.enabledInput?.checked));
         const enabled = enabledOverride !== undefined ? enabledOverride : enabledFromInputs;
         payload.enabled = enabled;
 
-        const thresholdPercent = Number(pickValue(...views.map((v) => v.thresholdInput), riskThresholdInput, paraRiskThresholdInput));
+        const thresholdPercent = pickNumber(
+          ...views.map((v) => v.thresholdInput),
+          ...views.map((v) => v.thresholdSlider),
+          riskThresholdInput,
+          paraRiskThresholdInput,
+          riskThresholdSlider,
+          paraRiskThresholdSlider,
+        );
         if (enabled) {
           if (!Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
             throw new Error('请设置大于 0 的触发阈值');
           }
           payload.threshold_percent = thresholdPercent;
-          const resetPercent = Number(pickValue(...views.map((v) => v.resetInput), riskResetInput, paraRiskResetInput));
+          const resetPercent = pickNumber(...views.map((v) => v.resetInput), riskResetInput, paraRiskResetInput);
           if (Number.isFinite(resetPercent) && resetPercent > 0) {
             payload.reset_ratio_percent = resetPercent;
           }
         }
 
-        const cooldownMinutes = Number(pickValue(...views.map((v) => v.cooldownInput), riskCooldownInput, paraRiskCooldownInput));
+        const cooldownMinutes = pickNumber(...views.map((v) => v.cooldownInput), riskCooldownInput, paraRiskCooldownInput);
         if (Number.isFinite(cooldownMinutes) && cooldownMinutes >= 0) {
           payload.cooldown_minutes = cooldownMinutes;
         }
@@ -5648,7 +5673,7 @@
           payload.bark_append_payload = Boolean(barkAppendInput.checked);
         }
 
-        const barkTimeout = Number(pickValue(...views.map((v) => v.barkTimeoutInput), riskBarkTimeoutInput, paraRiskBarkTimeoutInput));
+        const barkTimeout = pickNumber(...views.map((v) => v.barkTimeoutInput), riskBarkTimeoutInput, paraRiskBarkTimeoutInput);
         if (Number.isFinite(barkTimeout) && barkTimeout > 0) {
           payload.bark_timeout = barkTimeout;
         }
