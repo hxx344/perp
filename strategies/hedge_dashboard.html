@@ -5618,6 +5618,7 @@
         };
 
         const pickNumber = (...inputs) => {
+          let candidate = null;
           for (const input of inputs) {
             if (!input) {
               continue;
@@ -5628,16 +5629,17 @@
             }
             const parsed = parseDecimal(raw);
             if (Number.isFinite(parsed)) {
-              return parsed;
+              candidate = parsed;
+              continue;
             }
             if (input.value !== undefined && input.value !== null && String(input.value).trim() !== '') {
               const numeric = Number(input.value);
               if (Number.isFinite(numeric)) {
-                return numeric;
+                candidate = numeric;
               }
             }
           }
-          return null;
+          return candidate;
         };
 
         const enabledFromInputs = views.some((view) => Boolean(view.enabledInput?.checked));
