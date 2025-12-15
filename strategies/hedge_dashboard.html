@@ -2212,6 +2212,17 @@
               </div>
             </div>
           </div>
+          <div class="grvt-chart-card hidden" id="para-price-chart-wrapper">
+            <div class="grvt-chart-header">
+              <h3>BTC / ETH Δ%</h3>
+              <span class="summary-sub" id="para-price-chart-note">等待数据…</span>
+            </div>
+            <canvas id="para-price-chart"></canvas>
+            <div class="chart-legend" id="para-price-chart-legend">
+              <span><span class="legend-dot legend-btc"></span>BTC (相对首笔)</span>
+              <span><span class="legend-dot legend-eth"></span>ETH (相对首笔)</span>
+            </div>
+          </div>
       </div>
     </section>
 
@@ -2423,6 +2434,10 @@
   const paraRiskDetail = document.getElementById('para-risk-detail');
   const paraSummaryTime = document.getElementById('para-summary-time');
   const paraSummaryUpdated = document.getElementById('para-summary-updated');
+  const paraPriceChartWrapper = document.getElementById('para-price-chart-wrapper');
+  const paraPriceChartCanvas = document.getElementById('para-price-chart');
+  const paraPriceChartNote = document.getElementById('para-price-chart-note');
+  const paraPriceChartLegend = document.getElementById('para-price-chart-legend');
   const paraAccountGrid = document.getElementById('para-account-grid');
   const paraAccountsEmpty = document.getElementById('para-accounts-empty');
   const paraAdjustPanel = document.getElementById('para-adjust-panel');
@@ -6554,36 +6569,40 @@
         return `覆盖约 ${(seconds / 60).toFixed(0)} 分钟`;
       }
 
-      function renderPriceChart(data) {
-        if (!grvtPriceChartWrapper || !grvtPriceChartCanvas) {
+      function renderPriceChartFor(view, data) {
+        const wrapper = view?.wrapper;
+        const canvas = view?.canvas;
+        const note = view?.note;
+        const legend = view?.legend;
+        if (!wrapper || !canvas) {
           return;
         }
         const { percentSeries } = collectPercentPriceSeries(data);
         if (!percentSeries.length) {
-          grvtPriceChartWrapper.classList.add('hidden');
-          if (grvtPriceChartNote) {
-            grvtPriceChartNote.textContent = '等待数据…';
+          wrapper.classList.add('hidden');
+          if (note) {
+            note.textContent = '等待数据…';
           }
-          if (grvtPriceChartLegend) {
-            grvtPriceChartLegend.innerHTML = '<span><span class="legend-dot legend-btc"></span>BTC</span><span><span class="legend-dot legend-eth"></span>ETH</span>';
+          if (legend) {
+            legend.innerHTML = '<span><span class="legend-dot legend-btc"></span>BTC</span><span><span class="legend-dot legend-eth"></span>ETH</span>';
           }
           return;
         }
-        const chartResult = renderPriceCanvas(percentSeries);
+        const chartResult = renderPriceCanvasFor(canvas, percentSeries);
         if (!chartResult) {
-          grvtPriceChartWrapper.classList.add('hidden');
-          if (grvtPriceChartNote) {
-            grvtPriceChartNote.textContent = '等待数据…';
+          wrapper.classList.add('hidden');
+          if (note) {
+            note.textContent = '等待数据…';
           }
           return;
         }
-        grvtPriceChartWrapper.classList.remove('hidden');
-        if (grvtPriceChartNote) {
+        wrapper.classList.remove('hidden');
+        if (note) {
           const rangeText = formatRangeLabel(chartResult.minTs, chartResult.maxTs);
-          grvtPriceChartNote.textContent = rangeText || '最新数据';
+          note.textContent = rangeText || '最新数据';
         }
-        if (grvtPriceChartLegend) {
-          grvtPriceChartLegend.innerHTML = percentSeries
+        if (legend) {
+          legend.innerHTML = percentSeries
             .map((series) => (
               `<span><span class="legend-dot" style="background:${series.color}"></span>${escapeHtml(series.label)}</span>`
             ))
@@ -6591,11 +6610,29 @@
         }
       }
 
-      function renderPriceCanvas(seriesList) {
-        if (!grvtPriceChartCanvas) {
+      function renderPriceChart(data) {
+        renderPriceChartFor({
+          wrapper: grvtPriceChartWrapper,
+          canvas: grvtPriceChartCanvas,
+          note: grvtPriceChartNote,
+          legend: grvtPriceChartLegend,
+        }, data);
+      }
+
+      function renderParaPriceChart(data) {
+        renderPriceChartFor({
+          wrapper: paraPriceChartWrapper,
+          canvas: paraPriceChartCanvas,
+          note: paraPriceChartNote,
+          legend: paraPriceChartLegend,
+        }, data);
+      }
+
+      function renderPriceCanvasFor(canvas, seriesList) {
+        if (!canvas) {
           return null;
         }
-        const setup = prepareCanvas(grvtPriceChartCanvas);
+        const setup = prepareCanvas(canvas);
         if (!setup) {
           return null;
         }
@@ -6676,6 +6713,10 @@
         ctx.fillText(formatSignedPercent(bounds.max, 2), layout.left - 8, layout.top + 12);
         ctx.fillText(formatSignedPercent(bounds.min, 2), layout.left - 8, layout.top + innerHeight + 2);
         return { minTs, maxTs };
+      }
+
+      function renderPriceCanvas(seriesList) {
+        return renderPriceCanvasFor(grvtPriceChartCanvas, seriesList);
       }
 
       function renderTransferChart(data) {
@@ -8863,6 +8904,7 @@
           renderAggregate(data);
           renderVolatility(data);
           renderPriceChart(data);
+          renderParaPriceChart(data);
           renderTransferChart(data);
           renderAgents(data);
           renderPara(data);
