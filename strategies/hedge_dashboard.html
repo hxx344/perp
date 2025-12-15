@@ -1950,6 +1950,16 @@
             <p class="summary-sub" id="para-wallet-balance">Wallet --</p>
           </article>
           <article class="card grvt-summary-card">
+            <h3>风险基数</h3>
+            <div class="value" id="para-transfer-total">--</div>
+            <p class="summary-sub" id="para-transfer-note">Σ Equity - Σ 初始保证金</p>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Risk Level</h3>
+            <div class="value risk-pill risk-pill-summary" id="para-risk-level">--</div>
+            <p class="grvt-risk-detail" id="para-risk-detail">Awaiting data…</p>
+          </article>
+          <article class="card grvt-summary-card">
             <h3>Last Update</h3>
             <div class="value" id="para-summary-time">--</div>
             <p class="grvt-summary-updated" id="para-summary-updated">Updated —</p>
@@ -2407,6 +2417,10 @@
   const paraBtcPnl = document.getElementById('para-btc-pnl');
   const paraTotalEquity = document.getElementById('para-total-equity');
   const paraWalletBalance = document.getElementById('para-wallet-balance');
+  const paraTransferableTotal = document.getElementById('para-transfer-total');
+  const paraTransferableNote = document.getElementById('para-transfer-note');
+  const paraRiskLevel = document.getElementById('para-risk-level');
+  const paraRiskDetail = document.getElementById('para-risk-detail');
   const paraSummaryTime = document.getElementById('para-summary-time');
   const paraSummaryUpdated = document.getElementById('para-summary-updated');
   const paraAccountGrid = document.getElementById('para-account-grid');
@@ -2704,6 +2718,14 @@
   let lastRiskHistoryFetch = 0;
   const RISK_HISTORY_REFRESH_INTERVAL = 5000;
   const riskCapacityBufferState = {
+    acceptedValue: null,
+    acceptedAt: null,
+    pendingValue: null,
+    pendingCycles: 0,
+    pendingDeltaPct: 0,
+    pendingSince: null,
+  };
+  const paraRiskCapacityBufferState = {
     acceptedValue: null,
     acceptedAt: null,
     pendingValue: null,
@@ -5820,25 +5842,27 @@
         };
       }
 
-      function acceptRiskCapacityValue(value, timestamp) {
-        riskCapacityBufferState.acceptedValue = Number.isFinite(value) ? value : null;
-        riskCapacityBufferState.acceptedAt = Number.isFinite(timestamp) ? timestamp : Date.now() / 1000;
-        riskCapacityBufferState.pendingValue = null;
-        riskCapacityBufferState.pendingCycles = 0;
-        riskCapacityBufferState.pendingDeltaPct = 0;
-        riskCapacityBufferState.pendingSince = null;
+      function acceptRiskCapacityValue(state, value, timestamp) {
+        const targetState = state || riskCapacityBufferState;
+        targetState.acceptedValue = Number.isFinite(value) ? value : null;
+        targetState.acceptedAt = Number.isFinite(timestamp) ? timestamp : Date.now() / 1000;
+        targetState.pendingValue = null;
+        targetState.pendingCycles = 0;
+        targetState.pendingDeltaPct = 0;
+        targetState.pendingSince = null;
       }
 
-      function evaluateRiskCapacityBuffer({ hasValue, value, timestamp, baseNote }) {
+      function evaluateRiskCapacityBuffer({ hasValue, value, timestamp, baseNote, state = riskCapacityBufferState }) {
+        const targetState = state || riskCapacityBufferState;
         const safeBaseNote = baseNote || '';
         const safeTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now() / 1000;
 
         if (!hasValue || !Number.isFinite(value)) {
-          riskCapacityBufferState.pendingValue = null;
-          riskCapacityBufferState.pendingCycles = 0;
-          riskCapacityBufferState.pendingDeltaPct = 0;
-          riskCapacityBufferState.pendingSince = null;
-          const accepted = riskCapacityBufferState.acceptedValue;
+          targetState.pendingValue = null;
+          targetState.pendingCycles = 0;
+          targetState.pendingDeltaPct = 0;
+          targetState.pendingSince = null;
+          const accepted = targetState.acceptedValue;
           if (!Number.isFinite(accepted)) {
             return { displayValue: null, note: safeBaseNote || '缺少风险基数数据', status: 'missing' };
           }
@@ -5854,9 +5878,9 @@
           };
         }
 
-        const previous = riskCapacityBufferState.acceptedValue;
+        const previous = targetState.acceptedValue;
         if (!Number.isFinite(previous)) {
-          acceptRiskCapacityValue(value, safeTimestamp);
+          acceptRiskCapacityValue(targetState, value, safeTimestamp);
           return { displayValue: value, note: safeBaseNote, status: 'fresh' };
         }
 
@@ -5866,22 +5890,22 @@
         const exceedsThreshold = percentDelta >= RISK_CAPACITY_DEVIATION_THRESHOLD && delta >= RISK_CAPACITY_MIN_ABS_DELTA;
 
         if (!exceedsThreshold) {
-          acceptRiskCapacityValue(value, safeTimestamp);
+          acceptRiskCapacityValue(targetState, value, safeTimestamp);
           return { displayValue: value, note: safeBaseNote, status: 'fresh' };
         }
 
         const tolerance = Math.max(Math.abs(value), 1) * RISK_CAPACITY_PENDING_TOLERANCE;
-        if (Number.isFinite(riskCapacityBufferState.pendingValue) && Math.abs(riskCapacityBufferState.pendingValue - value) <= tolerance) {
-          riskCapacityBufferState.pendingCycles += 1;
+        if (Number.isFinite(targetState.pendingValue) && Math.abs(targetState.pendingValue - value) <= tolerance) {
+          targetState.pendingCycles += 1;
         } else {
-          riskCapacityBufferState.pendingValue = value;
-          riskCapacityBufferState.pendingCycles = 1;
-          riskCapacityBufferState.pendingSince = safeTimestamp;
+          targetState.pendingValue = value;
+          targetState.pendingCycles = 1;
+          targetState.pendingSince = safeTimestamp;
         }
-        riskCapacityBufferState.pendingDeltaPct = percentDelta;
+        targetState.pendingDeltaPct = percentDelta;
 
-        if (riskCapacityBufferState.pendingCycles >= RISK_CAPACITY_CONFIRMATION_CYCLES) {
-          acceptRiskCapacityValue(value, safeTimestamp);
+        if (targetState.pendingCycles >= RISK_CAPACITY_CONFIRMATION_CYCLES) {
+          acceptRiskCapacityValue(targetState, value, safeTimestamp);
           return { displayValue: value, note: safeBaseNote, status: 'fresh' };
         }
 
@@ -5889,7 +5913,7 @@
         if (safeBaseNote) {
           noteParts.push(safeBaseNote);
         }
-        noteParts.push(`数据确认中 (${riskCapacityBufferState.pendingCycles}/${RISK_CAPACITY_CONFIRMATION_CYCLES})`);
+  noteParts.push(`数据确认中 (${targetState.pendingCycles}/${RISK_CAPACITY_CONFIRMATION_CYCLES})`);
         noteParts.push(`偏差 ${formatPercent(percentDelta * 100, 1)}`);
         return {
           displayValue: previous,
@@ -6932,6 +6956,19 @@
           paraBtcPnl.textContent = '--';
           paraTotalEquity.textContent = '--';
           paraWalletBalance.textContent = 'Wallet --';
+          if (paraTransferableTotal) {
+            paraTransferableTotal.textContent = '--';
+          }
+          if (paraTransferableNote) {
+            paraTransferableNote.textContent = '等待风险基数数据…';
+          }
+          if (paraRiskLevel) {
+            paraRiskLevel.textContent = '--';
+            applyRiskTone(paraRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
+          }
+          if (paraRiskDetail) {
+            paraRiskDetail.textContent = 'Awaiting data…';
+          }
           paraSummaryTime.textContent = '--';
           paraSummaryUpdated.textContent = 'Updated —';
           if (paraAccountGrid) {
@@ -6954,6 +6991,7 @@
         let aggregateBtcPnl = 0;
         let aggregateEquity = 0;
         let aggregateWallet = 0;
+        let aggregateInitialMargin = 0;
         let hasTotal = false;
         let hasEth = false;
         let hasBtc = false;
@@ -6963,6 +7001,7 @@
         const flattenedAccounts = [];
   const symbolCandidates = new Set();
     const transferOptions = [];
+        let worstLossAccount = null;
 
         for (const [agentId, snapshot] of entries) {
           try {
@@ -6992,9 +7031,29 @@
                 const btc = parseDecimal(accountObj.btc_pnl);
                 const equity = parseDecimal(accountObj.equity ?? accountObj.available_equity);
                 const wallet = parseDecimal(accountObj.balance ?? accountObj.available_balance);
+                let initialMarginTotal = 0;
+                const positionsList = Array.isArray(accountObj.positions) ? accountObj.positions : [];
+                if (positionsList.length) {
+                  for (const position of positionsList) {
+                    const marginInfo = computePositionMargin(position);
+                    if (marginInfo && Number.isFinite(marginInfo.initialMargin)) {
+                      initialMarginTotal += marginInfo.initialMargin;
+                    }
+                  }
+                }
                 if (Number.isFinite(total)) {
                   aggregateTotalPnl += total;
                   hasTotal = true;
+                  if (total < 0) {
+                    const absLoss = Math.abs(total);
+                    if (!worstLossAccount || absLoss > worstLossAccount.lossValue) {
+                      worstLossAccount = {
+                        lossValue: absLoss,
+                        accountName: accountObj.name ?? accountObj.account_id ?? accountObj.id ?? 'Account',
+                        agentId,
+                      };
+                    }
+                  }
                 }
                 if (Number.isFinite(eth)) {
                   aggregateEthPnl += eth;
@@ -7012,6 +7071,9 @@
                   aggregateWallet += wallet;
                   hasWallet = true;
                 }
+                if (Number.isFinite(initialMarginTotal)) {
+                  aggregateInitialMargin += initialMarginTotal;
+                }
                 flattenedAccounts.push({
                   agentId,
                   name: accountObj.name ?? accountObj.account_id ?? accountObj.id ?? 'Account',
@@ -7020,7 +7082,8 @@
                   btc,
                   equity,
                   wallet,
-                  positions: Array.isArray(accountObj.positions) ? accountObj.positions : [],
+                  positions: positionsList,
+                  initialMarginTotal,
                   updatedTs: snapshotTs,
                   sortKey: buildAccountSortKey(agentId, accountObj, summary),
                 });
@@ -7034,6 +7097,16 @@
               if (Number.isFinite(total)) {
                 aggregateTotalPnl += total;
                 hasTotal = true;
+                if (total < 0) {
+                  const absLoss = Math.abs(total);
+                  if (!worstLossAccount || absLoss > worstLossAccount.lossValue) {
+                    worstLossAccount = {
+                      lossValue: absLoss,
+                      accountName: summary.name ?? summary.label ?? agentId,
+                      agentId,
+                    };
+                  }
+                }
               }
               if (Number.isFinite(eth)) {
                 aggregateEthPnl += eth;
@@ -7051,6 +7124,7 @@
                 aggregateWallet += wallet;
                 hasWallet = true;
               }
+              // summary path lacks per-position IM, assume 0
               const accountCountFallback = Number(summary.account_count ?? 0);
               if (Number.isFinite(accountCountFallback) && accountCountFallback > 0) {
                 aggregateAccountCount += accountCountFallback;
@@ -7064,6 +7138,7 @@
                 equity,
                 wallet,
                 positions: [],
+                initialMarginTotal: 0,
                 updatedTs: snapshotTs,
                 sortKey: buildAccountSortKey(agentId, null, summary),
               });
@@ -7085,9 +7160,70 @@
           ? `Wallet ${numberFormatter.format(aggregateWallet)}`
           : 'Wallet --';
 
+        const rawRiskCapacity = hasEquity
+          ? aggregateEquity - aggregateInitialMargin
+          : (hasWallet ? aggregateWallet - aggregateInitialMargin : null);
+        const hasRiskCapacityValue = Number.isFinite(rawRiskCapacity) && rawRiskCapacity > 0;
+        const riskCapacityBaseNote = hasRiskCapacityValue
+          ? `覆盖 ${aggregateAccountCount} 个账户 · Equity-IM`
+          : '缺少风险基数数据';
+        const bufferedRiskCapacity = evaluateRiskCapacityBuffer({
+          hasValue: hasRiskCapacityValue,
+          value: hasRiskCapacityValue ? rawRiskCapacity : null,
+          timestamp: latestUpdate,
+          baseNote: riskCapacityBaseNote,
+          state: paraRiskCapacityBufferState,
+        });
+        const effectiveRiskCapacity = Number.isFinite(bufferedRiskCapacity.displayValue)
+          ? bufferedRiskCapacity.displayValue
+          : null;
+
+        if (paraTransferableTotal) {
+          paraTransferableTotal.textContent = Number.isFinite(effectiveRiskCapacity)
+            ? numberFormatter.format(effectiveRiskCapacity)
+            : '--';
+        }
+        if (paraTransferableNote) {
+          paraTransferableNote.textContent = bufferedRiskCapacity.note;
+        }
+
+        let paraRiskRatio = null;
+        if (paraRiskLevel && paraRiskDetail) {
+          const denominator = Number.isFinite(effectiveRiskCapacity) && effectiveRiskCapacity > 0
+            ? effectiveRiskCapacity
+            : null;
+          if (worstLossAccount && denominator) {
+            paraRiskRatio = worstLossAccount.lossValue / denominator;
+            paraRiskLevel.textContent = formatPercent(paraRiskRatio * 100, 2);
+            applyRiskTone(paraRiskLevel, paraRiskRatio, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
+            const accountLabelText = worstLossAccount.accountName
+              ? `${worstLossAccount.accountName} (${worstLossAccount.agentId})`
+              : worstLossAccount.agentId;
+            const lossText = numberFormatter.format(worstLossAccount.lossValue ?? 0);
+            const riskCapacityText = numberFormatter.format(denominator);
+            paraRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 基数 ${riskCapacityText} · ${getRiskThresholdSummary()}`;
+          } else if (worstLossAccount && !denominator) {
+            paraRiskLevel.textContent = '—';
+            applyRiskTone(paraRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
+            paraRiskDetail.textContent = '缺少风险基数数据，无法计算 RISK';
+          } else {
+            paraRiskLevel.textContent = '—';
+            applyRiskTone(paraRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
+            paraRiskDetail.textContent = '无亏损或缺少盈亏数据';
+          }
+        }
+
+        if (Number.isFinite(paraRiskRatio)) {
+          latestGlobalRiskRatio = Number.isFinite(latestGlobalRiskRatio)
+            ? Math.max(latestGlobalRiskRatio, paraRiskRatio)
+            : paraRiskRatio;
+        }
+
         const updatedText = formatTimestamp(latestUpdate);
         paraSummaryTime.textContent = updatedText ?? '--';
         paraSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
+
+        updateRiskMeta();
 
         if (!paraAccountGrid) {
           return;
