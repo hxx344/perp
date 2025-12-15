@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
-from typing import Any, Awaitable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Dict, Iterable, List, Optional, Sequence, Tuple, cast
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -28,11 +28,15 @@ try:  # pragma: no cover - optional dependency wiring
     from paradex_py import Paradex  # type: ignore
     from paradex_py.environment import PROD, TESTNET  # type: ignore
     from starknet_py.common import int_from_hex  # type: ignore
+    from paradex_py.account.utils import flatten_signature  # type: ignore
+    from paradex_py.message.order import build_order_message  # type: ignore
 except ImportError:  # pragma: no cover - dependency guard
     Paradex = None  # type: ignore
     PROD = None  # type: ignore
     TESTNET = None  # type: ignore
     int_from_hex = None  # type: ignore
+    flatten_signature = None  # type: ignore
+    build_order_message = None  # type: ignore
 
 getcontext().prec = 28
 
@@ -900,6 +904,39 @@ class ParadexAccountMonitor:
         )
         return self._client.api_client.submit_order(order)
 
+    def _place_twap_order(self, symbol: str, side: str, quantity: Decimal, duration_seconds: int) -> Any:
+        if flatten_signature is None or build_order_message is None:
+            raise RuntimeError("TWAP requires paradex-py signing helpers (flatten_signature/build_order_message)")
+        if quantity <= 0:
+            raise ValueError("Order quantity must be positive")
+        if not self._client or not getattr(self._client, "account", None):
+            raise RuntimeError("Paradex account client not initialized")
+        from paradex_py.common.order import Order, OrderType, OrderSide  # type: ignore
+
+        order_side = OrderSide.Buy if side.lower() == "buy" else OrderSide.Sell
+        duration = max(30, min(86400, int(round(int(duration_seconds) / 30) * 30)))
+        order = Order(
+            market=symbol,
+            order_type=OrderType.Market,
+            order_side=order_side,
+            size=quantity,
+            signature_timestamp=int(time.time() * 1000),
+        )
+        message = build_order_message(self._client.account.l2_chain_id, order)
+        signature = flatten_signature(self._client.account.starknet.sign_message(message))
+
+        payload = {
+            "algo_type": "TWAP",
+            "duration_seconds": duration,
+            "market": symbol,
+            "side": order_side.name.upper(),
+            "size": str(order.size),
+            "type": "MARKET",
+            "signature": signature,
+            "signature_timestamp": order.signature_timestamp,
+        }
+        return self._client.api_client._post_authorized(path="algo/orders", payload=payload)
+
     def _execute_transfer(self, entry: Dict[str, Any]) -> Tuple[str, str]:
         if not self._client or not getattr(self._client, "account", None):
             raise RuntimeError("Paradex account client not initialized")
@@ -1013,6 +1050,11 @@ class ParadexAccountMonitor:
         if net_size == 0:
             raise ValueError("Current position is flat; cannot determine direction for adjustment")
 
+        payload_cfg: Dict[str, Any] = cast(Dict[str, Any], entry.get("payload")) if isinstance(entry.get("payload"), dict) else {}
+        order_mode = str(payload_cfg.get("order_mode") or "").strip().lower()
+        twap_duration = payload_cfg.get("twap_duration_seconds")
+        algo_type = str(payload_cfg.get("algo_type") or "").upper()
+
         trade_quantity = magnitude
         note_suffix: Optional[str] = None
         if action == "add":
@@ -1031,7 +1073,17 @@ class ParadexAccountMonitor:
             if trade_quantity <= 0:
                 raise ValueError("Reduce request resolved to zero size")
 
-        order = self._place_market_order(symbol, side, trade_quantity)
+        if order_mode == "twap" or algo_type == "TWAP":
+            try:
+                duration_val = int(float(0 if twap_duration is None else twap_duration))
+            except (TypeError, ValueError):
+                duration_val = 900
+            order = self._place_twap_order(symbol, side, trade_quantity, duration_val)
+            note_suffix_parts = [note_suffix] if note_suffix else []
+            note_suffix_parts.append(f"TWAP {duration_val}s")
+            note_suffix = "; ".join([part for part in note_suffix_parts if part]) or None
+        else:
+            order = self._place_market_order(symbol, side, trade_quantity)
         order_id = None
         if isinstance(order, dict):
             order_id = order.get("id") or order.get("order_id")

@@ -2685,6 +2685,20 @@ class CoordinatorApp:
 
         created_by = request.remote or "dashboard"
         action = cast(AdjustmentAction, action_raw)
+        order_mode_raw = str(body.get("order_mode") or "market").strip().lower()
+        extras: Dict[str, Any] = {}
+        if order_mode_raw == "twap":
+            duration_raw = body.get("twap_duration_seconds")
+            try:
+                duration_val = int(float(0 if duration_raw is None else duration_raw))
+            except (TypeError, ValueError):
+                duration_val = 900
+            duration_val = max(30, min(86400, int(round(duration_val / 30) * 30)))
+            extras["order_mode"] = "twap"
+            extras["twap_duration_seconds"] = duration_val
+            extras["algo_type"] = "TWAP"
+        else:
+            extras["order_mode"] = "market"
         try:
             payload = await self._para_adjustments.create_request(
                 action=action,
@@ -2692,6 +2706,7 @@ class CoordinatorApp:
                 agent_ids=agent_ids,
                 symbols=symbols,
                 created_by=created_by,
+                payload=extras,
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))

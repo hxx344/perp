@@ -1990,6 +1990,18 @@
                 Size
                 <input type="number" id="para-adjust-size" min="0.01" step="0.01" value="1" />
               </label>
+              <label>
+                下单方式
+                <select id="para-order-mode">
+                  <option value="market">市价</option>
+                  <option value="twap">TWAP</option>
+                </select>
+              </label>
+              <label id="para-twap-duration-wrapper">
+                TWAP 时长 (秒)
+                <input type="number" id="para-twap-duration" min="30" max="86400" step="30" value="900" />
+                <small style="color: #8a94a6;">30-86400，30 秒步进</small>
+              </label>
               <div class="grvt-adjust-buttons">
                 <button type="button" id="para-adjust-add">加仓</button>
                 <button type="button" class="button-danger" id="para-adjust-reduce">减仓</button>
@@ -2443,6 +2455,9 @@
   const paraAdjustPanel = document.getElementById('para-adjust-panel');
   const paraAdjustSizeInput = document.getElementById('para-adjust-size');
   const paraAdjustSymbolsSelect = document.getElementById('para-adjust-symbols');
+  const paraOrderModeSelect = document.getElementById('para-order-mode');
+  const paraTwapDurationInput = document.getElementById('para-twap-duration');
+  const paraTwapDurationWrapper = document.getElementById('para-twap-duration-wrapper');
   const paraResetSymbolButton = document.getElementById('para-reset-symbol');
   const paraAdjustAddButton = document.getElementById('para-adjust-add');
   const paraAdjustReduceButton = document.getElementById('para-adjust-reduce');
@@ -6043,6 +6058,22 @@
         });
       }
 
+      function clampTwapDurationSeconds(raw) {
+        const value = Number.parseInt(raw, 10);
+        if (!Number.isFinite(value)) {
+          return null;
+        }
+        const clamped = Math.min(86400, Math.max(30, value));
+        return Math.round(clamped / 30) * 30;
+      }
+
+      function updateTwapVisibility() {
+        const mode = (paraOrderModeSelect?.value || 'market').toLowerCase();
+        if (paraTwapDurationWrapper) {
+          paraTwapDurationWrapper.style.display = mode === 'twap' ? 'block' : 'none';
+        }
+      }
+
       async function sendParaAdjustment(action) {
         if (!action || paraAdjustLocked) {
           return;
@@ -6059,6 +6090,15 @@
         const symbols = getSelectedParaSymbols();
         if (symbols) {
           payload.symbols = symbols;
+        }
+
+        const orderMode = (paraOrderModeSelect?.value || 'market').toLowerCase();
+        if (orderMode === 'twap') {
+          const duration = clampTwapDurationSeconds(paraTwapDurationInput?.value ?? 0) || 900;
+          payload.order_mode = 'twap';
+          payload.twap_duration_seconds = duration;
+        } else {
+          payload.order_mode = 'market';
         }
 
         try {
@@ -9002,6 +9042,10 @@
       }
       if (grvtAdjustReduceButton) {
         grvtAdjustReduceButton.addEventListener('click', () => sendGrvtAdjustment('reduce'));
+      }
+      if (paraOrderModeSelect) {
+        paraOrderModeSelect.addEventListener('change', updateTwapVisibility);
+        updateTwapVisibility();
       }
       if (paraAdjustAddButton) {
         paraAdjustAddButton.addEventListener('click', () => sendParaAdjustment('add'));
