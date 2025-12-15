@@ -5606,43 +5606,63 @@
       function buildRiskSettingsPayload({ enabledOverride } = {}) {
         const payload = {};
         const views = getRiskViews();
-        const source = views.length ? views[0] : {};
-        const enabled = enabledOverride !== undefined ? enabledOverride : Boolean(source.enabledInput?.checked ?? riskAlertEnabledInput?.checked);
+
+        const pickValue = (...inputs) => {
+          for (const input of inputs) {
+            const value = getInputValue(input);
+            if (value !== '' && value !== undefined && value !== null) {
+              return value;
+            }
+          }
+          return '';
+        };
+
+        const enabledFromInputs = views.some((view) => Boolean(view.enabledInput?.checked));
+        const enabled = enabledOverride !== undefined ? enabledOverride : enabledFromInputs;
         payload.enabled = enabled;
-        const thresholdPercent = Number(getInputValue(source.thresholdInput || riskThresholdInput));
+
+        const thresholdPercent = Number(pickValue(...views.map((v) => v.thresholdInput), riskThresholdInput, paraRiskThresholdInput));
         if (enabled) {
           if (!Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
             throw new Error('请设置大于 0 的触发阈值');
           }
           payload.threshold_percent = thresholdPercent;
-          const resetPercent = Number(getInputValue(source.resetInput || riskResetInput));
+          const resetPercent = Number(pickValue(...views.map((v) => v.resetInput), riskResetInput, paraRiskResetInput));
           if (Number.isFinite(resetPercent) && resetPercent > 0) {
             payload.reset_ratio_percent = resetPercent;
           }
         }
-        const cooldownMinutes = Number(getInputValue(source.cooldownInput || riskCooldownInput));
+
+        const cooldownMinutes = Number(pickValue(...views.map((v) => v.cooldownInput), riskCooldownInput, paraRiskCooldownInput));
         if (Number.isFinite(cooldownMinutes) && cooldownMinutes >= 0) {
           payload.cooldown_minutes = cooldownMinutes;
         }
-        const barkUrl = getInputValue(source.barkUrlInput || riskBarkUrlInput);
+
+        const barkUrl = pickValue(...views.map((v) => v.barkUrlInput), riskBarkUrlInput, paraRiskBarkUrlInput);
         if (barkUrl) {
           payload.bark_url = barkUrl;
         }
-        if (source.barkAppendInput || riskBarkAppendInput) {
-          payload.bark_append_payload = Boolean((source.barkAppendInput || riskBarkAppendInput).checked);
+
+        const barkAppendInput = [...views.map((v) => v.barkAppendInput), riskBarkAppendInput, paraRiskBarkAppendInput].find(Boolean);
+        if (barkAppendInput) {
+          payload.bark_append_payload = Boolean(barkAppendInput.checked);
         }
-        const barkTimeout = Number(getInputValue(source.barkTimeoutInput || riskBarkTimeoutInput));
+
+        const barkTimeout = Number(pickValue(...views.map((v) => v.barkTimeoutInput), riskBarkTimeoutInput, paraRiskBarkTimeoutInput));
         if (Number.isFinite(barkTimeout) && barkTimeout > 0) {
           payload.bark_timeout = barkTimeout;
         }
-        const titleTemplate = getInputValue(source.titleTemplateInput || riskTitleTemplateInput);
+
+        const titleTemplate = pickValue(...views.map((v) => v.titleTemplateInput), riskTitleTemplateInput, paraRiskTitleTemplateInput);
         if (titleTemplate) {
           payload.title_template = titleTemplate;
         }
-        const bodyTemplate = getInputValue(source.bodyTemplateInput || riskBodyTemplateInput);
+
+        const bodyTemplate = pickValue(...views.map((v) => v.bodyTemplateInput), riskBodyTemplateInput, paraRiskBodyTemplateInput);
         if (bodyTemplate) {
           payload.body_template = bodyTemplate;
         }
+
         return payload;
       }
 
