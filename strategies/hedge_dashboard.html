@@ -1627,6 +1627,11 @@
             <p class="grvt-risk-detail" id="para-risk-detail">Awaiting data…</p>
           </article>
           <article class="card grvt-summary-card">
+            <h3>Avg Maint</h3>
+            <div class="value" id="para-avg-maint">--</div>
+            <p class="summary-sub">(Σ maint req / Σ equity)</p>
+          </article>
+          <article class="card grvt-summary-card">
             <h3>Last Update</h3>
             <div class="value" id="para-summary-time">--</div>
             <p class="grvt-summary-updated" id="para-summary-updated">Updated —</p>
@@ -2563,6 +2568,7 @@
   const paraTransferableNote = document.getElementById('para-transfer-note');
   const paraRiskLevel = document.getElementById('para-risk-level');
   const paraRiskDetail = document.getElementById('para-risk-detail');
+  const paraAvgMaint = document.getElementById('para-avg-maint');
   const paraSummaryTime = document.getElementById('para-summary-time');
   const paraSummaryUpdated = document.getElementById('para-summary-updated');
   const paraPriceChartWrapper = document.getElementById('para-price-chart-wrapper');
@@ -7221,6 +7227,10 @@
           paraBtcPnl.textContent = '--';
           paraTotalEquity.textContent = '--';
           paraWalletBalance.textContent = 'Wallet --';
+          if (paraAvgMaint) {
+            paraAvgMaint.textContent = '--';
+            paraAvgMaint.removeAttribute('title');
+          }
           if (paraTransferableTotal) {
             paraTransferableTotal.textContent = '--';
           }
@@ -7257,6 +7267,8 @@
         let aggregateEquity = 0;
         let aggregateWallet = 0;
         let aggregateInitialMargin = 0;
+  let aggregateMaintRequirement = 0;
+  let aggregateMaintBase = 0;
         let hasTotal = false;
         let hasEth = false;
         let hasBtc = false;
@@ -7501,6 +7513,10 @@
         paraAccountGrid.innerHTML = '';
 
         if (!flattenedAccounts.length) {
+          if (paraAvgMaint) {
+            paraAvgMaint.textContent = '--';
+            paraAvgMaint.removeAttribute('title');
+          }
           if (paraAccountsEmpty) {
             paraAccountsEmpty.classList.remove('hidden');
             const sourcesLabel = entries.length === 1 ? 'source' : 'sources';
@@ -7652,6 +7668,8 @@
             if (ratioBaseValue && Number.isFinite(maintenanceRequirementTotal) && maintenanceRequirementTotal >= 0) {
               const ratio = maintenanceRequirementTotal / ratioBaseValue;
               maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
+              aggregateMaintRequirement += maintenanceRequirementTotal;
+              aggregateMaintBase += ratioBaseValue;
             } else if (ratioBaseValue) {
               maintenanceBadge.textContent = formatPercent(0, 2);
             } else {
@@ -7660,6 +7678,17 @@
           }
 
           paraAccountGrid.appendChild(card);
+        }
+
+        if (paraAvgMaint) {
+          const avgMaintPercent = computePercent(aggregateMaintRequirement, aggregateMaintBase);
+          if (Number.isFinite(avgMaintPercent)) {
+            paraAvgMaint.textContent = formatPercent(avgMaintPercent, 2);
+            paraAvgMaint.title = `Maint req ${numberFormatter.format(aggregateMaintRequirement)} / Base ${numberFormatter.format(aggregateMaintBase)}`;
+          } else {
+            paraAvgMaint.textContent = '--';
+            paraAvgMaint.removeAttribute('title');
+          }
         }
 
         updateParaTransferAgents(transferOptions);
