@@ -1454,6 +1454,121 @@
       .logout-button:hover {
         background: rgba(255, 255, 255, 0.15);
       }
+
+      /* Prevent long values from breaking layout */
+      .value,
+      .summary-sub,
+      .grvt-risk-detail,
+      .grvt-summary-updated,
+      .risk-settings-message,
+      .risk-meta,
+      .grvt-adjust-status,
+      .grvt-transfer-status,
+      .grvt-auto-actions p,
+      .grvt-auto-list li,
+      .grvt-transfer-history td,
+      .grvt-adjust-history td,
+      .risk-history-table td,
+      .agent-metrics dd,
+      .timestamp {
+        word-break: break-word;
+        overflow-wrap: anywhere;
+      }
+
+      @media (max-width: 640px) {
+        body {
+          padding: 1.25rem;
+        }
+
+        h1 {
+          font-size: 1.4rem;
+        }
+
+        .dashboard-top {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 0.75rem;
+        }
+
+        .section-header {
+          flex-direction: column;
+          align-items: flex-start;
+          margin-top: 1.75rem;
+        }
+
+        .section-header-info,
+        .section-header-controls {
+          width: 100%;
+          justify-content: space-between;
+        }
+
+        .badge-group {
+          flex-wrap: wrap;
+        }
+
+        .card,
+        .grvt-card,
+        .sim-card,
+        .vol-card,
+        .sim-section .sim-card {
+          padding: 1.1rem;
+        }
+
+        .value {
+          font-size: 1.5rem;
+        }
+
+        .summary-sub {
+          font-size: 0.85rem;
+        }
+
+        .grid,
+        .grvt-summary-grid {
+          grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        }
+
+        .grvt-account-grid,
+        .grvt-adjust-controls,
+        .grvt-transfer-grid,
+        .grvt-auto-grid,
+        .risk-settings-grid,
+        .vol-symbol-grid,
+        .sim-controls,
+        .grvt-auto-status-grid {
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        }
+
+        .section-header h2 {
+          font-size: 1.1rem;
+        }
+
+        .badge,
+        .button,
+        .logout-button {
+          font-size: 0.85rem;
+        }
+
+        .grvt-adjust-buttons,
+        .grvt-auto-actions,
+        .risk-actions-left,
+        .section-header-controls {
+          gap: 0.5rem;
+          flex-wrap: wrap;
+        }
+
+        /* Tables become horizontally scrollable on narrow screens */
+        .grvt-adjust-history table,
+        .grvt-transfer-history table,
+        .risk-history-table,
+        .vol-metric-table,
+        .strategy-table,
+        .spread-table,
+        .grvt-auto-status-grid table {
+          display: block;
+          overflow-x: auto;
+          white-space: nowrap;
+        }
+      }
     </style>
   </head>
   <body>
