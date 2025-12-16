@@ -5972,10 +5972,9 @@
         if (!baseAsset || !Number.isFinite(notionalValue) || notionalValue <= 0) {
           return null;
         }
-        const schedule = MARGIN_SCHEDULES[baseAsset];
-        if (!schedule || !schedule.length) {
-          return null;
-        }
+        const schedule = (MARGIN_SCHEDULES[baseAsset] && MARGIN_SCHEDULES[baseAsset].length)
+          ? MARGIN_SCHEDULES[baseAsset]
+          : DEFAULT_MARGIN_SCHEDULE;
         for (const tier of schedule) {
           if (notionalValue <= tier.maxNotional) {
             return tier;
@@ -5988,19 +5987,44 @@
         if (!position) {
           return null;
         }
-        const size = parseDecimal(position.net_size);
-        let price = parseDecimal(position.mark_price);
+
+        // Prefer API-provided margins if present
+        const apiInitial = parseDecimal(position.initial_margin ?? position.initialMargin);
+        const apiMaint = parseDecimal(position.maintenance_margin ?? position.maintenanceMargin);
+        let notional = parseDecimal(position.notional_value ?? position.notional);
+
+        const size = parseDecimal(position.net_size ?? position.size ?? position.quantity);
+        let price = parseDecimal(position.mark_price ?? position.markPrice);
         if (!Number.isFinite(price)) {
-          price = parseDecimal(position.entry_price);
+          price = parseDecimal(position.entry_price ?? position.entryPrice);
         }
-        if (!Number.isFinite(size) || !Number.isFinite(price)) {
-          return null;
+        if (!Number.isFinite(notional) && Number.isFinite(size) && Number.isFinite(price)) {
+          notional = Math.abs(size * price);
         }
-        const notional = Math.abs(size * price);
-        if (!Number.isFinite(notional) || notional <= 0) {
-          return null;
-        }
+
         const baseAsset = extractBaseAsset(position.symbol);
+
+        // If API margins are available, return them directly (with rates when possible)
+        if (Number.isFinite(apiInitial) || Number.isFinite(apiMaint)) {
+          const effectiveNotional = Number.isFinite(notional) ? notional : null;
+          return {
+            baseAsset,
+            notional: effectiveNotional,
+            initialMargin: Number.isFinite(apiInitial) ? apiInitial : null,
+            maintenanceMargin: Number.isFinite(apiMaint) ? apiMaint : null,
+            initialRate: Number.isFinite(apiInitial) && Number.isFinite(effectiveNotional) && effectiveNotional > 0
+              ? apiInitial / effectiveNotional
+              : null,
+            maintenanceRate: Number.isFinite(apiMaint) && Number.isFinite(effectiveNotional) && effectiveNotional > 0
+              ? apiMaint / effectiveNotional
+              : null,
+          };
+        }
+
+        if (!Number.isFinite(size) || !Number.isFinite(price) || !Number.isFinite(notional) || notional <= 0) {
+          return null;
+        }
+
         const tier = resolveMarginTier(baseAsset, notional);
         if (!tier) {
           return { baseAsset, notional };
