@@ -1635,6 +1635,7 @@
             <h3>Last Update</h3>
             <div class="value" id="para-summary-time">--</div>
             <p class="grvt-summary-updated" id="para-summary-updated">Updated —</p>
+            <div class="summary-sub" id="para-source-updates"></div>
           </article>
         </div>
         <div>
@@ -2569,6 +2570,7 @@
   const paraRiskLevel = document.getElementById('para-risk-level');
   const paraRiskDetail = document.getElementById('para-risk-detail');
   const paraAvgMaint = document.getElementById('para-avg-maint');
+  const paraSourceUpdates = document.getElementById('para-source-updates');
   const paraSummaryTime = document.getElementById('para-summary-time');
   const paraSummaryUpdated = document.getElementById('para-summary-updated');
   const paraPriceChartWrapper = document.getElementById('para-price-chart-wrapper');
@@ -7251,6 +7253,10 @@
           paraBtcPnl.textContent = '--';
           paraTotalEquity.textContent = '--';
           paraWalletBalance.textContent = 'Wallet --';
+          if (paraSourceUpdates) {
+            paraSourceUpdates.textContent = '--';
+            paraSourceUpdates.innerHTML = '';
+          }
           if (paraAvgMaint) {
             paraAvgMaint.textContent = '--';
             paraAvgMaint.removeAttribute('title');
@@ -7528,6 +7534,38 @@
         paraSummaryTime.textContent = updatedText ?? '--';
         paraSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
 
+        if (paraSourceUpdates) {
+          paraSourceUpdates.innerHTML = '';
+          for (const [agentId, snapshot] of entries) {
+            const summary = snapshot?.summary && typeof snapshot.summary === 'object' ? snapshot.summary : {};
+            const agentLabel = summary.label || summary.account_label || summary.name || agentId;
+            const ts = Number(summary.updated_at ?? snapshot?.updated_at);
+            const span = document.createElement('span');
+            span.classList.add('badge');
+            if (Number.isFinite(ts)) {
+              const ageSec = Math.max(0, nowSec - ts);
+              const freshnessText = `${formatDuration(ageSec)} ago`;
+              if (ageSec >= PARA_STALE_CRIT_SEC) {
+                span.classList.add('badge-danger');
+                span.textContent = `${agentLabel}: stale · ${freshnessText}`;
+              } else if (ageSec >= PARA_STALE_WARN_SEC) {
+                span.classList.add('badge-warn');
+                span.textContent = `${agentLabel}: delayed · ${freshnessText}`;
+              } else {
+                span.classList.add('badge-info');
+                span.textContent = `${agentLabel}: fresh · ${freshnessText}`;
+              }
+            } else {
+              span.classList.add('badge-muted');
+              span.textContent = `${agentLabel}: time N/A`;
+            }
+            paraSourceUpdates.appendChild(span);
+          }
+          if (!paraSourceUpdates.childElementCount) {
+            paraSourceUpdates.textContent = '--';
+          }
+        }
+
         updateRiskMeta();
 
         if (!paraAccountGrid) {
@@ -7540,6 +7578,10 @@
           if (paraAvgMaint) {
             paraAvgMaint.textContent = '--';
             paraAvgMaint.removeAttribute('title');
+          }
+          if (paraSourceUpdates) {
+            paraSourceUpdates.textContent = '--';
+            paraSourceUpdates.innerHTML = '';
           }
           if (paraAccountsEmpty) {
             paraAccountsEmpty.classList.remove('hidden');
