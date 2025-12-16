@@ -2768,6 +2768,9 @@
   let simulationBusy = false;
   let simOptimizeBusy = false;
 
+  const PARA_STALE_WARN_SEC = 10;
+  const PARA_STALE_CRIT_SEC = 30;
+
       const numberFormatter = new Intl.NumberFormat(undefined, {
         minimumFractionDigits: 2,
         maximumFractionDigits: 6,
@@ -7087,7 +7090,8 @@
           }
         }
 
-        const entries = Object.entries(mergedParaMap);
+  const entries = Object.entries(mergedParaMap);
+  const nowSec = Date.now() / 1000;
 
         if (!entries.length) {
           paraCard.classList.add('hidden');
@@ -7418,6 +7422,20 @@
           const walletText = Number.isFinite(entry.wallet) ? numberFormatter.format(entry.wallet) : '--';
           const availableText = Number.isFinite(entry.available) ? numberFormatter.format(entry.available) : '--';
           const updatedText = formatTimestamp(entry.updatedTs) ?? '—';
+          const ageSec = Number.isFinite(entry.updatedTs) ? Math.max(0, nowSec - entry.updatedTs) : null;
+          let freshnessBadge = '';
+          if (Number.isFinite(ageSec)) {
+            const freshnessText = `${formatDuration(ageSec)} ago`;
+            if (ageSec >= PARA_STALE_CRIT_SEC) {
+              freshnessBadge = `<span class="badge badge-danger">Stale · ${escapeHtml(freshnessText)}</span>`;
+            } else if (ageSec >= PARA_STALE_WARN_SEC) {
+              freshnessBadge = `<span class="badge badge-warn">Delayed · ${escapeHtml(freshnessText)}</span>`;
+            } else {
+              freshnessBadge = `<span class="badge badge-info">Fresh · ${escapeHtml(freshnessText)}</span>`;
+            }
+          } else {
+            freshnessBadge = '<span class="badge badge-muted">Time N/A</span>';
+          }
 
           card.innerHTML = `
             <header>
@@ -7425,6 +7443,7 @@
                 <span class="grvt-account-name">${escapeHtml(entry.name ?? 'Account')}</span>
                 <span class="badge badge-info grvt-source-badge">${escapeHtml(entry.agentId ?? 'source')}</span>
               </div>
+              <div class="grvt-account-badges">${freshnessBadge}</div>
               <span class="grvt-account-updated">${escapeHtml(updatedText)}</span>
             </header>
             <dl class="grvt-account-metrics">
