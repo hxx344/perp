@@ -1467,6 +1467,325 @@
       </form>
     </div>
 
+    <section class="grvt-section">
+      <div class="section-header">
+        <div class="section-header-info">
+          <h2>PARA Multi-Account Monitor</h2>
+          <div class="badge-group">
+            <span class="badge badge-muted" id="para-account-count">0 accounts</span>
+          </div>
+        </div>
+        <div class="section-header-controls"></div>
+      </div>
+      <p class="empty" id="para-empty">Waiting for PARA monitor…</p>
+      <div class="grvt-card hidden" id="para-card">
+        <div class="grvt-summary-grid">
+          <article class="card grvt-summary-card">
+            <h3>Total PnL</h3>
+            <div class="value" id="para-total-pnl">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>ETH PnL</h3>
+            <div class="value" id="para-eth-pnl">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>BTC PnL</h3>
+            <div class="value" id="para-btc-pnl">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Net Equity</h3>
+            <div class="value" id="para-total-equity">--</div>
+            <p class="summary-sub" id="para-wallet-balance">Wallet --</p>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>风险基数</h3>
+            <div class="value" id="para-transfer-total">--</div>
+            <p class="summary-sub" id="para-transfer-note">Σ Equity - Σ 初始保证金</p>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Risk Level</h3>
+            <div class="value risk-pill risk-pill-summary" id="para-risk-level">--</div>
+            <p class="grvt-risk-detail" id="para-risk-detail">Awaiting data…</p>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Last Update</h3>
+            <div class="value" id="para-summary-time">--</div>
+            <p class="grvt-summary-updated" id="para-summary-updated">Updated —</p>
+          </article>
+        </div>
+        <div>
+          <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">Per Account Net PnL</h3>
+          <div class="grvt-account-grid" id="para-account-grid"></div>
+          <p class="empty hidden" id="para-accounts-empty">No account data yet…</p>
+        </div>
+          <div class="grvt-adjust-panel" id="para-adjust-panel">
+            <div class="grvt-adjust-header">
+              <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">PARA Position Adjustments</h3>
+              <p class="summary-sub" style="margin: 0;">广播加/减仓指令到 PARA VPS</p>
+            </div>
+            <div class="grvt-adjust-controls">
+              <label for="para-adjust-symbols" class="grvt-adjust-symbols">
+                <div class="grvt-symbol-label">
+                  <span>目标币种</span>
+                  <small>选择需要调整的币种；未选中时广播所有</small>
+                </div>
+                <div class="grvt-symbol-input">
+                  <select id="para-adjust-symbols"></select>
+                  <button type="button" class="grvt-symbol-reset" id="para-reset-symbol">清空</button>
+                </div>
+              </label>
+              <label>
+                Size
+                <input type="number" id="para-adjust-size" min="0.01" step="0.01" value="1" />
+              </label>
+              <label>
+                下单方式
+                <select id="para-order-mode">
+                  <option value="market">市价</option>
+                  <option value="twap">TWAP</option>
+                </select>
+              </label>
+              <label id="para-twap-duration-wrapper">
+                TWAP 时长 (秒)
+                <input type="number" id="para-twap-duration" min="30" max="86400" step="30" value="900" />
+                <small style="color: #8a94a6;">30-86400，30 秒步进</small>
+              </label>
+              <div class="grvt-adjust-buttons">
+                <button type="button" id="para-adjust-add">加仓</button>
+                <button type="button" class="button-danger" id="para-adjust-reduce">减仓</button>
+              </div>
+              <p class="grvt-adjust-status" id="para-adjust-status">等待指令…</p>
+            </div>
+            <div class="grvt-adjust-history">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th><th>动作</th><th>数量</th><th>币种</th><th>状态</th><th>节点</th>
+                  </tr>
+                </thead>
+                <tbody id="para-adjust-history"><tr><td colspan="6">暂无记录</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="grvt-transfer-panel hidden" id="para-transfer-panel">
+            <div class="grvt-adjust-header">
+              <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">PARA 账户间资金划转</h3>
+              <p class="summary-sub" style="margin: 0;">默认方向：来源账户 → 目标 L2 地址</p>
+            </div>
+            <div class="grvt-transfer-grid">
+              <label>
+                来源账户
+                <select id="para-transfer-source"></select>
+              </label>
+              <label>
+                目标账户
+                <select id="para-transfer-target"></select>
+              </label>
+              <label>
+                目标 L2 地址
+                <input type="text" id="para-transfer-target-address" placeholder="0x..." />
+              </label>
+              <label>
+                数量
+                <input type="number" id="para-transfer-amount" min="0" step="0.01" value="0" />
+              </label>
+              <label>
+                币种
+                <input type="text" id="para-transfer-currency" value="USDC" />
+              </label>
+              <label>
+                Transfer 类型
+                <input type="text" id="para-transfer-type" value="spot" />
+              </label>
+              <label>
+                备注（可选）
+                <textarea id="para-transfer-reason" placeholder="记录用途或审批信息"></textarea>
+              </label>
+            </div>
+            <div class="grvt-transfer-actions">
+              <button type="button" id="para-transfer-submit">提交互转</button>
+              <p class="grvt-transfer-status" id="para-transfer-status">等待指令…</p>
+            </div>
+            <div class="grvt-transfer-history">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>来源 / 目标</th>
+                    <th>方向</th>
+                    <th>金额</th>
+                    <th>路径</th>
+                    <th>状态 / 备注</th>
+                  </tr>
+                </thead>
+                <tbody id="para-transfer-history"></tbody>
+              </table>
+            </div>
+          </div>
+            <div class="grvt-risk-panel" id="para-risk-panel">
+              <div class="grvt-adjust-header">
+                <div>
+                  <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Bark 告警（PARA）</h3>
+                  <p class="summary-sub" style="margin: 0;">针对 PARA 账户权益风险的 Bark 推送配置</p>
+                </div>
+                <div class="risk-status-pill" id="para-risk-settings-status">加载中…</div>
+              </div>
+              <div class="risk-settings-grid">
+                <section class="risk-settings-card">
+                  <div class="risk-toggle">
+                    <input type="checkbox" id="para-risk-alert-enabled" />
+                    <span>启用风险告警</span>
+                  </div>
+                  <div class="risk-slider">
+                    <label class="risk-slider-label" for="para-risk-threshold-slider">
+                      <span id="para-risk-threshold-label">阈值 --%</span>
+                    </label>
+                    <input type="range" id="para-risk-threshold-slider" min="5" max="90" step="0.5" value="30" />
+                    <div class="risk-slider-scale">
+                      <span>5%</span>
+                      <span>25%</span>
+                      <span>50%</span>
+                      <span>90%</span>
+                    </div>
+                  </div>
+                  <div class="risk-inline-inputs">
+                    <label>
+                      触发阈值 (%)
+                      <input type="number" id="para-risk-threshold-input" min="1" max="90" step="0.5" />
+                    </label>
+                    <label>
+                      重置阈值 (%)
+                      <input type="number" id="para-risk-reset-input" min="1" max="90" step="0.5" />
+                    </label>
+                    <label>
+                      冷却 (分钟)
+                      <input type="number" id="para-risk-cooldown-input" min="0" max="360" step="1" />
+                    </label>
+                  </div>
+                  <p class="risk-meta" id="para-risk-ratio-meta">等待风险数据…</p>
+                </section>
+                <section class="risk-settings-card">
+                  <div class="risk-bark-grid">
+                    <label>
+                      Bark URL
+                      <input type="text" id="para-risk-bark-url" placeholder="https://api.day.app/xxxxx/%7Btitle%7D/%7Bbody%7D" />
+                    </label>
+                    <label class="risk-toggle">
+                      <input type="checkbox" id="para-risk-bark-append" checked />
+                      <span>缺少 {title}/{body} 时自动附加</span>
+                    </label>
+                    <label>
+                      请求超时 (秒)
+                      <input type="number" id="para-risk-bark-timeout" min="1" max="60" step="0.5" />
+                    </label>
+                    <label>
+                      标题模板
+                      <textarea id="para-risk-title-template" rows="2"></textarea>
+                    </label>
+                    <label>
+                      正文模板
+                      <textarea id="para-risk-body-template" rows="3"></textarea>
+                    </label>
+                  </div>
+                </section>
+              </div>
+              <div class="risk-settings-actions">
+                <div class="risk-actions-left">
+                  <button type="button" id="para-risk-settings-save">保存配置</button>
+                  <button type="button" class="button-success" id="para-risk-settings-test">测试 Bark</button>
+                  <button type="button" class="button-ghost" id="para-risk-settings-refresh">重新读取</button>
+                  <button type="button" class="button-danger" id="para-risk-settings-disable">关闭告警</button>
+                </div>
+                <p class="risk-settings-message" id="para-risk-settings-message">未加载</p>
+                <p class="risk-settings-message" id="para-risk-test-message"></p>
+              </div>
+            </div>
+          <div class="grvt-auto-panel" id="para-auto-panel">
+            <div class="grvt-adjust-header">
+              <div>
+                <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">PARA 自动平衡</h3>
+                <p class="summary-sub" style="margin: 0;">根据阈值在两个 PARA 账户间自动划转</p>
+              </div>
+              <span class="grvt-auto-pair" id="para-auto-pair">未配置</span>
+            </div>
+            <div class="grvt-auto-grid">
+              <label class="grvt-auto-toggle">
+                <span>启用自动平衡</span>
+                <small>开启后根据阈值自动在两个账户之间划转</small>
+                <input type="checkbox" id="para-auto-enabled" />
+              </label>
+              <label>
+                账户 A
+                <select id="para-auto-agent-a"></select>
+              </label>
+              <label>
+                账户 B
+                <select id="para-auto-agent-b"></select>
+              </label>
+              <label>
+                阈值（%）
+                <input type="number" id="para-auto-threshold" min="0" step="0.1" placeholder="15" />
+              </label>
+              <label>
+                最小划转
+                <input type="number" id="para-auto-min-transfer" min="0" step="0.01" placeholder="1000" />
+              </label>
+              <label>
+                最大划转（可选）
+                <input type="number" id="para-auto-max-transfer" min="0" step="0.01" placeholder="5000" />
+              </label>
+              <label>
+                币种
+                <input type="text" id="para-auto-currency" value="USDC" />
+              </label>
+              <label>
+                冷却（秒）
+                <input type="number" id="para-auto-cooldown" min="0" step="1" placeholder="900" />
+              </label>
+              <label>
+                使用可划转余额
+                <div class="grvt-auto-checkbox">
+                  <input type="checkbox" id="para-auto-use-available" />
+                  <span>prefer transferable balance</span>
+                </div>
+                <small>优先比较 available_equity，波动大时更稳健</small>
+              </label>
+            </div>
+            <div class="grvt-auto-actions">
+              <button type="button" id="para-auto-save">保存配置</button>
+              <button type="button" class="button-danger" id="para-auto-disable">停用</button>
+              <button type="button" class="button-ghost" id="para-auto-refresh">刷新状态</button>
+              <p id="para-auto-status">等待配置…</p>
+            </div>
+            <div class="grvt-auto-status-grid">
+              <div>
+                <h4>实时测量</h4>
+                <ul class="grvt-auto-list" id="para-auto-measurement">
+                  <li>尚未收到差值数据</li>
+                </ul>
+              </div>
+              <div>
+                <h4>最近执行</h4>
+                <ul class="grvt-auto-list" id="para-auto-last-action">
+                  <li>无执行记录</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+          <div class="grvt-chart-card hidden" id="para-price-chart-wrapper">
+            <div class="grvt-chart-header">
+              <h3>BTC / ETH Δ%</h3>
+              <span class="summary-sub" id="para-price-chart-note">等待数据…</span>
+            </div>
+            <canvas id="para-price-chart"></canvas>
+            <div class="chart-legend" id="para-price-chart-legend">
+              <span><span class="legend-dot legend-btc"></span>BTC (相对首笔)</span>
+              <span><span class="legend-dot legend-eth"></span>ETH (相对首笔)</span>
+            </div>
+          </div>
+      </div>
+    </section>
+
     <section class="vol-section">
       <div class="section-header">
         <div class="section-header-info">
@@ -1916,325 +2235,6 @@
           <div class="grvt-account-grid" id="grvt-account-grid"></div>
           <p class="empty hidden" id="grvt-accounts-empty">No account data yet…</p>
         </div>
-      </div>
-    </section>
-
-    <section class="grvt-section">
-      <div class="section-header">
-        <div class="section-header-info">
-          <h2>PARA Multi-Account Monitor</h2>
-          <div class="badge-group">
-            <span class="badge badge-muted" id="para-account-count">0 accounts</span>
-          </div>
-        </div>
-        <div class="section-header-controls"></div>
-      </div>
-      <p class="empty" id="para-empty">Waiting for PARA monitor…</p>
-      <div class="grvt-card hidden" id="para-card">
-        <div class="grvt-summary-grid">
-          <article class="card grvt-summary-card">
-            <h3>Total PnL</h3>
-            <div class="value" id="para-total-pnl">--</div>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>ETH PnL</h3>
-            <div class="value" id="para-eth-pnl">--</div>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>BTC PnL</h3>
-            <div class="value" id="para-btc-pnl">--</div>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>Net Equity</h3>
-            <div class="value" id="para-total-equity">--</div>
-            <p class="summary-sub" id="para-wallet-balance">Wallet --</p>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>风险基数</h3>
-            <div class="value" id="para-transfer-total">--</div>
-            <p class="summary-sub" id="para-transfer-note">Σ Equity - Σ 初始保证金</p>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>Risk Level</h3>
-            <div class="value risk-pill risk-pill-summary" id="para-risk-level">--</div>
-            <p class="grvt-risk-detail" id="para-risk-detail">Awaiting data…</p>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>Last Update</h3>
-            <div class="value" id="para-summary-time">--</div>
-            <p class="grvt-summary-updated" id="para-summary-updated">Updated —</p>
-          </article>
-        </div>
-        <div>
-          <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">Per Account Net PnL</h3>
-          <div class="grvt-account-grid" id="para-account-grid"></div>
-          <p class="empty hidden" id="para-accounts-empty">No account data yet…</p>
-        </div>
-          <div class="grvt-adjust-panel" id="para-adjust-panel">
-            <div class="grvt-adjust-header">
-              <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">PARA Position Adjustments</h3>
-              <p class="summary-sub" style="margin: 0;">广播加/减仓指令到 PARA VPS</p>
-            </div>
-            <div class="grvt-adjust-controls">
-              <label for="para-adjust-symbols" class="grvt-adjust-symbols">
-                <div class="grvt-symbol-label">
-                  <span>目标币种</span>
-                  <small>选择需要调整的币种；未选中时广播所有</small>
-                </div>
-                <div class="grvt-symbol-input">
-                  <select id="para-adjust-symbols"></select>
-                  <button type="button" class="grvt-symbol-reset" id="para-reset-symbol">清空</button>
-                </div>
-              </label>
-              <label>
-                Size
-                <input type="number" id="para-adjust-size" min="0.01" step="0.01" value="1" />
-              </label>
-              <label>
-                下单方式
-                <select id="para-order-mode">
-                  <option value="market">市价</option>
-                  <option value="twap">TWAP</option>
-                </select>
-              </label>
-              <label id="para-twap-duration-wrapper">
-                TWAP 时长 (秒)
-                <input type="number" id="para-twap-duration" min="30" max="86400" step="30" value="900" />
-                <small style="color: #8a94a6;">30-86400，30 秒步进</small>
-              </label>
-              <div class="grvt-adjust-buttons">
-                <button type="button" id="para-adjust-add">加仓</button>
-                <button type="button" class="button-danger" id="para-adjust-reduce">减仓</button>
-              </div>
-              <p class="grvt-adjust-status" id="para-adjust-status">等待指令…</p>
-            </div>
-            <div class="grvt-adjust-history">
-              <table>
-                <thead>
-                  <tr>
-                    <th>时间</th><th>动作</th><th>数量</th><th>币种</th><th>状态</th><th>节点</th>
-                  </tr>
-                </thead>
-                <tbody id="para-adjust-history"><tr><td colspan="6">暂无记录</td></tr></tbody>
-              </table>
-            </div>
-          </div>
-          <div class="grvt-transfer-panel hidden" id="para-transfer-panel">
-            <div class="grvt-adjust-header">
-              <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">PARA 账户间资金划转</h3>
-              <p class="summary-sub" style="margin: 0;">默认方向：来源账户 → 目标 L2 地址</p>
-            </div>
-            <div class="grvt-transfer-grid">
-              <label>
-                来源账户
-                <select id="para-transfer-source"></select>
-              </label>
-              <label>
-                目标账户
-                <select id="para-transfer-target"></select>
-              </label>
-              <label>
-                目标 L2 地址
-                <input type="text" id="para-transfer-target-address" placeholder="0x..." />
-              </label>
-              <label>
-                数量
-                <input type="number" id="para-transfer-amount" min="0" step="0.01" value="0" />
-              </label>
-              <label>
-                币种
-                <input type="text" id="para-transfer-currency" value="USDC" />
-              </label>
-              <label>
-                Transfer 类型
-                <input type="text" id="para-transfer-type" value="spot" />
-              </label>
-              <label>
-                备注（可选）
-                <textarea id="para-transfer-reason" placeholder="记录用途或审批信息"></textarea>
-              </label>
-            </div>
-            <div class="grvt-transfer-actions">
-              <button type="button" id="para-transfer-submit">提交互转</button>
-              <p class="grvt-transfer-status" id="para-transfer-status">等待指令…</p>
-            </div>
-            <div class="grvt-transfer-history">
-              <table>
-                <thead>
-                  <tr>
-                    <th>时间</th>
-                    <th>来源 / 目标</th>
-                    <th>方向</th>
-                    <th>金额</th>
-                    <th>路径</th>
-                    <th>状态 / 备注</th>
-                  </tr>
-                </thead>
-                <tbody id="para-transfer-history"></tbody>
-              </table>
-            </div>
-          </div>
-            <div class="grvt-risk-panel" id="para-risk-panel">
-              <div class="grvt-adjust-header">
-                <div>
-                  <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Bark 告警（PARA）</h3>
-                  <p class="summary-sub" style="margin: 0;">针对 PARA 账户权益风险的 Bark 推送配置</p>
-                </div>
-                <div class="risk-status-pill" id="para-risk-settings-status">加载中…</div>
-              </div>
-              <div class="risk-settings-grid">
-                <section class="risk-settings-card">
-                  <div class="risk-toggle">
-                    <input type="checkbox" id="para-risk-alert-enabled" />
-                    <span>启用风险告警</span>
-                  </div>
-                  <div class="risk-slider">
-                    <label class="risk-slider-label" for="para-risk-threshold-slider">
-                      <span id="para-risk-threshold-label">阈值 --%</span>
-                    </label>
-                    <input type="range" id="para-risk-threshold-slider" min="5" max="90" step="0.5" value="30" />
-                    <div class="risk-slider-scale">
-                      <span>5%</span>
-                      <span>25%</span>
-                      <span>50%</span>
-                      <span>90%</span>
-                    </div>
-                  </div>
-                  <div class="risk-inline-inputs">
-                    <label>
-                      触发阈值 (%)
-                      <input type="number" id="para-risk-threshold-input" min="1" max="90" step="0.5" />
-                    </label>
-                    <label>
-                      重置阈值 (%)
-                      <input type="number" id="para-risk-reset-input" min="1" max="90" step="0.5" />
-                    </label>
-                    <label>
-                      冷却 (分钟)
-                      <input type="number" id="para-risk-cooldown-input" min="0" max="360" step="1" />
-                    </label>
-                  </div>
-                  <p class="risk-meta" id="para-risk-ratio-meta">等待风险数据…</p>
-                </section>
-                <section class="risk-settings-card">
-                  <div class="risk-bark-grid">
-                    <label>
-                      Bark URL
-                      <input type="text" id="para-risk-bark-url" placeholder="https://api.day.app/xxxxx/%7Btitle%7D/%7Bbody%7D" />
-                    </label>
-                    <label class="risk-toggle">
-                      <input type="checkbox" id="para-risk-bark-append" checked />
-                      <span>缺少 {title}/{body} 时自动附加</span>
-                    </label>
-                    <label>
-                      请求超时 (秒)
-                      <input type="number" id="para-risk-bark-timeout" min="1" max="60" step="0.5" />
-                    </label>
-                    <label>
-                      标题模板
-                      <textarea id="para-risk-title-template" rows="2"></textarea>
-                    </label>
-                    <label>
-                      正文模板
-                      <textarea id="para-risk-body-template" rows="3"></textarea>
-                    </label>
-                  </div>
-                </section>
-              </div>
-              <div class="risk-settings-actions">
-                <div class="risk-actions-left">
-                  <button type="button" id="para-risk-settings-save">保存配置</button>
-                  <button type="button" class="button-success" id="para-risk-settings-test">测试 Bark</button>
-                  <button type="button" class="button-ghost" id="para-risk-settings-refresh">重新读取</button>
-                  <button type="button" class="button-danger" id="para-risk-settings-disable">关闭告警</button>
-                </div>
-                <p class="risk-settings-message" id="para-risk-settings-message">未加载</p>
-                <p class="risk-settings-message" id="para-risk-test-message"></p>
-              </div>
-            </div>
-          <div class="grvt-auto-panel" id="para-auto-panel">
-            <div class="grvt-adjust-header">
-              <div>
-                <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">PARA 自动平衡</h3>
-                <p class="summary-sub" style="margin: 0;">根据阈值在两个 PARA 账户间自动划转</p>
-              </div>
-              <span class="grvt-auto-pair" id="para-auto-pair">未配置</span>
-            </div>
-            <div class="grvt-auto-grid">
-              <label class="grvt-auto-toggle">
-                <span>启用自动平衡</span>
-                <small>开启后根据阈值自动在两个账户之间划转</small>
-                <input type="checkbox" id="para-auto-enabled" />
-              </label>
-              <label>
-                账户 A
-                <select id="para-auto-agent-a"></select>
-              </label>
-              <label>
-                账户 B
-                <select id="para-auto-agent-b"></select>
-              </label>
-              <label>
-                阈值（%）
-                <input type="number" id="para-auto-threshold" min="0" step="0.1" placeholder="15" />
-              </label>
-              <label>
-                最小划转
-                <input type="number" id="para-auto-min-transfer" min="0" step="0.01" placeholder="1000" />
-              </label>
-              <label>
-                最大划转（可选）
-                <input type="number" id="para-auto-max-transfer" min="0" step="0.01" placeholder="5000" />
-              </label>
-              <label>
-                币种
-                <input type="text" id="para-auto-currency" value="USDC" />
-              </label>
-              <label>
-                冷却（秒）
-                <input type="number" id="para-auto-cooldown" min="0" step="1" placeholder="900" />
-              </label>
-              <label>
-                使用可划转余额
-                <div class="grvt-auto-checkbox">
-                  <input type="checkbox" id="para-auto-use-available" />
-                  <span>prefer transferable balance</span>
-                </div>
-                <small>优先比较 available_equity，波动大时更稳健</small>
-              </label>
-            </div>
-            <div class="grvt-auto-actions">
-              <button type="button" id="para-auto-save">保存配置</button>
-              <button type="button" class="button-danger" id="para-auto-disable">停用</button>
-              <button type="button" class="button-ghost" id="para-auto-refresh">刷新状态</button>
-              <p id="para-auto-status">等待配置…</p>
-            </div>
-            <div class="grvt-auto-status-grid">
-              <div>
-                <h4>实时测量</h4>
-                <ul class="grvt-auto-list" id="para-auto-measurement">
-                  <li>尚未收到差值数据</li>
-                </ul>
-              </div>
-              <div>
-                <h4>最近执行</h4>
-                <ul class="grvt-auto-list" id="para-auto-last-action">
-                  <li>无执行记录</li>
-                </ul>
-              </div>
-            </div>
-          </div>
-          <div class="grvt-chart-card hidden" id="para-price-chart-wrapper">
-            <div class="grvt-chart-header">
-              <h3>BTC / ETH Δ%</h3>
-              <span class="summary-sub" id="para-price-chart-note">等待数据…</span>
-            </div>
-            <canvas id="para-price-chart"></canvas>
-            <div class="chart-legend" id="para-price-chart-legend">
-              <span><span class="legend-dot legend-btc"></span>BTC (相对首笔)</span>
-              <span><span class="legend-dot legend-eth"></span>ETH (相对首笔)</span>
-            </div>
-          </div>
       </div>
     </section>
 
