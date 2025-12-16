@@ -1084,14 +1084,17 @@
       }
 
       #para-source-updates {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+        display: flex;
+        flex-wrap: wrap;
         gap: 0.35rem 0.5rem;
-        align-items: start;
+        align-items: flex-start;
       }
 
       #para-source-updates .badge {
-        width: max-content;
+        flex: 1 1 calc(50% - 0.5rem);
+        max-width: calc(50% - 0.5rem);
+        white-space: normal;
+        overflow-wrap: anywhere;
       }
 
       .strategy-table-wrapper {
