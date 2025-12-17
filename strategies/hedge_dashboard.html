@@ -2884,6 +2884,18 @@
   let riskSettingsSnapshot = null;
   let riskTestBusy = false;
   let latestGlobalRiskRatio = null;
+  let paraLatestRiskRatio = null;
+  let grvtLatestRiskRatio = null;
+
+  function recomputeGlobalRiskRatio() {
+    if (Number.isFinite(paraLatestRiskRatio)) {
+      latestGlobalRiskRatio = paraLatestRiskRatio;
+    } else if (Number.isFinite(grvtLatestRiskRatio)) {
+      latestGlobalRiskRatio = grvtLatestRiskRatio;
+    } else {
+      latestGlobalRiskRatio = null;
+    }
+  }
   let riskHistoryBusy = false;
   let riskHistoryEntries = [];
   let lastRiskHistoryFetch = 0;
@@ -7259,6 +7271,8 @@
   const nowSec = Date.now() / 1000;
 
         if (!entries.length) {
+          paraLatestRiskRatio = null;
+          recomputeGlobalRiskRatio();
           paraCard.classList.add('hidden');
           paraEmpty.classList.remove('hidden');
           paraAccountCount.textContent = '0 accounts';
@@ -7513,6 +7527,7 @@
         }
 
         let paraRiskRatio = null;
+        paraLatestRiskRatio = null;
         if (paraRiskLevel && paraRiskDetail) {
           const denominator = Number.isFinite(effectiveRiskCapacity) && effectiveRiskCapacity > 0
             ? effectiveRiskCapacity
@@ -7527,6 +7542,7 @@
             const lossText = numberFormatter.format(worstLossAccount.lossValue ?? 0);
             const riskCapacityText = numberFormatter.format(denominator);
             paraRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 基数 ${riskCapacityText} · ${getRiskThresholdSummary()}`;
+            paraLatestRiskRatio = paraRiskRatio;
           } else if (worstLossAccount && !denominator) {
             paraRiskLevel.textContent = '—';
             applyRiskTone(paraRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
@@ -7538,11 +7554,7 @@
           }
         }
 
-        if (Number.isFinite(paraRiskRatio)) {
-          latestGlobalRiskRatio = Number.isFinite(latestGlobalRiskRatio)
-            ? Math.max(latestGlobalRiskRatio, paraRiskRatio)
-            : paraRiskRatio;
-        }
+        recomputeGlobalRiskRatio();
 
         const updatedText = formatTimestamp(latestUpdate);
         paraSummaryTime.textContent = updatedText ?? '--';
@@ -7582,6 +7594,7 @@
 
         updateRiskMeta();
 
+        recomputeGlobalRiskRatio();
         if (!paraAccountGrid) {
           return;
         }
@@ -7773,6 +7786,7 @@
 
         updateParaTransferAgents(transferOptions);
         updateParaSymbolOptions(Array.from(symbolCandidates));
+        recomputeGlobalRiskRatio();
         } catch (err) {
           console.warn('renderPara error', err);
           if (paraEmpty) {
@@ -7803,6 +7817,8 @@
         }
 
         if (!entries.length) {
+          grvtLatestRiskRatio = null;
+          recomputeGlobalRiskRatio();
           grvtCard.classList.add('hidden');
           grvtEmpty.classList.remove('hidden');
           grvtAccountCount.textContent = '0 accounts';
@@ -8118,13 +8134,14 @@
           grvtTransferableNote.textContent = bufferedRiskCapacity.note;
         }
 
+        grvtLatestRiskRatio = null;
         if (grvtRiskLevel && grvtRiskDetail) {
           const denominator = Number.isFinite(effectiveRiskCapacity) && effectiveRiskCapacity > 0
             ? effectiveRiskCapacity
             : null;
           if (worstLossAccount && denominator) {
             const riskRatio = worstLossAccount.lossValue / denominator;
-            latestGlobalRiskRatio = riskRatio;
+            grvtLatestRiskRatio = riskRatio;
             grvtRiskLevel.textContent = formatPercent(riskRatio * 100, 2);
             applyRiskTone(grvtRiskLevel, riskRatio, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
             const accountLabelText = worstLossAccount.accountName
@@ -8134,16 +8151,15 @@
             const riskCapacityText = numberFormatter.format(denominator);
             grvtRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 基数 ${riskCapacityText} · ${getRiskThresholdSummary()}`;
           } else if (worstLossAccount && !denominator) {
-            latestGlobalRiskRatio = null;
             grvtRiskLevel.textContent = '—';
             applyRiskTone(grvtRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
             grvtRiskDetail.textContent = '缺少风险基数数据，无法计算 RISK';
           } else {
-            latestGlobalRiskRatio = null;
             grvtRiskLevel.textContent = '—';
             applyRiskTone(grvtRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
             grvtRiskDetail.textContent = '无亏损或缺少盈亏数据';
           }
+          recomputeGlobalRiskRatio();
           updateRiskMeta();
         }
 
