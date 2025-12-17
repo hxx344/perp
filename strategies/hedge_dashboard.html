@@ -1809,10 +1809,6 @@
                       Bark URL
                       <input type="text" id="para-risk-bark-url" placeholder="https://api.day.app/xxxxx/%7Btitle%7D/%7Bbody%7D" />
                     </label>
-                    <label class="risk-toggle">
-                      <input type="checkbox" id="para-risk-bark-append" checked />
-                      <span>缺少 {title}/{body} 时自动附加</span>
-                    </label>
                     <label>
                       请求超时 (秒)
                       <input type="number" id="para-risk-bark-timeout" min="1" max="60" step="0.5" />
@@ -2630,7 +2626,7 @@
   const paraRiskThresholdLabel = document.getElementById('para-risk-threshold-label');
   const paraRiskMeta = document.getElementById('para-risk-ratio-meta');
   const paraRiskBarkUrlInput = document.getElementById('para-risk-bark-url');
-  const paraRiskBarkAppendInput = document.getElementById('para-risk-bark-append');
+  const paraRiskBarkAppendInput = null;
   const paraRiskBarkTimeoutInput = document.getElementById('para-risk-bark-timeout');
   const paraRiskTitleTemplateInput = document.getElementById('para-risk-title-template');
   const paraRiskBodyTemplateInput = document.getElementById('para-risk-body-template');
@@ -5930,7 +5926,7 @@
           return candidate;
         };
 
-        const barkAppendValue = pickCheckbox(...views.map((v) => v.barkAppendInput), riskBarkAppendInput, paraRiskBarkAppendInput);
+        const barkAppendValue = pickCheckbox(...views.map((v) => v.barkAppendInput), riskBarkAppendInput);
         if (barkAppendValue !== null) {
           payload.bark_append_payload = barkAppendValue;
         }
@@ -9750,9 +9746,6 @@
         }
         input.addEventListener('input', markRiskSettingsDirty);
       });
-      if (paraRiskBarkAppendInput) {
-        paraRiskBarkAppendInput.addEventListener('change', markRiskSettingsDirty);
-      }
     updateGrvtSymbolOptions([]);
     updateParaSymbolOptions([]);
     updateGrvtTransferButtons();
