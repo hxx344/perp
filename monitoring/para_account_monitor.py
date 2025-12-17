@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import inspect
+import concurrent.futures
 import logging
 import os
 import sys
@@ -514,6 +515,7 @@ class ParadexAccountMonitor:
         self._symbol_aliases: Dict[str, str] = {}
         self._latest_positions: Dict[str, Decimal] = {}
         self._processed_adjustments: Dict[str, Dict[str, Any]] = {}
+        self._adjust_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self._register_symbol_hint(self._default_market)
 
     @staticmethod
@@ -1144,36 +1146,50 @@ class ParadexAccountMonitor:
             if not request_id:
                 continue
             cache = self._processed_adjustments.get(request_id)
-            if cache:
-                if not cache.get("acked"):
-                    acked = self._acknowledge_adjustment(
-                        request_id,
-                        cache.get("status", "acknowledged"),
-                        cache.get("note"),
-                    )
-                    if acked:
-                        cache["acked"] = True
-                        cache["timestamp"] = time.time()
+            if cache and cache.get("acked"):
                 continue
-            status = "failed"
-            note: Optional[str] = None
-            try:
-                action = str(entry.get("action") or "").strip().lower()
-                if action == "transfer":
-                    status, note = self._execute_transfer(entry)
-                else:
-                    status, note = self._execute_adjustment(entry)
-            except Exception as exc:
+            if cache and cache.get("inflight"):
+                continue
+            def _worker(entry_copy: Dict[str, Any], req_id: str) -> None:
                 status = "failed"
-                note = f"execution error: {exc}"
-                LOGGER.error("Adjustment %s execution failed: %s", request_id, exc)
-            acked = self._acknowledge_adjustment(request_id, status, note)
+                note: Optional[str] = None
+                try:
+                    action = str(entry_copy.get("action") or "").strip().lower()
+                    if action == "transfer":
+                        status, note = self._execute_transfer(entry_copy)
+                    else:
+                        status, note = self._execute_adjustment(entry_copy)
+                except Exception as exc:  # pragma: no cover - runtime error path
+                    status = "failed"
+                    note = f"execution error: {exc}"
+                    LOGGER.error("Adjustment %s execution failed: %s", req_id, exc)
+                acked = self._acknowledge_adjustment(req_id, status, note)
+                self._processed_adjustments[req_id] = {
+                    "status": status,
+                    "note": note,
+                    "acked": acked,
+                    "timestamp": time.time(),
+                    "inflight": False,
+                }
+
             self._processed_adjustments[request_id] = {
-                "status": status,
-                "note": note,
-                "acked": acked,
+                "status": "pending",
+                "note": None,
+                "acked": False,
                 "timestamp": time.time(),
+                "inflight": True,
             }
+            try:
+                self._adjust_executor.submit(_worker, dict(entry), request_id)
+            except Exception as exc:  # pragma: no cover - executor failure
+                LOGGER.error("Failed to submit adjustment %s: %s", request_id, exc)
+                self._processed_adjustments[request_id] = {
+                    "status": "failed",
+                    "note": f"submit failed: {exc}",
+                    "acked": False,
+                    "timestamp": time.time(),
+                    "inflight": False,
+                }
         self._prune_processed_adjustments()
 
     def _prune_processed_adjustments(self, ttl: float = 3600.0) -> None:

@@ -2006,6 +2006,7 @@ class CoordinatorApp:
             "cooldown_active": False,
             "measurement": None,
         }
+        self._para_auto_balance_task: Optional[asyncio.Task] = None
         self._para_adjustments = GrvtAdjustmentManager()
         self._app = web.Application()
         self._app.add_routes(
@@ -3222,11 +3223,24 @@ class CoordinatorApp:
         snapshot = copy.deepcopy(self._para_auto_balance_status)
         snapshot["enabled"] = bool(self._para_auto_balance_cfg)
         snapshot["config"] = self._para_auto_balance_config_as_payload()
+        snapshot["pending"] = bool(self._para_auto_balance_task)
         return snapshot
 
     async def _maybe_para_auto_balance(self, snapshot: Dict[str, Any]) -> None:
         if not self._para_auto_balance_cfg:
             return
+        # Observe existing background task and clear if finished
+        if self._para_auto_balance_task is not None:
+            if self._para_auto_balance_task.done():
+                try:
+                    self._para_auto_balance_task.result()
+                except Exception as exc:  # pragma: no cover - log and continue
+                    LOGGER.warning("PARA auto balance task failed: %s", exc)
+                    self._para_auto_balance_status["last_error"] = str(exc)
+                self._para_auto_balance_task = None
+            else:
+                self._para_auto_balance_status["pending"] = True
+                return
         async with self._para_auto_balance_lock:
             cfg = self._para_auto_balance_cfg
             measurement = self._compute_para_auto_balance_measurement(snapshot)
@@ -3277,43 +3291,17 @@ class CoordinatorApp:
                 "transfer_metadata": metadata,
                 "reason": reason,
             }
-            try:
-                response = await self._process_para_transfer_request(
-                    request_body,
-                    created_by="para_auto_balance",
-                    adjustments_manager=self._para_adjustments,
-                    defaults_provider=self._coordinator.get_para_transfer_defaults,
+            # Dispatch transfer asynchronously to avoid blocking monitor updates
+            self._para_auto_balance_status["pending"] = True
+            self._para_auto_balance_task = asyncio.create_task(
+                self._run_para_auto_balance_transfer(
+                    request_body=request_body,
+                    measurement=measurement,
+                    cfg=cfg,
+                    requested_amount=requested_amount,
                 )
-            except web.HTTPError as exc:
-                error_text = getattr(exc, "text", None) or str(exc)
-                self._para_auto_balance_status["last_error"] = error_text
-                if cfg.cooldown_seconds > 0:
-                    self._para_auto_balance_cooldown_until = now + cfg.cooldown_seconds
-                else:
-                    self._para_auto_balance_cooldown_until = None
-                self._para_auto_balance_status["cooldown_until"] = self._para_auto_balance_cooldown_until
-                self._para_auto_balance_status["cooldown_active"] = (
-                    self._para_auto_balance_cooldown_until is not None and now < self._para_auto_balance_cooldown_until
-                )
-                LOGGER.warning("PARA auto balance transfer failed: %s", error_text)
-                return
-
-            self._para_auto_balance_status["last_error"] = None
-            self._para_auto_balance_status["last_request_id"] = response.get("request_id")
-            self._para_auto_balance_status["last_action_at"] = now
-            self._para_auto_balance_status["last_transfer_amount"] = self._decimal_to_str(requested_amount)
-            self._para_auto_balance_status["last_direction"] = {
-                "from": measurement.source_agent,
-                "to": measurement.target_agent,
-            }
-            if cfg.cooldown_seconds > 0:
-                self._para_auto_balance_cooldown_until = now + cfg.cooldown_seconds
-            else:
-                self._para_auto_balance_cooldown_until = None
-            self._para_auto_balance_status["cooldown_until"] = self._para_auto_balance_cooldown_until
-            self._para_auto_balance_status["cooldown_active"] = (
-                self._para_auto_balance_cooldown_until is not None and now < self._para_auto_balance_cooldown_until
             )
+            return
 
     def _compute_para_auto_balance_measurement(self, snapshot: Dict[str, Any]) -> Optional[AutoBalanceMeasurement]:
         if not self._para_auto_balance_cfg:
@@ -3354,6 +3342,57 @@ class CoordinatorApp:
             target_agent=target_agent,
             transfer_amount=transfer_amount,
         )
+
+    async def _run_para_auto_balance_transfer(
+        self,
+        *,
+        request_body: Dict[str, Any],
+        measurement: AutoBalanceMeasurement,
+        cfg: AutoBalanceConfig,
+        requested_amount: Decimal,
+    ) -> None:
+        now = time.time()
+        try:
+            response = await self._process_para_transfer_request(
+                request_body,
+                created_by="para_auto_balance",
+                adjustments_manager=self._para_adjustments,
+                defaults_provider=self._coordinator.get_para_transfer_defaults,
+            )
+        except Exception as exc:
+            error_text = getattr(exc, "text", None) or str(exc)
+            self._para_auto_balance_status["last_error"] = error_text
+            if cfg.cooldown_seconds > 0:
+                self._para_auto_balance_cooldown_until = now + cfg.cooldown_seconds
+            else:
+                self._para_auto_balance_cooldown_until = None
+            self._para_auto_balance_status["cooldown_until"] = self._para_auto_balance_cooldown_until
+            self._para_auto_balance_status["cooldown_active"] = (
+                self._para_auto_balance_cooldown_until is not None and now < self._para_auto_balance_cooldown_until
+            )
+            LOGGER.warning("PARA auto balance transfer failed: %s", error_text)
+            self._para_auto_balance_status["pending"] = False
+            self._para_auto_balance_task = None
+            return
+
+        self._para_auto_balance_status["last_error"] = None
+        self._para_auto_balance_status["last_request_id"] = response.get("request_id")
+        self._para_auto_balance_status["last_action_at"] = now
+        self._para_auto_balance_status["last_transfer_amount"] = self._decimal_to_str(requested_amount)
+        self._para_auto_balance_status["last_direction"] = {
+            "from": measurement.source_agent,
+            "to": measurement.target_agent,
+        }
+        if cfg.cooldown_seconds > 0:
+            self._para_auto_balance_cooldown_until = now + cfg.cooldown_seconds
+        else:
+            self._para_auto_balance_cooldown_until = None
+        self._para_auto_balance_status["cooldown_until"] = self._para_auto_balance_cooldown_until
+        self._para_auto_balance_status["cooldown_active"] = (
+            self._para_auto_balance_cooldown_until is not None and now < self._para_auto_balance_cooldown_until
+        )
+        self._para_auto_balance_status["pending"] = False
+        self._para_auto_balance_task = None
 
     def _extract_para_equity_from_agent(self, agent_payload: Dict[str, Any], *, prefer_available: bool) -> Optional[Decimal]:
         para_block = agent_payload.get("paradex_accounts")
