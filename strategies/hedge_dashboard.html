@@ -1838,6 +1838,28 @@
                 <p class="risk-settings-message" id="para-risk-settings-message">未加载</p>
                 <p class="risk-settings-message" id="para-risk-test-message"></p>
               </div>
+              <div class="risk-history-card">
+                <div class="risk-history-header">
+                  <h3>告警历史 (PARA)</h3>
+                  <button type="button" class="button-ghost" id="para-risk-history-refresh">刷新</button>
+                </div>
+                <p class="risk-history-status" id="para-risk-history-status">等待告警数据…</p>
+                <div class="risk-history-table-wrapper">
+                  <table class="risk-history-table">
+                    <thead>
+                      <tr>
+                        <th>时间</th>
+                        <th>来源</th>
+                        <th>账户</th>
+                        <th>风险%</th>
+                        <th>亏损 / 基数</th>
+                      </tr>
+                    </thead>
+                    <tbody id="para-risk-history-body"></tbody>
+                  </table>
+                  <p class="risk-history-empty hidden" id="para-risk-history-empty">暂无告警</p>
+                </div>
+              </div>
             </div>
           <div class="grvt-auto-panel" id="para-auto-panel">
             <div class="grvt-adjust-header">
@@ -2624,6 +2646,10 @@
   const paraRiskDisableButton = document.getElementById('para-risk-settings-disable');
   const paraRiskRefreshButton = document.getElementById('para-risk-settings-refresh');
   const paraRiskTestButton = document.getElementById('para-risk-settings-test');
+  const paraRiskHistoryBody = document.getElementById('para-risk-history-body');
+  const paraRiskHistoryEmpty = document.getElementById('para-risk-history-empty');
+  const paraRiskHistoryStatus = document.getElementById('para-risk-history-status');
+  const paraRiskHistoryRefreshButton = document.getElementById('para-risk-history-refresh');
   const grvtRiskPanel = document.getElementById('grvt-risk-panel');
   const riskSettingsStatus = document.getElementById('risk-settings-status');
   const riskSettingsMessage = document.getElementById('risk-settings-message');
@@ -2886,6 +2912,7 @@
   let latestGlobalRiskRatio = null;
   let paraLatestRiskRatio = null;
   let grvtLatestRiskRatio = null;
+  let paraRiskHistoryEntries = [];
 
   function recomputeGlobalRiskRatio() {
     if (Number.isFinite(paraLatestRiskRatio)) {
@@ -5621,6 +5648,52 @@
         riskHistoryBody.appendChild(fragment);
       }
 
+          function renderParaRiskHistory(entries) {
+            if (!paraRiskHistoryBody || !paraRiskHistoryEmpty) {
+              return;
+            }
+            paraRiskHistoryBody.innerHTML = '';
+            const filtered = Array.isArray(entries)
+              ? entries.filter((entry) => entry?.agent_id || entry?.account_label)
+              : [];
+            if (!filtered.length) {
+              paraRiskHistoryEmpty.classList.remove('hidden');
+              if (paraRiskHistoryStatus) {
+                paraRiskHistoryStatus.textContent = '暂无告警';
+              }
+              return;
+            }
+            paraRiskHistoryEmpty.classList.add('hidden');
+            const fragment = document.createDocumentFragment();
+            for (const entry of filtered) {
+              const row = document.createElement('tr');
+              const timeText = formatTimestamp(entry.timestamp) || '—';
+              const sourceText = describeRiskAlertSource(entry);
+              const accountLabel = entry.account_label || '—';
+              const agentLabel = entry.agent_id ? ` (${entry.agent_id})` : '';
+              const ratioPercent = Number.isFinite(entry?.ratio_percent)
+                ? entry.ratio_percent
+                : Number.isFinite(entry?.ratio)
+                  ? entry.ratio * 100
+                  : null;
+              const ratioText = Number.isFinite(ratioPercent) ? formatPercent(ratioPercent, 1) : '—';
+              const baseLabel = entry.base_label ? ` ${entry.base_label}` : '';
+              const lossText = `${entry.loss_value || '--'} / ${entry.base_value || '--'}${baseLabel}`;
+              row.innerHTML = `
+                <td>${escapeHtml(timeText)}</td>
+                <td>${escapeHtml(sourceText)}</td>
+                <td>${escapeHtml(accountLabel + agentLabel)}</td>
+                <td>${escapeHtml(ratioText)}</td>
+                <td>${escapeHtml(lossText)}</td>
+              `;
+              fragment.appendChild(row);
+            }
+            paraRiskHistoryBody.appendChild(fragment);
+            if (paraRiskHistoryStatus) {
+              paraRiskHistoryStatus.textContent = `已加载 ${filtered.length} 条告警（PARA）`;
+            }
+          }
+
       async function loadRiskHistory({ silent = false } = {}) {
         if (riskHistoryBusy) {
           return;
@@ -5643,13 +5716,21 @@
           const result = await response.json();
           riskHistoryEntries = Array.isArray(result?.history) ? result.history : [];
           renderRiskHistory(riskHistoryEntries);
+          paraRiskHistoryEntries = riskHistoryEntries;
+          renderParaRiskHistory(paraRiskHistoryEntries);
           lastRiskHistoryFetch = performance.now();
           if (riskHistoryStatus) {
             riskHistoryStatus.textContent = `已加载 ${riskHistoryEntries.length} 条告警`;
           }
+          if (paraRiskHistoryStatus) {
+            paraRiskHistoryStatus.textContent = `已加载 ${Array.isArray(paraRiskHistoryEntries) ? paraRiskHistoryEntries.length : 0} 条告警（PARA）`;
+          }
         } catch (error) {
           if (riskHistoryStatus) {
             riskHistoryStatus.textContent = `读取失败：${error}`;
+          }
+          if (paraRiskHistoryStatus) {
+            paraRiskHistoryStatus.textContent = `读取失败：${error}`;
           }
         } finally {
           riskHistoryBusy = false;
@@ -9570,6 +9651,12 @@
       }
       if (riskHistoryRefreshButton) {
         riskHistoryRefreshButton.addEventListener('click', () => {
+          loadRiskHistory({ silent: false });
+        });
+      }
+
+      if (paraRiskHistoryRefreshButton) {
+        paraRiskHistoryRefreshButton.addEventListener('click', () => {
           loadRiskHistory({ silent: false });
         });
       }
