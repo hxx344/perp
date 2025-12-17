@@ -1288,27 +1288,27 @@ class HedgeCoordinator:
         worst_account_label: Optional[str] = None
 
         for agent_id, state in self._states.items():
-            payload = state.grvt_accounts
-            if not isinstance(payload, dict):
-                continue
-            summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else None
-            for _, account_label, account_payload in self._flatten_grvt_accounts(agent_id, payload):
-                equity_value = self._select_equity_value(account_payload, summary)
-                if equity_value is None or equity_value <= 0:
+            for payload in (state.grvt_accounts, state.paradex_accounts):
+                if not isinstance(payload, dict):
                     continue
-                total_equity_sum += equity_value
-                total_pnl = self._decimal_from(account_payload.get("total_pnl"))
-                if total_pnl is None:
-                    total_pnl = self._decimal_from(account_payload.get("total"))
-                initial_margin = self._compute_initial_margin_total(account_payload)
-                total_initial_margin_sum += initial_margin
-                transferable = self._compute_transferable_amount(equity_value, initial_margin, total_pnl)
-                if total_pnl is not None and total_pnl < 0:
-                    abs_loss = abs(total_pnl)
-                    if abs_loss > worst_loss_value:
-                        worst_loss_value = abs_loss
-                        worst_agent_id = agent_id
-                        worst_account_label = account_label
+                summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else None
+                for _, account_label, account_payload in self._flatten_grvt_accounts(agent_id, payload):
+                    equity_value = self._select_equity_value(account_payload, summary)
+                    if equity_value is None or equity_value <= 0:
+                        continue
+                    total_equity_sum += equity_value
+                    total_pnl = self._decimal_from(account_payload.get("total_pnl"))
+                    if total_pnl is None:
+                        total_pnl = self._decimal_from(account_payload.get("total"))
+                    initial_margin = self._compute_initial_margin_total(account_payload)
+                    total_initial_margin_sum += initial_margin
+                    transferable = self._compute_transferable_amount(equity_value, initial_margin, total_pnl)
+                    if total_pnl is not None and total_pnl < 0:
+                        abs_loss = abs(total_pnl)
+                        if abs_loss > worst_loss_value:
+                            worst_loss_value = abs_loss
+                            worst_agent_id = agent_id
+                            worst_account_label = account_label
 
         risk_capacity = total_equity_sum - total_initial_margin_sum
 
