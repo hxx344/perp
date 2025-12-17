@@ -5525,15 +5525,21 @@
           return GLOBAL_RISK_THRESHOLD_TEXT;
         }
         const parts = [];
-        const thresholdPercent = Number(riskSettingsSnapshot.threshold_percent);
+        const thresholdPercent = Number.isFinite(riskSettingsSnapshot.threshold_percent)
+          ? Number(riskSettingsSnapshot.threshold_percent)
+          : Number(riskSettingsSnapshot.threshold) * 100;
         if (Number.isFinite(thresholdPercent) && thresholdPercent > 0) {
           parts.push(`阈值 ${thresholdPercent.toFixed(1)}%`);
         }
-        const resetPercent = Number(riskSettingsSnapshot.reset_ratio_percent);
+        const resetPercent = Number.isFinite(riskSettingsSnapshot.reset_ratio_percent)
+          ? Number(riskSettingsSnapshot.reset_ratio_percent)
+          : Number(riskSettingsSnapshot.reset_ratio) * 100;
         if (Number.isFinite(resetPercent) && resetPercent > 0) {
           parts.push(`重置 ${resetPercent.toFixed(1)}%`);
         }
-        const cooldownSeconds = Number(riskSettingsSnapshot.cooldown);
+        const cooldownSeconds = Number.isFinite(riskSettingsSnapshot.cooldown)
+          ? Number(riskSettingsSnapshot.cooldown)
+          : Number(riskSettingsSnapshot.cooldown_minutes) * 60;
         if (Number.isFinite(cooldownSeconds) && cooldownSeconds > 0) {
           if (cooldownSeconds >= 60) {
             const minutes = cooldownSeconds / 60;
@@ -5789,12 +5795,23 @@
 
       function applyRiskSettings(settings, { markClean = false } = {}) {
         riskSettingsSnapshot = settings ? { ...settings } : null;
-        const enabled = Boolean(riskSettingsSnapshot?.enabled && riskSettingsSnapshot?.threshold);
+        if (riskSettingsSnapshot) {
+          if (!Number.isFinite(riskSettingsSnapshot.threshold_percent) && Number.isFinite(riskSettingsSnapshot.threshold)) {
+            riskSettingsSnapshot.threshold_percent = Number(riskSettingsSnapshot.threshold) * 100;
+          }
+          if (!Number.isFinite(riskSettingsSnapshot.cooldown) && Number.isFinite(riskSettingsSnapshot.cooldown_minutes)) {
+            riskSettingsSnapshot.cooldown = Number(riskSettingsSnapshot.cooldown_minutes) * 60;
+          }
+        }
+        const hasThreshold = Number.isFinite(riskSettingsSnapshot?.threshold_percent)
+          ? Number(riskSettingsSnapshot.threshold_percent) > 0
+          : Number(riskSettingsSnapshot?.threshold) > 0;
+        const enabled = Boolean(riskSettingsSnapshot?.enabled && hasThreshold);
         const thresholdPercent = Number(riskSettingsSnapshot?.threshold_percent ?? (riskSettingsSnapshot?.threshold ?? 0) * 100);
         const resetPercent = Number(riskSettingsSnapshot?.reset_ratio_percent ?? (riskSettingsSnapshot?.reset_ratio ?? 0) * 100);
-        const cooldownMinutes = Number(riskSettingsSnapshot?.cooldown)
-          ? Number(riskSettingsSnapshot.cooldown) / 60
-          : 0;
+        const cooldownMinutes = Number.isFinite(riskSettingsSnapshot?.cooldown_minutes)
+          ? Number(riskSettingsSnapshot.cooldown_minutes)
+          : (Number.isFinite(riskSettingsSnapshot?.cooldown) ? Number(riskSettingsSnapshot.cooldown) / 60 : 0);
         getRiskViews().forEach((view) => {
           if (view.enabledInput) {
             view.enabledInput.checked = enabled;
