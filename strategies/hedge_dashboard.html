@@ -1631,9 +1631,9 @@
             <p class="summary-sub" id="para-wallet-balance">Wallet --</p>
           </article>
           <article class="card grvt-summary-card">
-            <h3>风险基数</h3>
+            <h3>风险裕量</h3>
             <div class="value" id="para-transfer-total">--</div>
-            <p class="summary-sub" id="para-transfer-note">Σ Equity - Σ 初始保证金</p>
+            <p class="summary-sub" id="para-transfer-note">Equity - 1.5×max(IM)</p>
           </article>
           <article class="card grvt-summary-card">
             <h3>Risk Level</h3>
@@ -1840,7 +1840,7 @@
                         <th>来源</th>
                         <th>账户</th>
                         <th>风险%</th>
-                        <th>亏损 / 基数</th>
+                        <th>亏损 / 裕量</th>
                       </tr>
                     </thead>
                     <tbody id="para-risk-history-body"></tbody>
@@ -5675,7 +5675,7 @@
                   ? entry.ratio * 100
                   : null;
               const ratioText = Number.isFinite(ratioPercent) ? formatPercent(ratioPercent, 1) : '—';
-              const baseLabel = entry.base_label ? ` ${entry.base_label}` : '';
+              const baseLabel = entry.base_label ? ` ${entry.base_label}` : ' 裕量';
               const lossText = `${entry.loss_value || '--'} / ${entry.base_value || '--'}${baseLabel}`;
               row.innerHTML = `
                 <td>${escapeHtml(timeText)}</td>
@@ -7383,7 +7383,7 @@
             paraTransferableTotal.textContent = '--';
           }
           if (paraTransferableNote) {
-            paraTransferableNote.textContent = '等待风险基数数据…';
+            paraTransferableNote.textContent = '等待风险裕量数据…';
           }
           if (paraRiskLevel) {
             paraRiskLevel.textContent = '--';
@@ -7663,18 +7663,18 @@
 
         const maxAbsPnlValue = Number.isFinite(maxAbsPnl) ? maxAbsPnl : 0;
         const maxInitialMarginValue = Number.isFinite(maxInitialMargin) ? maxInitialMargin : 0;
-        const rawRiskCapacity = hasEquity
-          ? aggregateEquity - maxAbsPnlValue - 1.5 * maxInitialMarginValue
+        const rawRiskAllowance = hasEquity
+          ? aggregateEquity - 1.5 * maxInitialMarginValue
           : null;
-        const hasRiskCapacityValue = Number.isFinite(rawRiskCapacity) && rawRiskCapacity > 0;
-        const riskCapacityBaseNote = hasRiskCapacityValue
-          ? `覆盖 ${aggregateAccountCount} 个账户 · Equity - max|PnL| (${numberFormatter.format(maxAbsPnlValue)}) - 1.5×max(IM ${numberFormatter.format(maxInitialMarginValue)})`
-          : '缺少风险基数数据';
+        const hasRiskAllowanceValue = Number.isFinite(rawRiskAllowance) && rawRiskAllowance > 0;
+        const riskAllowanceBaseNote = hasRiskAllowanceValue
+          ? `覆盖 ${aggregateAccountCount} 个账户 · 风险裕量 = Equity - 1.5×max(IM ${numberFormatter.format(maxInitialMarginValue)})`
+          : '缺少风险裕量数据';
         const bufferedRiskCapacity = evaluateRiskCapacityBuffer({
-          hasValue: hasRiskCapacityValue,
-          value: hasRiskCapacityValue ? rawRiskCapacity : null,
+          hasValue: hasRiskAllowanceValue,
+          value: hasRiskAllowanceValue ? rawRiskAllowance : null,
           timestamp: latestUpdate,
-          baseNote: riskCapacityBaseNote,
+          baseNote: riskAllowanceBaseNote,
           state: paraRiskCapacityBufferState,
         });
         const effectiveRiskCapacity = Number.isFinite(bufferedRiskCapacity.displayValue)
@@ -7696,21 +7696,22 @@
           const denominator = Number.isFinite(effectiveRiskCapacity) && effectiveRiskCapacity > 0
             ? effectiveRiskCapacity
             : null;
-          if (worstLossAccount && denominator) {
-            paraRiskRatio = worstLossAccount.lossValue / denominator;
+          const numerator = Number.isFinite(maxAbsPnlValue) ? maxAbsPnlValue : null;
+          if (worstLossAccount && denominator && Number.isFinite(numerator)) {
+            paraRiskRatio = numerator / denominator;
             paraRiskLevel.textContent = formatPercent(paraRiskRatio * 100, 2);
             applyRiskTone(paraRiskLevel, paraRiskRatio, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
             const accountLabelText = worstLossAccount.accountName
               ? `${worstLossAccount.accountName} (${worstLossAccount.agentId})`
               : worstLossAccount.agentId;
-            const lossText = numberFormatter.format(worstLossAccount.lossValue ?? 0);
+            const lossText = numberFormatter.format(numerator ?? 0);
             const riskCapacityText = numberFormatter.format(denominator);
-            paraRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 基数 ${riskCapacityText} · ${getRiskThresholdSummary()}`;
+            paraRiskDetail.textContent = `${accountLabelText}亏损 ${lossText} / 裕量 ${riskCapacityText} · ${getRiskThresholdSummary()}`;
             paraLatestRiskRatio = paraRiskRatio;
           } else if (worstLossAccount && !denominator) {
             paraRiskLevel.textContent = '—';
             applyRiskTone(paraRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
-            paraRiskDetail.textContent = '缺少风险基数数据，无法计算 RISK';
+            paraRiskDetail.textContent = '缺少风险裕量数据，无法计算 RISK';
           } else {
             paraRiskLevel.textContent = '—';
             applyRiskTone(paraRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
