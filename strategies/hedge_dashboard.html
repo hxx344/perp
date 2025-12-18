@@ -7417,13 +7417,15 @@
         let aggregateInitialMargin = 0;
   let aggregateMaintRequirement = 0;
   let aggregateMaintBase = 0;
-        let hasTotal = false;
-        let hasEth = false;
-        let hasBtc = false;
-        let hasEquity = false;
-        let hasWallet = false;
-        let latestUpdate = 0;
-        const flattenedAccounts = [];
+  let hasTotal = false;
+  let hasEth = false;
+  let hasBtc = false;
+  let hasEquity = false;
+  let hasWallet = false;
+  let latestUpdate = 0;
+  let maxAbsPnl = null;
+  let maxInitialMargin = null;
+  const flattenedAccounts = [];
   const symbolCandidates = new Set();
     const transferOptions = [];
         let worstLossAccount = null;
@@ -7491,8 +7493,12 @@
                 if (Number.isFinite(total)) {
                   aggregateTotalPnl += total;
                   hasTotal = true;
+                  const absPnl = Math.abs(total);
+                  if (!Number.isFinite(maxAbsPnl) || absPnl > maxAbsPnl) {
+                    maxAbsPnl = absPnl;
+                  }
                   if (total < 0) {
-                    const absLoss = Math.abs(total);
+                    const absLoss = absPnl;
                     if (!worstLossAccount || absLoss > worstLossAccount.lossValue) {
                       worstLossAccount = {
                         lossValue: absLoss,
@@ -7520,6 +7526,9 @@
                 }
                 if (Number.isFinite(initialMarginTotal)) {
                   aggregateInitialMargin += initialMarginTotal;
+                  if (!Number.isFinite(maxInitialMargin) || initialMarginTotal > maxInitialMargin) {
+                    maxInitialMargin = initialMarginTotal;
+                  }
                 }
                 const transferableEstimate = estimateTransferableFunds({
                   walletValue: wallet,
@@ -7563,8 +7572,12 @@
               if (Number.isFinite(total)) {
                 aggregateTotalPnl += total;
                 hasTotal = true;
+                const absPnl = Math.abs(total);
+                if (!Number.isFinite(maxAbsPnl) || absPnl > maxAbsPnl) {
+                  maxAbsPnl = absPnl;
+                }
                 if (total < 0) {
-                  const absLoss = Math.abs(total);
+                  const absLoss = absPnl;
                   if (!worstLossAccount || absLoss > worstLossAccount.lossValue) {
                     worstLossAccount = {
                       lossValue: absLoss,
@@ -7589,6 +7602,12 @@
               if (Number.isFinite(wallet)) {
                 aggregateWallet += wallet;
                 hasWallet = true;
+              }
+              if (Number.isFinite(initialMarginTotal)) {
+                aggregateInitialMargin += initialMarginTotal;
+                if (!Number.isFinite(maxInitialMargin) || initialMarginTotal > maxInitialMargin) {
+                  maxInitialMargin = initialMarginTotal;
+                }
               }
               // summary path lacks per-position IM, assume 0
               const accountCountFallback = Number(summary.account_count ?? 0);
@@ -7642,12 +7661,14 @@
           ? `Wallet ${numberFormatter.format(aggregateWallet)}`
           : 'Wallet --';
 
+        const maxAbsPnlValue = Number.isFinite(maxAbsPnl) ? maxAbsPnl : 0;
+        const maxInitialMarginValue = Number.isFinite(maxInitialMargin) ? maxInitialMargin : 0;
         const rawRiskCapacity = hasEquity
-          ? aggregateEquity - aggregateInitialMargin
-          : (hasWallet ? aggregateWallet - aggregateInitialMargin : null);
+          ? aggregateEquity - maxAbsPnlValue - 1.5 * maxInitialMarginValue
+          : null;
         const hasRiskCapacityValue = Number.isFinite(rawRiskCapacity) && rawRiskCapacity > 0;
         const riskCapacityBaseNote = hasRiskCapacityValue
-          ? `覆盖 ${aggregateAccountCount} 个账户 · Equity-IM`
+          ? `覆盖 ${aggregateAccountCount} 个账户 · Equity - max|PnL| (${numberFormatter.format(maxAbsPnlValue)}) - 1.5×max(IM ${numberFormatter.format(maxInitialMarginValue)})`
           : '缺少风险基数数据';
         const bufferedRiskCapacity = evaluateRiskCapacityBuffer({
           hasValue: hasRiskCapacityValue,
