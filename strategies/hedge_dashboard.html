@@ -7505,6 +7505,9 @@
                   totalInitialMargin: initialMarginTotal,
                   unrealizedPnl: total,
                 });
+                const transferableValue = transferableEstimate && Number.isFinite(transferableEstimate.value)
+                  ? transferableEstimate.value
+                  : null;
 
                 flattenedAccounts.push({
                   agentId,
@@ -7517,6 +7520,7 @@
                   available,
                   availableEquity,
                   transferableEstimate,
+                  transferableValue,
                   positions: positionsList,
                   initialMarginTotal,
                   updatedTs: snapshotTs,
@@ -7574,6 +7578,9 @@
                 totalInitialMargin: 0,
                 unrealizedPnl: total,
               });
+              const transferableValue = transferableEstimate && Number.isFinite(transferableEstimate.value)
+                ? transferableEstimate.value
+                : null;
 
               flattenedAccounts.push({
                 agentId,
@@ -7586,6 +7593,7 @@
                 available,
                 availableEquity,
                 transferableEstimate,
+                transferableValue,
                 positions: [],
                 initialMarginTotal: 0,
                 updatedTs: snapshotTs,
@@ -7759,8 +7767,13 @@
           const equityText = Number.isFinite(entry.equity) ? numberFormatter.format(entry.equity) : '--';
           const walletText = Number.isFinite(entry.wallet) ? numberFormatter.format(entry.wallet) : '--';
           const availableText = Number.isFinite(entry.available) ? numberFormatter.format(entry.available) : '--';
-          const transferableText = Number.isFinite(entry.transferableEstimate)
-            ? numberFormatter.format(Math.max(0, entry.transferableEstimate))
+          const transferableCandidate = Number.isFinite(entry.transferableValue)
+            ? entry.transferableValue
+            : (entry.transferableEstimate && Number.isFinite(entry.transferableEstimate.value)
+              ? entry.transferableEstimate.value
+              : null);
+          const transferableText = Number.isFinite(transferableCandidate)
+            ? numberFormatter.format(Math.max(0, transferableCandidate))
             : '--';
           const updatedText = formatTimestamp(entry.updatedTs) ?? '—';
           const ageSec = Number.isFinite(entry.updatedTs) ? Math.max(0, nowSec - entry.updatedTs) : null;
