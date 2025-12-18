@@ -369,6 +369,16 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
         ("info", "pnl"),
         ("info", "profit"),
     ]
+    leverage_candidates = [
+        ("leverage",),
+        ("leverage_ratio",),
+        ("leverageRatio",),
+        ("leverage_ratio_cross",),
+        ("leverage_ratio_isolated",),
+        ("info", "leverage"),
+        ("info", "leverage_ratio"),
+        ("info", "leverageRatio"),
+    ]
 
     raw_size = extract_from_paths(entry, *size_candidates)
     size_value = decimal_from(raw_size)
@@ -381,6 +391,8 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
     mark_price = decimal_from(raw_mark)
     raw_pnl = extract_from_paths(entry, *pnl_candidates)
     pnl_value = decimal_from(raw_pnl)
+    raw_leverage = extract_from_paths(entry, *leverage_candidates)
+    leverage_value = decimal_from(raw_leverage)
 
     # Keep payload mark_price as None when missing so downstream logic can replace it
     # with a fresher market summary. Use local fallbacks only for PnL calculation.
@@ -407,6 +419,7 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
         "entry_price": decimal_to_str(entry_price),
         "mark_price": decimal_to_str(mark_price),
         "pnl": decimal_to_str(pnl_value),
+        "leverage": decimal_to_str(leverage_value),
     }
     return pnl_value, payload, signed_size
 
