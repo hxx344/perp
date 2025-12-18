@@ -182,21 +182,23 @@ class BarkNotifier:
     def __init__(self, url_template: str, timeout: float = 10.0, append_payload: bool = True) -> None:
         self._template = (url_template or "").strip()
         self._timeout = max(timeout, 1.0)
+        # append_payload=False -> 纯 URL 模式，不拼接/替换标题正文
         self._append_payload = bool(append_payload)
 
-    async def send(self, *, title: str, body: str) -> None:
+    async def send(self, *, title: str = "", body: str = "") -> None:
         if not self._template:
             LOGGER.warning("Bark notifier missing push URL; skipping alert")
             return
 
-        safe_title = quote_plus(title or "Alert")
-        safe_body = quote_plus(body or "")
-        if "{title}" in self._template or "{body}" in self._template:
-            endpoint = self._template.replace("{title}", safe_title).replace("{body}", safe_body)
-        elif self._append_payload:
-            endpoint = f"{self._template.rstrip('/')}/{safe_title}/{safe_body}"
-        else:
+        if not self._append_payload:
             endpoint = self._template
+        else:
+            safe_title = quote_plus(title or "Alert")
+            safe_body = quote_plus(body or "")
+            if "{title}" in self._template or "{body}" in self._template:
+                endpoint = self._template.replace("{title}", safe_title).replace("{body}", safe_body)
+            else:
+                endpoint = f"{self._template.rstrip('/')}/{safe_title}/{safe_body}"
 
         timeout = ClientTimeout(total=self._timeout)
         try:
@@ -239,7 +241,7 @@ class RiskAlertSettings:
     reset_ratio: Optional[float] = None
     cooldown: float = 900.0
     bark_url: Optional[str] = None
-    bark_append_payload: bool = True
+    bark_append_payload: bool = False  # 仅使用 URL，不附带标题正文
     bark_timeout: float = 10.0
     title_template: str = "GRVT Risk {ratio_percent:.1f}%"
     body_template: str = (
@@ -1172,6 +1174,7 @@ class HedgeCoordinator:
         self._risk_alert_threshold: Optional[float] = None
         self._risk_alert_reset: Optional[float] = None
         self._risk_alert_cooldown: float = 0.0
+        self._para_stale_critical_seconds: float = 30.0
         self._apply_alert_settings()
         self._risk_alert_active: Dict[str, bool] = {}
         self._risk_alert_last_ts: Dict[str, float] = {}
@@ -1188,9 +1191,10 @@ class HedgeCoordinator:
         self._risk_alert_reset = config.reset_ratio
         self._risk_alert_cooldown = config.cooldown
         if config.bark_url:
+            # 强制 URL 直推模式（不携带标题/正文）
             self._bark_notifier = BarkNotifier(
                 config.bark_url,
-                append_payload=config.bark_append_payload,
+                append_payload=False,
                 timeout=config.bark_timeout,
             )
         else:
@@ -1692,11 +1696,11 @@ class HedgeCoordinator:
                 state = HedgeState(agent_id=agent_id)
                 self._states[agent_id] = state
 
+            now = time.time()
             state.update_from_payload(payload)
             self._recalculate_global_risk()
             alerts = self._prepare_risk_alerts(agent_id, state.grvt_accounts)
-
-            now = time.time()
+            alerts = list(alerts) + list(self._prepare_para_stale_alerts(now))
             self._prune_stale(now)
             self._last_agent_id = agent_id
             snapshot = self._build_snapshot(now)
@@ -1785,6 +1789,65 @@ class HedgeCoordinator:
 
         return alerts
 
+    def _prepare_para_stale_alerts(self, now: float) -> Sequence[RiskAlertInfo]:
+        if self._bark_notifier is None:
+            return []
+        critical = max(float(self._para_stale_critical_seconds or 0), 0.0)
+        if critical <= 0:
+            return []
+        alerts: List[RiskAlertInfo] = []
+        for agent_id, state in self._states.items():
+            para_block = state.paradex_accounts
+            if not isinstance(para_block, dict):
+                continue
+            summary = para_block.get("summary") if isinstance(para_block.get("summary"), dict) else None
+            ts_raw = None
+            if summary:
+                ts_raw = summary.get("updated_at")
+            if ts_raw is None:
+                ts_raw = para_block.get("updated_at")
+            if ts_raw is None:
+                ts_raw = state.last_update_ts
+            ts = None
+            try:
+                ts = float(ts_raw)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+            except Exception:
+                ts = None
+            if ts is None:
+                continue
+            age = now - ts
+            if age < critical:
+                continue
+            key = f"para_stale::{agent_id}"
+            last_ts = self._risk_alert_last_ts.get(key, 0.0)
+            if (now - last_ts) < self._risk_alert_cooldown:
+                continue
+            account_label = None
+            if summary:
+                account_label = summary.get("label") or summary.get("account_label") or summary.get("name")
+            ratio = age / critical if critical > 0 else 1.0
+            try:
+                loss_value = Decimal(str(round(age, 2)))
+                base_value = Decimal(str(round(critical, 2)))
+            except Exception:
+                loss_value = Decimal("0")
+                base_value = Decimal(str(critical)) if critical else Decimal("0")
+            alerts.append(
+                RiskAlertInfo(
+                    key=key,
+                    agent_id=agent_id,
+                    account_label=account_label or "PARA",
+                    ratio=ratio,
+                    loss_value=loss_value,
+                    base_value=base_value,
+                    base_label="stale_seconds",
+                )
+            )
+            self._risk_alert_last_ts[key] = now
+        return alerts
+
     def _flatten_grvt_accounts(
         self, agent_id: str, payload: Dict[str, Any]
     ) -> List[tuple[str, str, Dict[str, Any]]]:
@@ -1866,12 +1929,9 @@ class HedgeCoordinator:
     async def _send_risk_alert(self, alert: RiskAlertInfo, *, source: str = "auto") -> None:
         if self._bark_notifier is None:
             return
-        title = f"GRVT Risk {alert.ratio * 100:.1f}%"
-        base_label = alert.base_label or "wallet"
-        body = (
-            f"{alert.account_label} ({alert.agent_id}) loss {self._format_decimal(alert.loss_value)} "
-            f"/ {base_label} {self._format_decimal(alert.base_value)}"
-        )
+        # Bark 只需 URL，不传标题/正文
+        title = ""
+        body = ""
         status = "sent"
         error_message = None
         try:
