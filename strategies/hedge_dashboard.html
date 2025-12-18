@@ -7458,13 +7458,17 @@
                 const wallet = parseDecimal(accountObj.balance ?? accountObj.available_balance);
                 const available = parseDecimal(accountObj.available_balance ?? accountObj.available_equity);
                 const availableEquity = parseDecimal(accountObj.available_equity ?? accountObj.equity);
-                let initialMarginTotal = 0;
+                const initialMarginFromApi = parseDecimal(accountObj.initial_margin_requirement);
+                let initialMarginTotal = Number.isFinite(initialMarginFromApi) ? initialMarginFromApi : 0;
                 const positionsList = Array.isArray(accountObj.positions) ? accountObj.positions : [];
-                if (positionsList.length) {
-                  for (const position of positionsList) {
-                    const marginInfo = computePositionMargin(position);
-                    if (marginInfo && Number.isFinite(marginInfo.initialMargin)) {
-                      initialMarginTotal += marginInfo.initialMargin;
+                if (!Number.isFinite(initialMarginTotal) || initialMarginTotal === 0) {
+                  initialMarginTotal = 0;
+                  if (positionsList.length) {
+                    for (const position of positionsList) {
+                      const marginInfo = computePositionMargin(position);
+                      if (marginInfo && Number.isFinite(marginInfo.initialMargin)) {
+                        initialMarginTotal += marginInfo.initialMargin;
+                      }
                     }
                   }
                 }
@@ -7539,6 +7543,7 @@
               const wallet = parseDecimal(summary.balance ?? summary.available_balance);
               const available = parseDecimal(summary.available_balance ?? summary.available_equity);
               const availableEquity = parseDecimal(summary.available_equity ?? summary.equity);
+              const initialMarginTotal = parseDecimal(summary.initial_margin_requirement);
               if (Number.isFinite(total)) {
                 aggregateTotalPnl += total;
                 hasTotal = true;
@@ -7579,7 +7584,7 @@
                 equityValue: equity,
                 availableBalanceValue: available,
                 availableEquityValue: availableEquity,
-                totalInitialMargin: 0,
+                totalInitialMargin: Number.isFinite(initialMarginTotal) ? initialMarginTotal : 0,
                 unrealizedPnl: total,
               });
               const transferableValue = transferableEstimate && Number.isFinite(transferableEstimate.value)
@@ -7599,7 +7604,7 @@
                 transferableEstimate,
                 transferableValue,
                 positions: [],
-                initialMarginTotal: 0,
+                initialMarginTotal: Number.isFinite(initialMarginTotal) ? initialMarginTotal : 0,
                 updatedTs: snapshotTs,
                 sortKey: buildAccountSortKey(agentId, null, summary),
               });
@@ -7770,7 +7775,9 @@
           const totalText = Number.isFinite(entry.total) ? numberFormatter.format(entry.total) : '--';
           const equityText = Number.isFinite(entry.equity) ? numberFormatter.format(entry.equity) : '--';
           const walletText = Number.isFinite(entry.wallet) ? numberFormatter.format(entry.wallet) : '--';
-          const availableText = Number.isFinite(entry.available) ? numberFormatter.format(entry.available) : '--';
+          const initialMarginText = Number.isFinite(entry.initialMarginTotal)
+            ? numberFormatter.format(entry.initialMarginTotal)
+            : '--';
           const transferableCandidate = Number.isFinite(entry.transferableValue)
             ? entry.transferableValue
             : (entry.transferableEstimate && Number.isFinite(entry.transferableEstimate.value)
@@ -7808,7 +7815,7 @@
               <div><dt>Total</dt><dd>${escapeHtml(totalText)}</dd></div>
               <div><dt>Equity</dt><dd>${escapeHtml(equityText)}</dd></div>
               <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
-              <div><dt>Funds Avail.</dt><dd>${escapeHtml(availableText)}</dd></div>
+              <div><dt>Init Margin</dt><dd>${escapeHtml(initialMarginText)}</dd></div>
               <div><dt>Transferable</dt><dd>${escapeHtml(transferableText)}</dd></div>
               <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
             </dl>
