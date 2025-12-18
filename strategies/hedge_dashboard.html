@@ -7465,9 +7465,25 @@
                   initialMarginTotal = 0;
                   if (positionsList.length) {
                     for (const position of positionsList) {
+                      const leverage = parseDecimal(position.leverage);
                       const marginInfo = computePositionMargin(position);
-                      if (marginInfo && Number.isFinite(marginInfo.initialMargin)) {
-                        initialMarginTotal += marginInfo.initialMargin;
+                      const notionalValue = Number.isFinite(marginInfo?.notional)
+                        ? marginInfo.notional
+                        : (() => {
+                            const notionalRaw = parseDecimal(position.notional_value ?? position.notional);
+                            if (Number.isFinite(notionalRaw)) return notionalRaw;
+                            const sizeVal = parseDecimal(position.net_size ?? position.size ?? position.quantity);
+                            const priceVal = parseDecimal(position.mark_price ?? position.markPrice ?? position.entry_price ?? position.entryPrice);
+                            return Number.isFinite(sizeVal) && Number.isFinite(priceVal) ? Math.abs(sizeVal * priceVal) : null;
+                          })();
+                      const initialMarginViaLeverage = Number.isFinite(notionalValue) && Number.isFinite(leverage) && leverage > 0
+                        ? notionalValue / leverage
+                        : null;
+                      const initialMarginValue = Number.isFinite(initialMarginViaLeverage)
+                        ? initialMarginViaLeverage
+                        : (Number.isFinite(marginInfo?.initialMargin) ? marginInfo.initialMargin : null);
+                      if (Number.isFinite(initialMarginValue)) {
+                        initialMarginTotal += initialMarginValue;
                       }
                     }
                   }
@@ -7841,6 +7857,7 @@
                   <th>Mark</th>
                   <th>PnL</th>
                   <th>Value</th>
+                  <th>Leverage</th>
                   <th>Init Margin</th>
                 </tr>
               </thead>
@@ -7864,14 +7881,30 @@
               const pnlText = Number.isFinite(pnlValue) ? formatSignedNumber(pnlValue, 6) : (pos.pnl ?? '--');
               const pnlClass = percentClass(pnlValue);
               const marginInfo = computePositionMargin(pos);
+              const leverageValue = parseDecimal(pos.leverage);
               if (marginInfo && Number.isFinite(marginInfo.maintenanceMargin)) {
                 maintenanceRequirementTotal += marginInfo.maintenanceMargin;
               }
-              const notionalText = marginInfo && Number.isFinite(marginInfo.notional)
-                ? numberFormatter.format(marginInfo.notional)
+              const notionalValue = Number.isFinite(marginInfo?.notional)
+                ? marginInfo.notional
+                : (() => {
+                    const notionalRaw = parseDecimal(pos.notional_value ?? pos.notional);
+                    if (Number.isFinite(notionalRaw)) return notionalRaw;
+                    const sizeVal = parseDecimal(pos.net_size ?? pos.size ?? pos.quantity);
+                    const priceVal = parseDecimal(pos.mark_price ?? pos.markPrice ?? pos.entry_price ?? pos.entryPrice);
+                    return Number.isFinite(sizeVal) && Number.isFinite(priceVal) ? Math.abs(sizeVal * priceVal) : null;
+                  })();
+              const notionalText = Number.isFinite(notionalValue)
+                ? numberFormatter.format(notionalValue)
                 : '--';
-              const initialMarginText = marginInfo && Number.isFinite(marginInfo.initialMargin)
-                ? numberFormatter.format(marginInfo.initialMargin)
+              const leverageText = Number.isFinite(leverageValue)
+                ? `${formatDecimal(leverageValue, 2)}x`
+                : '--';
+              const initialMarginValue = Number.isFinite(notionalValue) && Number.isFinite(leverageValue) && leverageValue > 0
+                ? notionalValue / leverageValue
+                : (Number.isFinite(marginInfo?.initialMargin) ? marginInfo.initialMargin : null);
+              const initialMarginText = Number.isFinite(initialMarginValue)
+                ? numberFormatter.format(initialMarginValue)
                 : '--';
               const row = document.createElement('tr');
               row.innerHTML = `
@@ -7882,6 +7915,7 @@
                 <td>${escapeHtml(markPriceText)}</td>
                 <td class="${pnlClass}">${escapeHtml(pnlText)}</td>
                 <td>${escapeHtml(notionalText)}</td>
+                <td>${escapeHtml(leverageText)}</td>
                 <td>${escapeHtml(initialMarginText)}</td>
               `;
               body.appendChild(row);
