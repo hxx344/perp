@@ -3109,6 +3109,18 @@ class CoordinatorApp:
                 return
             if cfg.max_transfer is not None and requested_amount > cfg.max_transfer:
                 requested_amount = cfg.max_transfer
+            source_payload = None
+            agents_block = snapshot.get("agents")
+            if isinstance(agents_block, dict):
+                source_payload = agents_block.get(measurement.source_agent)
+            source_transferable = self._extract_para_transferable_from_agent(source_payload) if source_payload else None
+            if source_transferable is not None:
+                self._para_auto_balance_status["source_transferable"] = self._decimal_to_str(source_transferable)
+                if source_transferable <= 0:
+                    self._para_auto_balance_status["last_error"] = "PARA auto balance skipped: no transferable funds at source"
+                    return
+                if requested_amount > source_transferable:
+                    requested_amount = source_transferable
             if requested_amount < cfg.min_transfer:
                 return
 
@@ -3410,6 +3422,33 @@ class CoordinatorApp:
             if value is not None:
                 return value
         return None
+
+    def _extract_para_transferable_from_agent(self, agent_payload: Optional[Dict[str, Any]]) -> Optional[Decimal]:
+        if not isinstance(agent_payload, dict):
+            return None
+        para_block = agent_payload.get("paradex_accounts")
+        if not isinstance(para_block, dict):
+            return None
+        summary = para_block.get("summary")
+        if not isinstance(summary, dict):
+            return None
+        candidates = (
+            summary.get("available_equity"),
+            summary.get("available_balance"),
+            summary.get("equity"),
+            summary.get("balance"),
+        )
+        values: List[Decimal] = []
+        for raw in candidates:
+            value = HedgeCoordinator._decimal_from(raw)
+            if value is not None:
+                values.append(value)
+        if not values:
+            return None
+        positives = [v for v in values if v > 0]
+        if not positives:
+            return Decimal("0")
+        return min(positives)
 
     def _extract_equity_from_agent(self, agent_payload: Dict[str, Any], *, prefer_available: bool) -> Optional[Decimal]:
         grvt_block = agent_payload.get("grvt_accounts")

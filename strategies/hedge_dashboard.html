@@ -7453,6 +7453,7 @@
                 const equity = parseDecimal(accountObj.equity ?? accountObj.available_equity);
                 const wallet = parseDecimal(accountObj.balance ?? accountObj.available_balance);
                 const available = parseDecimal(accountObj.available_balance ?? accountObj.available_equity);
+                const availableEquity = parseDecimal(accountObj.available_equity ?? accountObj.equity);
                 let initialMarginTotal = 0;
                 const positionsList = Array.isArray(accountObj.positions) ? accountObj.positions : [];
                 if (positionsList.length) {
@@ -7496,6 +7497,15 @@
                 if (Number.isFinite(initialMarginTotal)) {
                   aggregateInitialMargin += initialMarginTotal;
                 }
+                const transferableEstimate = estimateTransferableFunds({
+                  walletValue: wallet,
+                  equityValue: equity,
+                  availableBalanceValue: available,
+                  availableEquityValue: availableEquity,
+                  totalInitialMargin: initialMarginTotal,
+                  unrealizedPnl: total,
+                });
+
                 flattenedAccounts.push({
                   agentId,
                   name: accountObj.name ?? accountObj.account_id ?? accountObj.id ?? 'Account',
@@ -7505,6 +7515,8 @@
                   equity,
                   wallet,
                   available,
+                  availableEquity,
+                  transferableEstimate,
                   positions: positionsList,
                   initialMarginTotal,
                   updatedTs: snapshotTs,
@@ -7518,6 +7530,7 @@
               const equity = parseDecimal(summary.equity ?? summary.available_equity);
               const wallet = parseDecimal(summary.balance ?? summary.available_balance);
               const available = parseDecimal(summary.available_balance ?? summary.available_equity);
+              const availableEquity = parseDecimal(summary.available_equity ?? summary.equity);
               if (Number.isFinite(total)) {
                 aggregateTotalPnl += total;
                 hasTotal = true;
@@ -7553,6 +7566,15 @@
               if (Number.isFinite(accountCountFallback) && accountCountFallback > 0) {
                 aggregateAccountCount += accountCountFallback;
               }
+              const transferableEstimate = estimateTransferableFunds({
+                walletValue: wallet,
+                equityValue: equity,
+                availableBalanceValue: available,
+                availableEquityValue: availableEquity,
+                totalInitialMargin: 0,
+                unrealizedPnl: total,
+              });
+
               flattenedAccounts.push({
                 agentId,
                 name: summary.name ?? summary.label ?? agentId,
@@ -7562,6 +7584,8 @@
                 equity,
                 wallet,
                 available,
+                availableEquity,
+                transferableEstimate,
                 positions: [],
                 initialMarginTotal: 0,
                 updatedTs: snapshotTs,
@@ -7735,6 +7759,9 @@
           const equityText = Number.isFinite(entry.equity) ? numberFormatter.format(entry.equity) : '--';
           const walletText = Number.isFinite(entry.wallet) ? numberFormatter.format(entry.wallet) : '--';
           const availableText = Number.isFinite(entry.available) ? numberFormatter.format(entry.available) : '--';
+          const transferableText = Number.isFinite(entry.transferableEstimate)
+            ? numberFormatter.format(Math.max(0, entry.transferableEstimate))
+            : '--';
           const updatedText = formatTimestamp(entry.updatedTs) ?? '—';
           const ageSec = Number.isFinite(entry.updatedTs) ? Math.max(0, nowSec - entry.updatedTs) : null;
           let freshnessBadge = '';
@@ -7765,6 +7792,7 @@
               <div><dt>Equity</dt><dd>${escapeHtml(equityText)}</dd></div>
               <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
               <div><dt>Funds Avail.</dt><dd>${escapeHtml(availableText)}</dd></div>
+              <div><dt>Transferable</dt><dd>${escapeHtml(transferableText)}</dd></div>
               <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
             </dl>
           `;
