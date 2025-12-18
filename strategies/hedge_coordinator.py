@@ -1556,8 +1556,11 @@ class HedgeCoordinator:
             except Exception:
                 return None
 
+        kind = "para_stale" if isinstance(alert.key, str) and alert.key.startswith("para_stale::") else "risk"
+
         entry = {
             "timestamp": time.time(),
+            "kind": kind,
             "source": source,
             "status": status,
             "agent_id": alert.agent_id,

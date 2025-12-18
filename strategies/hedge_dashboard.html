@@ -5602,6 +5602,10 @@
         if (entry.status === 'error') {
           label += ' · 失败';
         }
+        const kind = String(entry.kind || '').toLowerCase();
+        if (kind === 'para_stale') {
+          label += ' · 数据不新鲜';
+        }
         return label;
       }
 
