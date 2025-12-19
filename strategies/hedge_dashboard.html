@@ -7859,12 +7859,12 @@
             </dl>
           `;
 
-          let maintenanceRequirementTotal = 0;
+          const maintenanceRequirementTotal = Number.isFinite(entry.initialMarginTotal)
+            ? 0.5 * entry.initialMarginTotal
+            : 0;
           const ratioBaseValue = Number.isFinite(entry.equity) && entry.equity > 0
             ? entry.equity
-            : Number.isFinite(entry.wallet) && entry.wallet > 0
-              ? entry.wallet
-              : null;
+            : null;
 
           if (positions.length) {
             const table = document.createElement('table');
@@ -7904,9 +7904,6 @@
               const pnlClass = percentClass(pnlValue);
               const marginInfo = computePositionMargin(pos);
               const leverageValue = parseDecimal(pos.leverage);
-              if (marginInfo && Number.isFinite(marginInfo.maintenanceMargin)) {
-                maintenanceRequirementTotal += marginInfo.maintenanceMargin;
-              }
               const notionalValue = Number.isFinite(marginInfo?.notional)
                 ? marginInfo.notional
                 : (() => {
