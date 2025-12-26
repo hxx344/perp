@@ -7801,8 +7801,15 @@
         for (const entry of flattenedAccounts) {
           const positions = Array.isArray(entry.positions)
             ? entry.positions.slice().sort((a, b) => {
-                const aSymbol = (a.symbol ?? '').toString();
-                const bSymbol = (b.symbol ?? '').toString();
+                const aPnl = parseDecimal(a?.pnl);
+                const bPnl = parseDecimal(b?.pnl);
+                const aAbs = Number.isFinite(aPnl) ? Math.abs(aPnl) : -1;
+                const bAbs = Number.isFinite(bPnl) ? Math.abs(bPnl) : -1;
+                if (aAbs !== bAbs) {
+                  return bAbs - aAbs;
+                }
+                const aSymbol = (a?.symbol ?? '').toString();
+                const bSymbol = (b?.symbol ?? '').toString();
                 return aSymbol.localeCompare(bSymbol, undefined, { sensitivity: 'base' });
               })
             : [];
