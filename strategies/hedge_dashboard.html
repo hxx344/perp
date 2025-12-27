@@ -2789,7 +2789,9 @@
   const MAX_SPREAD_HISTORY_POINTS = 1800;
     const MAX_STRATEGY_EVENTS = 120;
   const MAX_GRVT_POSITIONS = 12;
-  const MAX_PARA_POSITIONS = 12;
+  // PARA 每个账户持仓默认展示上限；设为 Infinity 可展示全部。
+  // 为了避免页面太长，仍保留“显示更多/收起”的交互。
+  const MAX_PARA_POSITIONS = 50;
   const RISK_GRADIENTS = [
     {
       max: 0.1,
@@ -8158,7 +8160,8 @@
               <tbody></tbody>
             `;
             const body = table.querySelector('tbody');
-            const trimmed = positions.slice(0, MAX_PARA_POSITIONS);
+            const limit = Number.isFinite(MAX_PARA_POSITIONS) ? MAX_PARA_POSITIONS : positions.length;
+            const trimmed = positions.slice(0, limit);
             for (const pos of trimmed) {
               const symbol = pos.symbol ?? '--';
               if (symbol) {
@@ -9409,6 +9412,14 @@
       }
 
       function renderSpread(data) {
+
+            if (positions.length > trimmed.length) {
+              const hint = document.createElement('p');
+              hint.className = 'summary-sub';
+              hint.style.marginTop = '0.6rem';
+              hint.textContent = `仅展示前 ${trimmed.length} 条持仓（共 ${positions.length} 条）。如需全量展示可提高 MAX_PARA_POSITIONS。`;
+              card.appendChild(hint);
+            }
         if (!spreadAgentCount || !spreadEmpty || !spreadCard) {
           return;
         }
