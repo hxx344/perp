@@ -1651,6 +1651,11 @@
             <p class="grvt-summary-updated hidden" id="para-summary-updated">Updated —</p>
             <div class="summary-sub" id="para-source-updates"></div>
           </article>
+          <article class="card grvt-summary-card" id="para-reduce-suggestion-card">
+            <h3>减仓建议</h3>
+            <div class="value" id="para-reduce-suggestion-main">--</div>
+            <p class="summary-sub" id="para-reduce-suggestion-detail">等待账户与持仓数据…</p>
+          </article>
         </div>
         <div>
           <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">Per Account Net PnL</h3>
@@ -2597,6 +2602,9 @@
   const paraSourceUpdates = document.getElementById('para-source-updates');
   const paraSummaryTime = document.getElementById('para-summary-time');
   const paraSummaryUpdated = document.getElementById('para-summary-updated');
+  const paraReduceSuggestionCard = document.getElementById('para-reduce-suggestion-card');
+  const paraReduceSuggestionMain = document.getElementById('para-reduce-suggestion-main');
+  const paraReduceSuggestionDetail = document.getElementById('para-reduce-suggestion-detail');
   const paraPriceChartWrapper = document.getElementById('para-price-chart-wrapper');
   const paraPriceChartCanvas = document.getElementById('para-price-chart');
   const paraPriceChartNote = document.getElementById('para-price-chart-note');
@@ -3862,6 +3870,250 @@
           return '';
         }
         return text.toUpperCase();
+      }
+
+      function normalizeParaPositionSymbol(value) {
+        const raw = normalizeSymbolLabel(value);
+        if (!raw) {
+          return '';
+        }
+        // Common forms:
+        // - BTC
+        // - BTC-USD
+        // - BTC-PERP
+        // - BTCUSD
+        // - FF-USD
+        // Keep base asset for matching.
+        const cleaned = raw.replace(/\s+/g, '');
+        const parts = cleaned.split(/[-_/]/g).filter(Boolean);
+        if (parts.length >= 1) {
+          // If it looks like FF-USD keep FF-USD as-is for exclusion.
+          if (parts.length >= 2 && parts[0] === 'FF' && parts[1] === 'USD') {
+            return 'FF-USD';
+          }
+          return parts[0];
+        }
+        // Fallback: try to extract leading letters.
+        const match = cleaned.match(/^[A-Z]+/);
+        return match ? match[0] : cleaned;
+      }
+
+      function sumPositionsPnlByBase(positions, { excludeSymbols = new Set() } = {}) {
+        const out = {};
+        if (!Array.isArray(positions)) {
+          return out;
+        }
+        for (const pos of positions) {
+          const base = normalizeParaPositionSymbol(pos?.symbol);
+          if (!base) {
+            continue;
+          }
+          if (excludeSymbols.has(base) || excludeSymbols.has(normalizeSymbolLabel(pos?.symbol))) {
+            continue;
+          }
+          const pnl = parseDecimal(pos?.pnl);
+          if (!Number.isFinite(pnl)) {
+            continue;
+          }
+          out[base] = (out[base] ?? 0) + pnl;
+        }
+        return out;
+      }
+
+      function estimatePnLPerUnit(positions, baseSymbol) {
+        // Estimate how much total PnL changes when reducing 1 coin (absolute size)
+        // using a simple sensitivity: dPnL/dSize ≈ sign(size) * (mark - entry)
+        // Aggregate across all positions of that base.
+        if (!Array.isArray(positions) || !baseSymbol) {
+          return null;
+        }
+        let total = 0;
+        let hasAny = false;
+        for (const pos of positions) {
+          const base = normalizeParaPositionSymbol(pos?.symbol);
+          if (base !== baseSymbol) {
+            continue;
+          }
+          const size = parseDecimal(pos?.net_size ?? pos?.size ?? pos?.quantity);
+          const entry = parseDecimal(pos?.entry_price ?? pos?.entryPrice);
+          const mark = parseDecimal(pos?.mark_price ?? pos?.markPrice);
+          if (!Number.isFinite(size) || !Number.isFinite(entry) || !Number.isFinite(mark)) {
+            continue;
+          }
+          const sign = size >= 0 ? 1 : -1;
+          total += sign * (mark - entry);
+          hasAny = true;
+        }
+        if (!hasAny) {
+          return null;
+        }
+        // If total is very small, the estimate is unstable.
+        if (!Number.isFinite(total) || Math.abs(total) < 1e-9) {
+          return null;
+        }
+        return total;
+      }
+
+      function estimateTotalAbsSize(positions, baseSymbol) {
+        if (!Array.isArray(positions) || !baseSymbol) {
+          return 0;
+        }
+        let totalAbs = 0;
+        for (const pos of positions) {
+          const base = normalizeParaPositionSymbol(pos?.symbol);
+          if (base !== baseSymbol) {
+            continue;
+          }
+          const size = parseDecimal(pos?.net_size ?? pos?.size ?? pos?.quantity);
+          if (!Number.isFinite(size)) {
+            continue;
+          }
+          totalAbs += Math.abs(size);
+        }
+        return totalAbs;
+      }
+
+      function computeParaReduceSuggestion(flattenedAccounts) {
+        // Contract:
+        // - Only meaningful when there are exactly 2 accounts (two sources/accounts).
+        // - We exclude FF-USD position PnL impact entirely.
+        // Output: { ok, message, symbol, reduceSize, details }
+        const accounts = Array.isArray(flattenedAccounts) ? flattenedAccounts : [];
+        if (accounts.length !== 2) {
+          return {
+            ok: false,
+            message: accounts.length ? `当前 ${accounts.length} 个账户，减仓建议仅在 2 个账户时启用。` : '等待账户数据…',
+          };
+        }
+
+        const [a, b] = accounts;
+        const exclude = new Set(['FF-USD', 'FFUSD']);
+
+        // Total PnL (display-level) - remove FF-USD position pnl if present
+        const aPosPnl = sumPositionsPnlByBase(a.positions, { excludeSymbols: exclude });
+        const bPosPnl = sumPositionsPnlByBase(b.positions, { excludeSymbols: exclude });
+        const aFf = sumPositionsPnlByBase(a.positions, { excludeSymbols: new Set() });
+        const bFf = sumPositionsPnlByBase(b.positions, { excludeSymbols: new Set() });
+        const aFfPnl = Number.isFinite(aFf['FF-USD']) ? aFf['FF-USD'] : 0;
+        const bFfPnl = Number.isFinite(bFf['FF-USD']) ? bFf['FF-USD'] : 0;
+
+        const aTotalRaw = Number.isFinite(a.total) ? a.total : 0;
+        const bTotalRaw = Number.isFinite(b.total) ? b.total : 0;
+        const aTotal = aTotalRaw - aFfPnl;
+        const bTotal = bTotalRaw - bFfPnl;
+        const deltaTotal = aTotal - bTotal; // want -> 0
+
+        const aBtc = Number.isFinite(aPosPnl.BTC) ? aPosPnl.BTC : 0;
+        const bBtc = Number.isFinite(bPosPnl.BTC) ? bPosPnl.BTC : 0;
+        const aEth = Number.isFinite(aPosPnl.ETH) ? aPosPnl.ETH : 0;
+        const bEth = Number.isFinite(bPosPnl.ETH) ? bPosPnl.ETH : 0;
+        const deltaBtc = aBtc - bBtc;
+        const deltaEth = aEth - bEth;
+
+        // Decide which symbol reduction most reduces |deltaTotal|.
+        // Reducing exposure tends to move that account's PnL toward 0 on that symbol.
+        // Approx effect if we reduce fraction f in the account that is "ahead" on that symbol:
+        // deltaTotal' ≈ deltaTotal - f * deltaSymbol
+        // Choose symbol with larger alignment and propose f that minimizes absolute delta.
+        const candidates = [
+          { symbol: 'BTC', deltaSymbol: deltaBtc },
+          { symbol: 'ETH', deltaSymbol: deltaEth },
+        ].filter((c) => Number.isFinite(c.deltaSymbol) && Math.abs(c.deltaSymbol) > 1e-9);
+
+        if (!Number.isFinite(deltaTotal) || Math.abs(deltaTotal) < 1e-6) {
+          return {
+            ok: true,
+            symbol: null,
+            reduceSize: 0,
+            details: `已基本平衡（排除 FF-USD 后 ΔPnL=${numberFormatter.format(deltaTotal)}）。`,
+            message: '无需减仓',
+          };
+        }
+
+        if (!candidates.length) {
+          return {
+            ok: false,
+            message: '缺少 BTC/ETH 仓位 PnL（或仅有 FF-USD），无法计算减仓建议。',
+          };
+        }
+
+        let best = null;
+        for (const c of candidates) {
+          // If deltaSymbol has opposite sign to deltaTotal, reducing that symbol would worsen.
+          const alignment = deltaTotal * c.deltaSymbol;
+          if (alignment <= 0) {
+            continue;
+          }
+          // optimal f = deltaTotal / deltaSymbol (clamped 0..1)
+          const f = clamp(deltaTotal / c.deltaSymbol, 0, 1);
+          const newDelta = deltaTotal - f * c.deltaSymbol;
+          const score = Math.abs(newDelta);
+          if (!best || score < best.score) {
+            best = { ...c, f, newDelta, score };
+          }
+        }
+
+        if (!best) {
+          return {
+            ok: false,
+            message: `BTC/ETH 的 PnL 差与总 PnL 差方向不一致（ΔTotal=${numberFormatter.format(deltaTotal)}，ΔBTC=${numberFormatter.format(deltaBtc)}，ΔETH=${numberFormatter.format(deltaEth)}），按该规则不建议减仓。`,
+          };
+        }
+
+        // Decide which account to reduce: the one contributing to deltaSymbol sign.
+        // deltaSymbol = a - b.
+        // If deltaTotal > 0 and deltaSymbol > 0, reduce symbol exposure on A.
+        // If deltaTotal < 0 and deltaSymbol < 0, reduce on B.
+        // Equivalent: reduce on the side where total PnL is higher (sign(deltaTotal)).
+        const reduceOnA = deltaTotal > 0;
+        const targetAccount = reduceOnA ? a : b;
+        const targetName = targetAccount?.name ?? (reduceOnA ? 'Account A' : 'Account B');
+
+        const totalAbsSize = estimateTotalAbsSize(targetAccount.positions, best.symbol);
+        if (!(totalAbsSize > 0)) {
+          return {
+            ok: false,
+            message: `${targetName} 没有可减的 ${best.symbol} 仓位 (size=0)。`,
+          };
+        }
+
+        // Convert fraction f to size recommendation.
+        // Use size-based (reduce f of total abs size). Also estimate pnl-per-unit check.
+        const rawReduceSize = best.f * totalAbsSize;
+
+        // Optional refinement: if we can estimate pnl per 1 coin, compute a size that closes delta.
+        // Need |dPnL/dSize| > 0.
+        const pnlPerUnit = estimatePnLPerUnit(targetAccount.positions, best.symbol);
+        let refinedSize = null;
+        if (Number.isFinite(pnlPerUnit)) {
+          // We want reduceSize so that deltaTotal' = deltaTotal - reduceSize * pnlPerUnit (approx)
+          // but only if sign aligns.
+          if (deltaTotal * pnlPerUnit > 0) {
+            refinedSize = clamp(Math.abs(deltaTotal / pnlPerUnit), 0, totalAbsSize);
+          }
+        }
+
+        const suggestionSize = Number.isFinite(refinedSize) ? refinedSize : rawReduceSize;
+        const finalSize = clamp(suggestionSize, 0, totalAbsSize);
+
+        const main = `${best.symbol} 建议减仓 ~${formatCoinAmount(finalSize, 4)} （${targetName}）`;
+        const detailParts = [];
+        detailParts.push(`排除 FF-USD 后：ΔTotal=${numberFormatter.format(deltaTotal)} → 目标接近 0`);
+        detailParts.push(`Δ${best.symbol}=${numberFormatter.format(best.deltaSymbol)}，按比例 f=${(best.f * 100).toFixed(1)}%`);
+        if (Number.isFinite(pnlPerUnit)) {
+          detailParts.push(`估算 dPnL/dSize≈${formatSignedNumber(pnlPerUnit, 4)} / 1${best.symbol}`);
+        }
+        detailParts.push(`预计减仓后：ΔTotal≈${numberFormatter.format(best.newDelta)}（粗略）`);
+
+        return {
+          ok: true,
+          symbol: best.symbol,
+          reduceSize: finalSize,
+          reduceOn: reduceOnA ? 'A' : 'B',
+          reduceAccountName: targetName,
+          message: main,
+          details: detailParts.join(' · '),
+        };
       }
 
       function describeSymbolScope(symbols) {
@@ -7724,6 +7976,19 @@
         const updatedText = formatTimestamp(latestUpdate);
         paraSummaryTime.textContent = updatedText ?? '--';
         paraSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
+
+        // ---- PARA reduce suggestion (BTC/ETH) ----
+        if (paraReduceSuggestionMain && paraReduceSuggestionDetail) {
+          const meaningfulAccounts = flattenedAccounts.filter((acc) => Array.isArray(acc.positions) && acc.positions.length);
+          const suggestion = computeParaReduceSuggestion(meaningfulAccounts.length ? meaningfulAccounts : flattenedAccounts);
+          if (suggestion?.ok) {
+            paraReduceSuggestionMain.textContent = suggestion.message || '--';
+            paraReduceSuggestionDetail.textContent = suggestion.details || '—';
+          } else {
+            paraReduceSuggestionMain.textContent = '—';
+            paraReduceSuggestionDetail.textContent = suggestion?.message || '等待账户与持仓数据…';
+          }
+        }
 
         if (paraSourceUpdates) {
           paraSourceUpdates.innerHTML = '';
