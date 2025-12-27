@@ -8113,6 +8113,8 @@
             freshnessBadge = '<span class="badge badge-muted">Time N/A</span>';
           }
 
+          const positionsCountText = `${positions.length} pos`;
+
           card.innerHTML = `
             <header>
               <div>
@@ -8124,6 +8126,7 @@
             </header>
             <dl class="grvt-account-metrics">
               <div><dt>Total</dt><dd>${escapeHtml(totalText)}</dd></div>
+              <div><dt>Positions</dt><dd>${escapeHtml(positionsCountText)}</dd></div>
               <div><dt>Equity</dt><dd>${escapeHtml(equityText)}</dd></div>
               <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
               <div><dt>Init Margin</dt><dd>${escapeHtml(initialMarginText)}</dd></div>
