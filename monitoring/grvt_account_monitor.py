@@ -65,7 +65,8 @@ getcontext().prec = 28
 LOGGER = logging.getLogger("monitor.grvt_accounts")
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
-MAX_ACCOUNT_POSITIONS = 12
+# 每个账号上报的持仓条数上限。默认 0 表示不截断（全量上报）。
+MAX_ACCOUNT_POSITIONS = 0
 BALANCE_TOTAL_PATHS: Tuple[Tuple[str, ...], ...] = (
     ("total", "USDT"),
     ("total", "usdt"),
@@ -453,7 +454,10 @@ class GrvtAccountMonitor:
         self._agent_id = agent_id
         self._poll_interval = max(poll_interval, 2.0)
         self._timeout = max(request_timeout, 1.0)
-        self._max_positions = max(1, max_positions)
+        if max_positions in (None, 0):
+            self._max_positions = None
+        else:
+            self._max_positions = max(1, int(max_positions))
         self._http = requests.Session()
         username = (coordinator_username or "").strip()
         password = (coordinator_password or "").strip()
@@ -622,7 +626,8 @@ class GrvtAccountMonitor:
             position_rows.append(position_payload)
             self._record_position(position_payload.get("symbol"), signed_size)
 
-        position_rows = position_rows[: self._max_positions]
+        if self._max_positions is not None:
+            position_rows = position_rows[: self._max_positions]
 
         balance_total: Optional[Decimal] = None
         balance_available: Optional[Decimal] = None
@@ -2010,7 +2015,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_SECONDS, help="Seconds between refreshes")
     parser.add_argument("--request-timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="HTTP timeout for coordinator updates")
-    parser.add_argument("--max-positions", type=int, default=MAX_ACCOUNT_POSITIONS, help="Maximum positions to include per account in the payload")
+    parser.add_argument(
+        "--max-positions",
+        type=int,
+        default=MAX_ACCOUNT_POSITIONS,
+        help="Maximum positions to include per account in the payload (0 = all)",
+    )
     parser.add_argument(
         "--default-symbol",
         help="Fallback GRVT symbol/instrument to trade when adjustments omit explicit symbols",

@@ -45,7 +45,10 @@ LOGGER = logging.getLogger("monitor.paradex_accounts")
 DEFAULT_RPC_VERSION = "v0_9"
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
-MAX_ACCOUNT_POSITIONS = 12
+# 每个账号上报的持仓条数上限。
+# 之前默认 12 会导致 dashboard 看起来“最多只有 12 条持仓”。
+# 设为 None 表示默认不截断（上报全量）。
+MAX_ACCOUNT_POSITIONS: Optional[int] = None
 BALANCE_TOTAL_PATHS: Tuple[Tuple[str, ...], ...] = (
     ("total", "USDT"),
     ("total", "usdt"),
@@ -502,7 +505,7 @@ class ParadexAccountMonitor:
         agent_id: str,
         poll_interval: float,
         request_timeout: float,
-        max_positions: int,
+        max_positions: Optional[int],
         coordinator_username: Optional[str] = None,
         coordinator_password: Optional[str] = None,
         default_market: Optional[str] = None,
@@ -513,7 +516,11 @@ class ParadexAccountMonitor:
         self._agent_id = agent_id
         self._poll_interval = max(poll_interval, 2.0)
         self._timeout = max(request_timeout, 1.0)
-        self._max_positions = max(1, max_positions)
+        # None 表示不截断（全量上报）；否则至少为 1。
+        if max_positions in (None, 0):
+            self._max_positions = None
+        else:
+            self._max_positions = max(1, int(max_positions))
         self._http = requests.Session()
         username = (coordinator_username or "").strip()
         password = (coordinator_password or "").strip()
@@ -807,7 +814,8 @@ class ParadexAccountMonitor:
             position_rows.append(position_payload)
             self._record_position(symbol, signed_size if signed_size is not None else decimal_from(position_payload.get("net_size")))
 
-        position_rows = position_rows[: self._max_positions]
+        if self._max_positions is not None:
+            position_rows = position_rows[: self._max_positions]
 
         balance_payload = self._fetch_balances()
         balance_total, balance_available = self._parse_balances(balance_payload)
@@ -1266,8 +1274,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-positions",
         type=int,
-        default=MAX_ACCOUNT_POSITIONS,
-        help="Maximum positions to include per account in the payload",
+        default=0 if MAX_ACCOUNT_POSITIONS is None else int(MAX_ACCOUNT_POSITIONS),
+        help="Maximum positions to include per account in the payload (0 = all)",
     )
     parser.add_argument(
         "--default-market",
