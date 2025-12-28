@@ -1223,7 +1223,7 @@ class ParadexAccountMonitor:
 
     def run_once(self) -> None:
         payload = self._collect()
-        if payload is None:
+        if payload is None or not isinstance(payload, dict):
             LOGGER.warning("Skipping coordinator update; unable to collect Paradex account data")
         else:
             self._push(payload)

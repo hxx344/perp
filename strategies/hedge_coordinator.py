@@ -161,6 +161,136 @@ TRANSFERABLE_HISTORY_LIMIT = 720
 TRANSFERABLE_HISTORY_MERGE_SECONDS = 20.0
 ALERT_HISTORY_LIMIT = 200
 
+# Feishu webhook push (PARA risk snapshot)
+FEISHU_WEBHOOK_ENV = "FEISHU_WEBHOOK_URL"
+FEISHU_PARA_PUSH_ENABLED_ENV = "FEISHU_PARA_PUSH_ENABLED"
+FEISHU_PARA_PUSH_INTERVAL_ENV = "FEISHU_PARA_PUSH_INTERVAL"
+
+# Keep the buffer logic aligned with hedge_dashboard.html
+RISK_CAPACITY_DEVIATION_THRESHOLD = 0.12
+RISK_CAPACITY_PENDING_TOLERANCE = 0.10
+RISK_CAPACITY_CONFIRMATION_CYCLES = 3
+RISK_CAPACITY_MIN_ABS_DELTA = 100
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    text = raw.strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _format_percent(value: float, decimals: int = 2) -> str:
+    if value is None or not math.isfinite(value):
+        return "-"
+    return f"{value:.{max(int(decimals), 0)}f}%"
+
+
+def _format_decimal(value: Decimal, decimals: int = 2) -> str:
+    try:
+        quant = Decimal("1") if decimals <= 0 else Decimal("1").scaleb(-decimals)
+        return format(value.quantize(quant), "f")
+    except Exception:
+        return str(value)
+
+
+@dataclass
+class RiskCapacityBufferState:
+    accepted_value: Optional[Decimal] = None
+    accepted_at: Optional[float] = None
+    pending_value: Optional[Decimal] = None
+    pending_cycles: int = 0
+    pending_delta_pct: float = 0.0
+    pending_since: Optional[float] = None
+
+
+def _evaluate_risk_capacity_buffer(
+    *,
+    has_value: bool,
+    value: Optional[Decimal],
+    timestamp: Optional[float],
+    base_note: str,
+    state: RiskCapacityBufferState,
+) -> Tuple[Optional[Decimal], str, str]:
+    """Python port of `evaluateRiskCapacityBuffer` in hedge_dashboard.html."""
+
+    safe_timestamp = float(timestamp) if timestamp is not None and math.isfinite(float(timestamp)) else time.time()
+    safe_base_note = base_note or ""
+    if not has_value or value is None:
+        state.pending_value = None
+        state.pending_cycles = 0
+        state.pending_delta_pct = 0.0
+        state.pending_since = None
+        if state.accepted_value is None:
+            return None, (safe_base_note or "缺少风险基数数据"), "missing"
+        note_parts = [part for part in (safe_base_note, "沿用上次值") if part]
+        return state.accepted_value, " · ".join(note_parts), "stale"
+
+    if state.accepted_value is None:
+        state.accepted_value = value
+        state.accepted_at = safe_timestamp
+        state.pending_value = None
+        state.pending_cycles = 0
+        state.pending_delta_pct = 0.0
+        state.pending_since = None
+        return value, safe_base_note, "fresh"
+
+    previous = state.accepted_value
+    delta = abs(value - previous)
+    base = max(abs(previous), Decimal("1"))
+    try:
+        percent_delta = float(delta / base)
+    except Exception:
+        percent_delta = 0.0
+    exceeds_threshold = percent_delta >= RISK_CAPACITY_DEVIATION_THRESHOLD and delta >= Decimal(str(RISK_CAPACITY_MIN_ABS_DELTA))
+
+    if not exceeds_threshold:
+        state.accepted_value = value
+        state.accepted_at = safe_timestamp
+        state.pending_value = None
+        state.pending_cycles = 0
+        state.pending_delta_pct = 0.0
+        state.pending_since = None
+        return value, safe_base_note, "fresh"
+
+    tolerance = max(abs(value), Decimal("1")) * Decimal(str(RISK_CAPACITY_PENDING_TOLERANCE))
+    if state.pending_value is not None and abs(state.pending_value - value) <= tolerance:
+        state.pending_cycles += 1
+    else:
+        state.pending_value = value
+        state.pending_cycles = 1
+        state.pending_since = safe_timestamp
+    state.pending_delta_pct = percent_delta
+
+    if state.pending_cycles >= RISK_CAPACITY_CONFIRMATION_CYCLES:
+        state.accepted_value = value
+        state.accepted_at = safe_timestamp
+        state.pending_value = None
+        state.pending_cycles = 0
+        state.pending_delta_pct = 0.0
+        state.pending_since = None
+        return value, safe_base_note, "fresh"
+
+    note_parts = [part for part in (safe_base_note,) if part]
+    note_parts.append(f"数据确认中 ({state.pending_cycles}/{RISK_CAPACITY_CONFIRMATION_CYCLES})")
+    note_parts.append(f"偏差 {_format_percent(percent_delta * 100, 1)}")
+    return previous, " · ".join(note_parts), "pending"
+
 DEFAULT_MARGIN_SCHEDULE: Tuple[Tuple[str, str, str], ...] = (
     ("600000", "0.02", "0.01"),
     ("1600000", "0.04", "0.02"),
@@ -1217,6 +1347,108 @@ class HedgeCoordinator:
         self._global_risk_stats: Optional[GlobalRiskSnapshot] = None
         self._alert_history: Deque[Dict[str, Any]] = deque(maxlen=ALERT_HISTORY_LIMIT)
         self._alert_history_lock = asyncio.Lock()
+
+        # Feishu PARA periodic push
+        self._feishu_webhook_url = (os.getenv(FEISHU_WEBHOOK_ENV) or "").strip() or None
+        self._feishu_para_push_enabled = _env_bool(FEISHU_PARA_PUSH_ENABLED_ENV, False)
+        self._feishu_para_push_interval = max(_env_float(FEISHU_PARA_PUSH_INTERVAL_ENV, 300.0), 30.0)
+        self._feishu_task: Optional[asyncio.Task[Any]] = None
+        self._feishu_session: Optional[ClientSession] = None
+        self._para_risk_capacity_buffer = RiskCapacityBufferState()
+
+    async def start_background_tasks(self) -> None:
+        if not self._feishu_webhook_url or not self._feishu_para_push_enabled:
+            return
+        if self._feishu_task is not None:
+            return
+        self._feishu_session = ClientSession(timeout=ClientTimeout(total=10.0))
+        self._feishu_task = asyncio.create_task(self._run_feishu_para_push_loop())
+        LOGGER.info(
+            "Feishu PARA push enabled: interval=%.0fs url=%s",
+            self._feishu_para_push_interval,
+            "set" if self._feishu_webhook_url else "missing",
+        )
+
+    async def stop_background_tasks(self) -> None:
+        task = self._feishu_task
+        self._feishu_task = None
+        if task:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        if self._feishu_session and not self._feishu_session.closed:
+            await self._feishu_session.close()
+        self._feishu_session = None
+
+    async def _run_feishu_para_push_loop(self) -> None:
+        try:
+            # fire immediately, then every interval
+            while True:
+                await self._try_send_feishu_para_snapshot()
+                await asyncio.sleep(self._feishu_para_push_interval)
+        except asyncio.CancelledError:  # pragma: no cover
+            raise
+        except Exception as exc:  # pragma: no cover
+            LOGGER.warning("Feishu PARA push loop stopped: %s", exc)
+
+    def _build_para_risk_push_text(self, now: Optional[float] = None) -> Optional[str]:
+        stats = self._para_risk_stats
+        if stats is None:
+            return None
+
+        ts = now if now is not None else time.time()
+        base_note = ""
+        buffered_capacity, capacity_note, capacity_status = _evaluate_risk_capacity_buffer(
+            has_value=True,
+            value=stats.risk_capacity,
+            timestamp=ts,
+            base_note=base_note,
+            state=self._para_risk_capacity_buffer,
+        )
+
+        ratio = None
+        if buffered_capacity is not None and buffered_capacity > 0 and stats.worst_loss_value > 0:
+            try:
+                ratio = float(stats.worst_loss_value / buffered_capacity)
+            except Exception:
+                ratio = None
+
+        ratio_text = _format_percent((ratio or 0.0) * 100, 2) if ratio is not None else "-"
+        worst_label = stats.worst_account_label or "-"
+        worst_agent = stats.worst_agent_id or "-"
+
+        lines = [
+            "[PARA] 风险播报",
+            f"RISK LEVEL: {ratio_text}",
+            f"风险裕量(risk_capacity): {_format_decimal(buffered_capacity or Decimal('0'), 2)}",
+            f"最坏亏损(worst_loss): {_format_decimal(stats.worst_loss_value, 2)}",
+            f"最坏账户: {worst_label} ({worst_agent})",
+        ]
+        if capacity_note:
+            lines.append(f"备注: {capacity_note} ({capacity_status})")
+        return "\n".join(lines)
+
+    async def _try_send_feishu_para_snapshot(self) -> None:
+        if not self._feishu_webhook_url or not self._feishu_para_push_enabled:
+            return
+        session = self._feishu_session
+        if session is None or session.closed:
+            self._feishu_session = ClientSession(timeout=ClientTimeout(total=10.0))
+            session = self._feishu_session
+
+        async with self._lock:
+            text = self._build_para_risk_push_text()
+        if not text:
+            return
+
+        payload = {"msg_type": "text", "content": {"text": text}}
+        try:
+            async with session.post(self._feishu_webhook_url, json=payload) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    LOGGER.warning("Feishu webhook push failed (HTTP %s): %s", resp.status, body[:200])
+        except Exception as exc:  # pragma: no cover
+            LOGGER.warning("Feishu webhook push error: %s", exc)
 
     def _apply_alert_settings(self, settings: Optional[RiskAlertSettings] = None) -> None:
         if settings is not None:
@@ -2311,6 +2543,10 @@ class CoordinatorApp:
         if self._vol_monitor:
             self._app.on_startup.append(self._on_startup)
             self._app.on_cleanup.append(self._on_cleanup)
+        else:
+            # still need Feishu background tasks even when volatility monitor is disabled
+            self._app.on_startup.append(self._on_startup)
+            self._app.on_cleanup.append(self._on_cleanup)
 
     @property
     def app(self) -> web.Application:
@@ -2320,6 +2556,7 @@ class CoordinatorApp:
         del app  # unused
         if self._vol_monitor:
             await self._vol_monitor.start()
+        await self._coordinator.start_background_tasks()
 
     async def _on_cleanup(self, app: web.Application) -> None:
         del app  # unused
@@ -2327,6 +2564,7 @@ class CoordinatorApp:
             await self._vol_monitor.stop()
         if self._price_service:
             await self._price_service.close()
+        await self._coordinator.stop_background_tasks()
 
     async def handle_dashboard_redirect(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request, redirect_on_fail=True)
@@ -4307,7 +4545,7 @@ async def _run_app(args: argparse.Namespace) -> None:
         dashboard_username=args.dashboard_username,
         dashboard_password=args.dashboard_password,
         dashboard_session_ttl=args.dashboard_session_ttl,
-    alert_settings=alert_settings,
+        alert_settings=alert_settings,
         enable_volatility_monitor=enable_vol_monitor,
         volatility_symbols=volatility_symbols,
         volatility_poll_interval=max(getattr(args, "volatility_poll_interval", 60.0), 20.0),
