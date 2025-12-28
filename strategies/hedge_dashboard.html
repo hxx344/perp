@@ -2903,6 +2903,7 @@
   let paraAutoDirty = false;
   let paraAutoLastConfig = null;
   let riskSettingsBusy = false;
+  let paraRiskSettingsBusy = false;
   let riskSettingsDirty = false;
   let riskSettingsSnapshot = null;
   let riskTestBusy = false;
@@ -6029,8 +6030,9 @@
 
       function updateRiskInputsState() {
         getRiskViews().forEach((view) => {
+          const viewBusy = view.mode === 'para' ? paraRiskSettingsBusy : riskSettingsBusy;
           const enabled = Boolean(view.enabledInput?.checked);
-          const disableThreshold = riskSettingsBusy || !enabled;
+          const disableThreshold = viewBusy || !enabled;
           [view.thresholdSlider, view.thresholdInput, view.resetInput, view.cooldownInput].forEach((input) => {
             if (input) {
               input.disabled = disableThreshold && input !== view.enabledInput;
@@ -6038,15 +6040,15 @@
           });
           [view.barkUrlInput, view.barkTimeoutInput, view.titleTemplateInput, view.bodyTemplateInput, view.barkAppendInput].forEach((input) => {
             if (input) {
-              input.disabled = riskSettingsBusy;
+              input.disabled = viewBusy;
             }
           });
         });
       }
 
       function updateRiskButtons() {
-        const disabled = riskSettingsBusy;
         getRiskViews().forEach((view) => {
+          const disabled = view.mode === 'para' ? paraRiskSettingsBusy : riskSettingsBusy;
           [view.saveButton, view.refreshButton].forEach((button) => {
             if (button) {
               button.disabled = disabled;
@@ -6057,8 +6059,9 @@
             view.disableButton.disabled = disabled || !enabled;
           }
           if (view.testButton) {
-            const hasDestination = Boolean(riskSettingsSnapshot?.bark_url);
-            view.testButton.disabled = riskSettingsBusy || riskTestBusy || !hasDestination;
+            const viewBarkUrl = view.barkUrlInput ? getInputValue(view.barkUrlInput) : '';
+            const hasDestination = Boolean(String(viewBarkUrl || '').trim());
+            view.testButton.disabled = disabled || riskTestBusy || !hasDestination;
             view.testButton.textContent = riskTestBusy ? '测试中…' : '测试 Bark';
           }
         });
@@ -6271,10 +6274,10 @@
       }
 
       async function loadParaRiskSettings({ silent = false } = {}) {
-        if (!paraRiskPanel || riskSettingsBusy) {
+        if (!paraRiskPanel || paraRiskSettingsBusy) {
           return;
         }
-        riskSettingsBusy = true;
+        paraRiskSettingsBusy = true;
         updateRiskButtons();
         if (!silent) {
           setRiskStatusMessage('读取 PARA 风险配置…');
@@ -6294,7 +6297,7 @@
         } catch (error) {
           setRiskStatusMessage(`读取失败：${error}`);
         } finally {
-          riskSettingsBusy = false;
+          paraRiskSettingsBusy = false;
           updateRiskButtons();
         }
       }
@@ -6310,7 +6313,7 @@
           setRiskStatusMessage(error.message || String(error));
           return;
         }
-  riskSettingsBusy = true;
+    riskSettingsBusy = true;
         updateRiskButtons();
         setRiskStatusMessage('保存风险配置…');
         try {
@@ -6337,7 +6340,7 @@
       }
 
       async function saveParaRiskSettings({ enabledOverride } = {}) {
-        if (!paraRiskPanel || riskSettingsBusy) {
+        if (!paraRiskPanel || paraRiskSettingsBusy) {
           return;
         }
         let payload;
@@ -6347,7 +6350,7 @@
           setRiskStatusMessage(error.message || String(error));
           return;
         }
-        riskSettingsBusy = true;
+  paraRiskSettingsBusy = true;
         updateRiskButtons();
         setRiskStatusMessage('保存 PARA 风险配置…');
         try {
@@ -6368,7 +6371,7 @@
         } catch (error) {
           setRiskStatusMessage(`保存失败：${error}`);
         } finally {
-          riskSettingsBusy = false;
+          paraRiskSettingsBusy = false;
           updateRiskButtons();
         }
       }
