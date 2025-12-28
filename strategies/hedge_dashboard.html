@@ -5968,12 +5968,19 @@
               const ratioText = Number.isFinite(ratioPercent) ? formatPercent(ratioPercent, 1) : '—';
               const baseLabel = entry.base_label ? ` ${entry.base_label}` : ' 裕量';
               const lossText = `${entry.loss_value || '--'} / ${entry.base_value || '--'}${baseLabel}`;
+
+              const rawBaseValue = entry?.raw_base_value;
+              const rawBaseLabel = entry?.raw_base_label;
+              const rawSuffix = rawBaseValue
+                ? `\nraw: ${rawBaseValue}${rawBaseLabel ? ` (${rawBaseLabel})` : ''}`
+                : '';
+              const combinedLossText = rawSuffix ? `${lossText}${rawSuffix}` : lossText;
               row.innerHTML = `
                 <td>${escapeHtml(timeText)}</td>
                 <td>${escapeHtml(sourceText)}</td>
                 <td>${escapeHtml(accountLabel + agentLabel)}</td>
                 <td>${escapeHtml(ratioText)}</td>
-                <td>${escapeHtml(lossText)}</td>
+                <td style="white-space: pre-line;">${escapeHtml(combinedLossText)}</td>
               `;
               fragment.appendChild(row);
             }
