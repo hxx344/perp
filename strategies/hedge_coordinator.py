@@ -3155,6 +3155,8 @@ class CoordinatorApp:
         if isinstance(body.get("kind"), str):
             kind_raw = str(body.get("kind") or "").strip().lower() or None
         use_para = kind_raw in {"para", "para_risk", "para-risk"}
+        if kind_raw is not None:
+            overrides["kind"] = kind_raw
         try:
             payload = await self._coordinator.trigger_test_alert(overrides)
         except RuntimeError as exc:
