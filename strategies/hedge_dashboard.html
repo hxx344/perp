@@ -6350,7 +6350,7 @@
           setRiskStatusMessage(error.message || String(error));
           return;
         }
-  paraRiskSettingsBusy = true;
+        paraRiskSettingsBusy = true;
         updateRiskButtons();
         setRiskStatusMessage('保存 PARA 风险配置…');
         try {
@@ -6391,7 +6391,7 @@
         }
         riskTestBusy = true;
         updateRiskButtons();
-        setRiskTestMessage('推送测试通知…');
+        setRiskTestMessage('推送测试通知…（将出现在「告警历史」中）');
         try {
           const payload = {};
           if (Number.isFinite(latestGlobalRiskRatio) && latestGlobalRiskRatio > 0) {
@@ -6426,7 +6426,7 @@
         }
         riskTestBusy = true;
         updateRiskButtons();
-        setRiskTestMessage('推送 PARA 测试通知…');
+        setRiskTestMessage('推送 PARA 测试通知…（将出现在「告警历史 (PARA)」中）');
         try {
           const payload = { kind: 'para_risk' };
           if (Number.isFinite(paraLatestRiskRatio) && paraLatestRiskRatio > 0) {
@@ -7829,7 +7829,7 @@
         for (const [agentId, snapshot] of entries) {
           try {
             if (!snapshot || typeof snapshot !== 'object') {
-              continue;
+              continue; 
             }
             const summaryRaw = snapshot.summary;
             const summary = summaryRaw && typeof summaryRaw === 'object' ? summaryRaw : {};

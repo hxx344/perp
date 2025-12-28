@@ -163,6 +163,9 @@ env.bak/
 venv.bak/
 env_files/
 
+# Runtime persisted coordinator state (local machine)
+strategies/.coordinator_state/
+
 # Spyder project settings
 .spyderproject
 .spyproject

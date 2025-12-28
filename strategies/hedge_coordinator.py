@@ -2428,6 +2428,8 @@ class HedgeCoordinator:
             agent_id = (overrides.get("agent_id") or (stats.worst_agent_id if stats else None) or "test-agent")
             account_label = overrides.get("account_label") or (stats.worst_account_label if stats else None) or "Test Account"
             alert = RiskAlertInfo(
+                # When testing PARA alerts, reuse the PARA key so history.kind becomes 'para_risk'
+                # and the entry shows up in the PARA history table.
                 key=PARA_RISK_ALERT_KEY if use_para else f"test::{agent_id}",
                 agent_id=agent_id,
                 account_label=account_label,
