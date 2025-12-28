@@ -4918,6 +4918,7 @@
       function getRiskViews() {
         return [
           {
+            scope: 'global',
             panel: grvtRiskPanel,
             statusPill: riskSettingsStatus,
             message: riskSettingsMessage,
@@ -4940,6 +4941,7 @@
             testButton: riskTestButton,
           },
           {
+            scope: 'para',
             panel: paraRiskPanel,
             statusPill: paraRiskSettingsStatus,
             message: paraRiskSettingsMessage,
@@ -6076,26 +6078,44 @@
         setRiskStatusMessage('配置未保存');
       }
 
-      function applyRiskSettings(settings, { markClean = false } = {}) {
-        riskSettingsSnapshot = settings ? { ...settings } : null;
-        if (riskSettingsSnapshot) {
-          if (!Number.isFinite(riskSettingsSnapshot.threshold_percent) && Number.isFinite(riskSettingsSnapshot.threshold)) {
-            riskSettingsSnapshot.threshold_percent = Number(riskSettingsSnapshot.threshold) * 100;
+      let globalRiskSettingsSnapshot = null;
+      let paraRiskSettingsSnapshot = null;
+
+      function normalizeRiskSettingsSnapshot(settings) {
+        const snapshot = settings ? { ...settings } : null;
+        if (snapshot) {
+          if (!Number.isFinite(snapshot.threshold_percent) && Number.isFinite(snapshot.threshold)) {
+            snapshot.threshold_percent = Number(snapshot.threshold) * 100;
           }
-          if (!Number.isFinite(riskSettingsSnapshot.cooldown) && Number.isFinite(riskSettingsSnapshot.cooldown_minutes)) {
-            riskSettingsSnapshot.cooldown = Number(riskSettingsSnapshot.cooldown_minutes) * 60;
+          if (!Number.isFinite(snapshot.cooldown) && Number.isFinite(snapshot.cooldown_minutes)) {
+            snapshot.cooldown = Number(snapshot.cooldown_minutes) * 60;
           }
         }
-        const hasThreshold = Number.isFinite(riskSettingsSnapshot?.threshold_percent)
-          ? Number(riskSettingsSnapshot.threshold_percent) > 0
-          : Number(riskSettingsSnapshot?.threshold) > 0;
-        const enabled = Boolean(riskSettingsSnapshot?.enabled && hasThreshold);
-        const thresholdPercent = Number(riskSettingsSnapshot?.threshold_percent ?? (riskSettingsSnapshot?.threshold ?? 0) * 100);
-        const resetPercent = Number(riskSettingsSnapshot?.reset_ratio_percent ?? (riskSettingsSnapshot?.reset_ratio ?? 0) * 100);
-        const cooldownMinutes = Number.isFinite(riskSettingsSnapshot?.cooldown_minutes)
-          ? Number(riskSettingsSnapshot.cooldown_minutes)
-          : (Number.isFinite(riskSettingsSnapshot?.cooldown) ? Number(riskSettingsSnapshot.cooldown) / 60 : 0);
-        getRiskViews().forEach((view) => {
+        return snapshot;
+      }
+
+      function applyRiskSettings(settings, { markClean = false, scope = 'global' } = {}) {
+        const normalized = normalizeRiskSettingsSnapshot(settings);
+        if (scope === 'para') {
+          paraRiskSettingsSnapshot = normalized;
+        } else {
+          globalRiskSettingsSnapshot = normalized;
+        }
+
+        const activeSnapshot = scope === 'para' ? paraRiskSettingsSnapshot : globalRiskSettingsSnapshot;
+        const views = scope === 'para' ? getRiskViews().filter((view) => view.scope === 'para') : getRiskViews().filter((view) => view.scope !== 'para');
+
+        const hasThreshold = Number.isFinite(activeSnapshot?.threshold_percent)
+          ? Number(activeSnapshot.threshold_percent) > 0
+          : Number(activeSnapshot?.threshold) > 0;
+        const enabled = Boolean(activeSnapshot?.enabled && hasThreshold);
+        const thresholdPercent = Number(activeSnapshot?.threshold_percent ?? (activeSnapshot?.threshold ?? 0) * 100);
+        const resetPercent = Number(activeSnapshot?.reset_ratio_percent ?? (activeSnapshot?.reset_ratio ?? 0) * 100);
+        const cooldownMinutes = Number.isFinite(activeSnapshot?.cooldown_minutes)
+          ? Number(activeSnapshot.cooldown_minutes)
+          : (Number.isFinite(activeSnapshot?.cooldown) ? Number(activeSnapshot.cooldown) / 60 : 0);
+
+        views.forEach((view) => {
           if (view.enabledInput) {
             view.enabledInput.checked = enabled;
           }
@@ -6113,25 +6133,27 @@
             view.cooldownInput.value = Number.isFinite(cooldownMinutes) ? Math.max(0, cooldownMinutes).toFixed(1) : '';
           }
           if (view.barkUrlInput) {
-            view.barkUrlInput.value = riskSettingsSnapshot?.bark_url ?? '';
+            view.barkUrlInput.value = activeSnapshot?.bark_url ?? '';
           }
           if (view.barkAppendInput) {
-            view.barkAppendInput.checked = Boolean(riskSettingsSnapshot?.bark_append_payload ?? true);
+            view.barkAppendInput.checked = Boolean(activeSnapshot?.bark_append_payload ?? true);
           }
           if (view.barkTimeoutInput) {
-            view.barkTimeoutInput.value = riskSettingsSnapshot?.bark_timeout ?? '';
+            view.barkTimeoutInput.value = activeSnapshot?.bark_timeout ?? '';
           }
           if (view.titleTemplateInput) {
-            view.titleTemplateInput.value = riskSettingsSnapshot?.title_template ?? '';
+            view.titleTemplateInput.value = activeSnapshot?.title_template ?? '';
           }
           if (view.bodyTemplateInput) {
-            view.bodyTemplateInput.value = riskSettingsSnapshot?.body_template ?? '';
+            view.bodyTemplateInput.value = activeSnapshot?.body_template ?? '';
           }
           if (view.statusPill) {
             view.statusPill.textContent = enabled ? `已启用 · ${getRiskThresholdSummary()}` : '未启用';
           }
         });
-        updateRiskThresholdLabel(thresholdPercent);
+        if (scope !== 'para') {
+          updateRiskThresholdLabel(thresholdPercent);
+        }
         if (markClean) {
           riskSettingsDirty = false;
           setRiskStatusMessage('配置已同步');
@@ -6261,7 +6283,7 @@
             throw new Error(text || `HTTP ${response.status}`);
           }
           const result = await response.json();
-          applyRiskSettings(result.settings, { markClean: true });
+          applyRiskSettings(result.settings, { markClean: true, scope: 'global' });
           if (!silent) {
             setRiskStatusMessage('配置已同步');
           }
@@ -6290,7 +6312,7 @@
             throw new Error(text || `HTTP ${response.status}`);
           }
           const result = await response.json();
-          applyRiskSettings(result.settings, { markClean: true });
+          applyRiskSettings(result.settings, { markClean: true, scope: 'para' });
           if (!silent) {
             setRiskStatusMessage('PARA 配置已同步');
           }
