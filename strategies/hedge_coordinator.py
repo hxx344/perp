@@ -1682,7 +1682,13 @@ class HedgeCoordinator:
                 total_pnl = self._decimal_from(account_payload.get("total_pnl"))
                 if total_pnl is None:
                     total_pnl = self._decimal_from(account_payload.get("total"))
-                initial_margin = self._compute_initial_margin_total(account_payload)
+                # IMPORTANT: Keep PARA risk capacity aligned with what the dashboard shows.
+                # Dashboard uses per-account `initialMarginTotal` derived from snapshot fields
+                # (not the margin schedule calculation). Prefer a direct `initial_margin` field
+                # if provided; fall back to summing positions when missing.
+                initial_margin = self._decimal_from(account_payload.get("initial_margin"))
+                if initial_margin is None:
+                    initial_margin = self._compute_initial_margin_total(account_payload)
                 if max_initial_margin is None or initial_margin > max_initial_margin:
                     max_initial_margin = initial_margin
                 if total_pnl is not None and total_pnl < 0:
