@@ -3106,15 +3106,21 @@ class CoordinatorApp:
 
     async def handle_risk_alert_test(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
-        if request.can_read_body and (request.content_length or 0) > 0:
+        body: Dict[str, Any] = {}
+        raw_body: Optional[str] = None
+        if request.can_read_body:
             try:
-                body = await request.json()
+                raw_body = await request.text()
             except Exception:
-                raise web.HTTPBadRequest(text="test payload must be JSON")
-            if not isinstance(body, dict):
-                raise web.HTTPBadRequest(text="test payload must be an object")
-        else:
-            body = {}
+                raw_body = None
+            if raw_body and raw_body.strip():
+                try:
+                    parsed = json.loads(raw_body)
+                except Exception:
+                    raise web.HTTPBadRequest(text="test payload must be JSON")
+                if not isinstance(parsed, dict):
+                    raise web.HTTPBadRequest(text="test payload must be an object")
+                body = parsed
         ratio = self._extract_numeric_field(body, ["ratio"], field_name="ratio") if body else None
         ratio_percent = self._extract_numeric_field(
             body,
@@ -3144,6 +3150,11 @@ class CoordinatorApp:
                 overrides["agent_id"] = agent_id
             if account_label:
                 overrides["account_label"] = account_label
+
+        kind_raw = None
+        if isinstance(body.get("kind"), str):
+            kind_raw = str(body.get("kind") or "").strip().lower() or None
+        use_para = kind_raw in {"para", "para_risk", "para-risk"}
         try:
             payload = await self._coordinator.trigger_test_alert(overrides)
         except RuntimeError as exc:
@@ -3152,6 +3163,12 @@ class CoordinatorApp:
         return web.json_response({
             "alert": payload,
             "server": {"instance_id": SERVER_INSTANCE_ID, "pid": SERVER_PID},
+            "debug": {
+                "raw_body": raw_body,
+                "parsed_kind": kind_raw,
+                "use_para": use_para,
+                "base_label": payload.get("base_label"),
+            },
         })
 
     async def handle_grvt_adjustments(self, request: web.Request) -> web.Response:

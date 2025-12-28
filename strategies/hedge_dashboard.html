@@ -6445,10 +6445,14 @@
           const result = await response.json();
           const alert = result?.alert || {};
           const server = result?.server || null;
+          const debug = result?.debug || null;
           const ratioPercent = Number(alert.ratio_percent);
           const ratioText = Number.isFinite(ratioPercent) ? `${ratioPercent.toFixed(1)}%` : '--%';
           const serverText = server?.pid ? ` · pid=${server.pid}` : '';
-          setRiskTestMessage(`推送成功 · PARA 风险 ${ratioText}${serverText}`);
+          const debugText = debug
+            ? ` · kind=${debug.parsed_kind || '--'} use_para=${debug.use_para ? 'Y' : 'N'} base=${debug.base_label || '--'}`
+            : '';
+          setRiskTestMessage(`推送成功 · PARA 风险 ${ratioText}${serverText}${debugText}`);
         } catch (error) {
           setRiskTestMessage(`推送失败：${error}`);
         } finally {
