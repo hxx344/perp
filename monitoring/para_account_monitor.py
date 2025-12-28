@@ -836,8 +836,27 @@ class ParadexAccountMonitor:
             "available_balance": decimal_to_str(balance_available),
             "equity": decimal_to_str(equity_total),
             "available_equity": decimal_to_str(equity_available),
+            # Dashboard-authoritative IM (preferred when available): Paradex account.initial_margin_requirement
+            # We also ship `initial_margin` (if present) as a diagnostic/legacy field.
+            "initial_margin_requirement": None,
+            "initial_margin": None,
             "updated_at": timestamp,
         }
+
+        account_obj = getattr(self._client, "account", None)
+        if account_obj is not None:
+            try:
+                # paradex-py AccountSummaryResponse exposes these as strings.
+                im_req = getattr(account_obj, "initial_margin_requirement", None)
+                summary["initial_margin_requirement"] = decimal_to_str(decimal_from(im_req))
+            except Exception:
+                pass
+            try:
+                # Some environments expose `initial_margin` (not the same as requirement).
+                im_val = getattr(account_obj, "initial_margin", None)
+                summary["initial_margin"] = decimal_to_str(decimal_from(im_val))
+            except Exception:
+                pass
 
         payload = {
             "agent_id": self._agent_id,
@@ -855,6 +874,8 @@ class ParadexAccountMonitor:
                         "available_balance": decimal_to_str(balance_available),
                         "equity": decimal_to_str(equity_total),
                         "available_equity": decimal_to_str(equity_available),
+                        "initial_margin_requirement": summary.get("initial_margin_requirement"),
+                        "initial_margin": summary.get("initial_margin"),
                         "positions": position_rows,
                         "updated_at": timestamp,
                     }
@@ -862,7 +883,6 @@ class ParadexAccountMonitor:
             },
         }
 
-        account_obj = getattr(self._client, "account", None)
         transfer_defaults: Dict[str, Any] = {}
         if account_obj is not None:
             try:
