@@ -10251,7 +10251,7 @@
       if (paraRiskAlertEnabledInput) {
         paraRiskAlertEnabledInput.addEventListener('change', () => {
           updateRiskInputsState();
-          markRiskSettingsDirty();
+          markParaRiskSettingsDirty();
         });
       }
       if (riskThresholdSlider) {
@@ -10271,7 +10271,7 @@
             paraRiskThresholdInput.value = value.toFixed(1);
           }
           updateRiskThresholdLabel(value);
-          markRiskSettingsDirty();
+          markParaRiskSettingsDirty();
         });
       }
       if (riskThresholdInput) {
@@ -10291,7 +10291,7 @@
             paraRiskThresholdSlider.value = value;
           }
           updateRiskThresholdLabel(value);
-          markRiskSettingsDirty();
+          markParaRiskSettingsDirty();
         });
       }
       [
@@ -10321,7 +10321,7 @@
         if (!input) {
           return;
         }
-        input.addEventListener('input', markRiskSettingsDirty);
+        input.addEventListener('input', markParaRiskSettingsDirty);
       });
     updateGrvtSymbolOptions([]);
     updateParaSymbolOptions([]);
@@ -10334,6 +10334,7 @@
     loadAutoBalanceConfig({ silent: true });
     loadParaAutoBalanceConfig({ silent: true });
     loadRiskSettings({ silent: true });
+  loadParaRiskSettings({ silent: true });
     loadSimulationData({ silent: false });
     refreshMetrics();
     setInterval(refreshMetrics, 2000);
