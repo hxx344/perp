@@ -5960,20 +5960,49 @@
               const sourceText = describeRiskAlertSource(entry);
               const accountLabel = entry.account_label || '—';
               const agentLabel = entry.agent_id ? ` (${entry.agent_id})` : '';
-              const ratioPercent = Number.isFinite(entry?.ratio_percent)
-                ? entry.ratio_percent
-                : Number.isFinite(entry?.ratio)
-                  ? entry.ratio * 100
-                  : null;
+              const hasAuthority = Boolean(
+                entry?.authority_used ||
+                  entry?.authority_base_value ||
+                  Number.isFinite(Number(entry?.authority_base_value_raw))
+              );
+
+              const ratioPercent = hasAuthority
+                ? Number.isFinite(entry?.authority_ratio_percent)
+                  ? entry.authority_ratio_percent
+                  : Number.isFinite(entry?.authority_ratio)
+                    ? entry.authority_ratio * 100
+                    : null
+                : Number.isFinite(entry?.ratio_percent)
+                  ? entry.ratio_percent
+                  : Number.isFinite(entry?.ratio)
+                    ? entry.ratio * 100
+                    : null;
               const ratioText = Number.isFinite(ratioPercent) ? formatPercent(ratioPercent, 1) : '—';
-              const baseLabel = entry.base_label ? ` ${entry.base_label}` : ' 裕量';
-              const lossText = `${entry.loss_value || '--'} / ${entry.base_value || '--'}${baseLabel}`;
+
+              const baseLabel = hasAuthority
+                ? entry.authority_base_label
+                  ? ` ${entry.authority_base_label}`
+                  : ' risk_capacity(frontend_authority)'
+                : entry.base_label
+                  ? ` ${entry.base_label}`
+                  : ' 裕量';
+
+              const lossValue = hasAuthority
+                ? entry.authority_loss_value || entry.authority_loss_value_raw
+                : entry.loss_value || entry.loss_value_raw;
+              const baseValue = hasAuthority
+                ? entry.authority_base_value || entry.authority_base_value_raw
+                : entry.base_value || entry.base_value_raw;
+              const lossText = `${lossValue || '--'} / ${baseValue || '--'}${baseLabel}`;
 
               const rawBaseValue = entry?.raw_base_value;
               const rawBaseLabel = entry?.raw_base_label;
               const rawSuffix = rawBaseValue
                 ? `\nraw: ${rawBaseValue}${rawBaseLabel ? ` (${rawBaseLabel})` : ''}`
                 : '';
+
+              const authorityRawBaseValue = entry?.authority_raw_base_value;
+              const authorityRawSuffix = authorityRawBaseValue ? `\nauthority_raw: ${authorityRawBaseValue}` : '';
 
               const computedAt = entry?.para_risk_computed_at;
               const equitySum = entry?.para_equity_sum;
@@ -5992,11 +6021,31 @@
               if (Number.isFinite(Number(accountCount)) && Number(accountCount) >= 0) {
                 inputParts.push(`accounts: ${Number(accountCount)}`);
               }
+
+              if (hasAuthority) {
+                if (entry?.authority_latest_update) {
+                  inputParts.push(`authority_latest_update: ${formatTimestamp(entry.authority_latest_update) || entry.authority_latest_update}`);
+                }
+                if (entry?.authority_equity_sum) {
+                  inputParts.push(`authority_equity_sum: ${entry.authority_equity_sum}`);
+                }
+                if (entry?.authority_max_initial_margin) {
+                  inputParts.push(`authority_maxIM: ${entry.authority_max_initial_margin}`);
+                }
+                if (Number.isFinite(Number(entry?.authority_account_count)) && Number(entry.authority_account_count) >= 0) {
+                  inputParts.push(`authority_accounts: ${Number(entry.authority_account_count)}`);
+                }
+                if (entry?.authority_im_source) {
+                  inputParts.push(`authority_im_source: ${entry.authority_im_source}`);
+                }
+                if (entry?.authority_buffer_status || entry?.authority_buffer_note) {
+                  inputParts.push(`authority_buffer: ${entry.authority_buffer_status || entry.authority_buffer_note}`);
+                }
+              }
               const inputsSuffix = inputParts.length ? `\ninputs: ${inputParts.join(' | ')}` : '';
               const combinedLossText = rawSuffix ? `${lossText}${rawSuffix}` : lossText;
-              const combinedLossTextWithInputs = inputsSuffix
-                ? `${combinedLossText}${inputsSuffix}`
-                : combinedLossText;
+              const withAuthorityRaw = authorityRawSuffix ? `${combinedLossText}${authorityRawSuffix}` : combinedLossText;
+              const combinedLossTextWithInputs = inputsSuffix ? `${withAuthorityRaw}${inputsSuffix}` : withAuthorityRaw;
               row.innerHTML = `
                 <td>${escapeHtml(timeText)}</td>
                 <td>${escapeHtml(sourceText)}</td>

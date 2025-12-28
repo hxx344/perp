@@ -1734,6 +1734,144 @@ class HedgeCoordinator:
             computed_at=time.time(),
         )
 
+    def _compute_para_authority_inputs(self) -> Dict[str, Any]:
+        """Compute PARA risk components using the same field preference as the dashboard.
+
+        Frontend logic (hedge_dashboard.html):
+        - equity: account.equity ?? account.available_equity (or summary equivalents)
+        - initial margin: account.initial_margin_requirement preferred; fallback to positions-based estimate
+        - maxIM: max(per-account initial margin)
+        - worst loss: max(abs(total_pnl)) for negative pnl
+        """
+
+        equity_sum = Decimal("0")
+        max_im: Optional[Decimal] = None
+        account_count = 0
+        worst_loss = Decimal("0")
+        worst_agent_id: Optional[str] = None
+        worst_account_label: Optional[str] = None
+        latest_update: Optional[float] = None
+        im_source = "initial_margin_requirement"
+
+        def _coerce_ts(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                ts = float(value)
+            except Exception:
+                return None
+            if not math.isfinite(ts) or ts <= 0:
+                return None
+            # tolerate ms timestamps
+            if ts > 1e12:
+                ts = ts / 1000.0
+            return ts
+
+        for agent_id, state in self._states.items():
+            payload = state.paradex_accounts
+            if not isinstance(payload, dict):
+                continue
+            summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else None
+            ts_raw = None
+            if summary is not None:
+                ts_raw = summary.get("updated_at")
+            if ts_raw is None:
+                ts_raw = payload.get("updated_at")
+            safe_ts = _coerce_ts(ts_raw)
+            if safe_ts is not None and (latest_update is None or safe_ts > latest_update):
+                latest_update = safe_ts
+
+            # Account-path first (preferred in dashboard).
+            for _, account_label, account_payload in self._flatten_grvt_accounts(agent_id, payload):
+                equity_value = self._select_equity_value(account_payload, summary)
+                if equity_value is None or equity_value <= 0:
+                    continue
+                equity_sum += equity_value
+                account_count += 1
+
+                total_pnl = self._decimal_from(account_payload.get("total_pnl"))
+                if total_pnl is None:
+                    total_pnl = self._decimal_from(account_payload.get("total"))
+                if total_pnl is not None and total_pnl < 0:
+                    abs_loss = abs(total_pnl)
+                    if abs_loss > worst_loss:
+                        worst_loss = abs_loss
+                        worst_agent_id = agent_id
+                        worst_account_label = account_label
+
+                # Dashboard uses `initial_margin_requirement` when available.
+                initial_margin = self._decimal_from(account_payload.get("initial_margin_requirement"))
+                if initial_margin is None or initial_margin <= 0:
+                    # fallback: per-position IM sum (same spirit as dashboard)
+                    positions = account_payload.get("positions")
+                    if isinstance(positions, list) and positions:
+                        im_source = "positions"
+                        initial_margin = Decimal("0")
+                        for pos in positions:
+                            if not isinstance(pos, dict):
+                                continue
+                            im = self._compute_position_initial_margin(pos)
+                            if im is not None and im > 0:
+                                initial_margin += im
+                if initial_margin is None:
+                    initial_margin = Decimal("0")
+
+                if max_im is None or initial_margin > max_im:
+                    max_im = initial_margin
+
+        max_im_value = max_im if max_im is not None else Decimal("0")
+        raw_risk_capacity = equity_sum - (Decimal("1.5") * max_im_value)
+        return {
+            "computed_at": time.time(),
+            "latest_update": latest_update,
+            "equity_sum": equity_sum,
+            "max_initial_margin": max_im_value,
+            "account_count": account_count,
+            "worst_loss": worst_loss,
+            "worst_agent_id": worst_agent_id,
+            "worst_account_label": worst_account_label,
+            "risk_capacity_raw": raw_risk_capacity if raw_risk_capacity > 0 else Decimal("0"),
+            "im_source": im_source,
+        }
+
+    def _compute_para_authority_values(self) -> Dict[str, Any]:
+        """Compute the dashboard-authoritative PARA loss/base values.
+
+        Returns normalized numbers + formatted strings ready for history.
+        """
+        inputs = self._compute_para_authority_inputs()
+        latest_update = inputs.get("latest_update")
+        ts_for_buffer = None
+        if isinstance(latest_update, (int, float)) and math.isfinite(float(latest_update)) and float(latest_update) > 0:
+            ts_for_buffer = float(latest_update)
+
+        raw_capacity: Decimal = inputs.get("risk_capacity_raw") or Decimal("0")
+        buffered_capacity, buffer_note, buffer_status = _evaluate_risk_capacity_buffer(
+            has_value=raw_capacity is not None and raw_capacity > 0,
+            value=raw_capacity if raw_capacity > 0 else None,
+            timestamp=ts_for_buffer,
+            base_note="",
+            state=self._para_risk_capacity_buffer,
+        )
+        effective_capacity = buffered_capacity if buffered_capacity is not None else raw_capacity
+
+        worst_loss: Decimal = inputs.get("worst_loss") or Decimal("0")
+        ratio: Optional[float]
+        if effective_capacity is None or effective_capacity <= 0 or worst_loss <= 0:
+            ratio = None
+        else:
+            ratio = float(worst_loss / effective_capacity)
+
+        return {
+            "inputs": inputs,
+            "risk_capacity_raw": raw_capacity,
+            "risk_capacity_buffered": effective_capacity,
+            "buffer_note": buffer_note,
+            "buffer_status": buffer_status,
+            "worst_loss": worst_loss,
+            "ratio": ratio,
+        }
+
     def _record_transferable_history(self, total_value: Decimal) -> None:
         if total_value is None or total_value <= 0:
             return
@@ -2004,6 +2142,49 @@ class HedgeCoordinator:
                     entry["para_max_initial_margin_raw"] = _to_float(stats.max_initial_margin)
                 if stats.account_count is not None:
                     entry["para_account_count"] = int(stats.account_count)
+
+                # Dashboard-authoritative values (frontend field preference + buffering).
+                try:
+                    authority = self._compute_para_authority_values()
+                except Exception:
+                    authority = None
+                if isinstance(authority, dict):
+                    inputs = authority.get("inputs")
+                    if not isinstance(inputs, dict):
+                        inputs = {}
+                    auth_loss = authority.get("worst_loss")
+                    auth_base = authority.get("risk_capacity_buffered")
+                    auth_raw = authority.get("risk_capacity_raw")
+                    auth_ratio = authority.get("ratio")
+                    entry["authority_used"] = True
+                    entry["authority_base_label"] = "risk_capacity(frontend_authority)"
+                    if isinstance(auth_base, Decimal):
+                        entry["authority_base_value"] = self._format_decimal(auth_base)
+                        entry["authority_base_value_raw"] = _to_float(auth_base)
+                    if isinstance(auth_raw, Decimal):
+                        entry["authority_raw_base_value"] = self._format_decimal(auth_raw)
+                        entry["authority_raw_base_value_raw"] = _to_float(auth_raw)
+                    if isinstance(auth_loss, Decimal):
+                        entry["authority_loss_value"] = self._format_decimal(auth_loss)
+                        entry["authority_loss_value_raw"] = _to_float(auth_loss)
+                    if isinstance(auth_ratio, (int, float)) and math.isfinite(float(auth_ratio)):
+                        entry["authority_ratio"] = float(auth_ratio)
+                        entry["authority_ratio_percent"] = float(auth_ratio) * 100.0
+                    entry["authority_buffer_status"] = authority.get("buffer_status")
+                    entry["authority_buffer_note"] = authority.get("buffer_note")
+                    entry["authority_im_source"] = inputs.get("im_source")
+                    entry["authority_latest_update"] = inputs.get("latest_update")
+                    if isinstance(inputs.get("equity_sum"), Decimal):
+                        entry["authority_equity_sum"] = self._format_decimal(inputs["equity_sum"])
+                        entry["authority_equity_sum_raw"] = _to_float(inputs["equity_sum"])
+                    if isinstance(inputs.get("max_initial_margin"), Decimal):
+                        entry["authority_max_initial_margin"] = self._format_decimal(inputs["max_initial_margin"])
+                        entry["authority_max_initial_margin_raw"] = _to_float(inputs["max_initial_margin"])
+                    if inputs.get("account_count") is not None:
+                        try:
+                            entry["authority_account_count"] = int(inputs["account_count"])
+                        except Exception:
+                            pass
         async with self._alert_history_lock:
             self._alert_history.append(entry)
 
@@ -2241,31 +2422,26 @@ class HedgeCoordinator:
         now = time.time()
         alerts: List[RiskAlertInfo] = []
 
-        if stats.ratio >= threshold and stats.risk_capacity > 0 and stats.worst_loss_value > 0:
+        # Authoritative values come from the dashboard algorithm (field preference + buffering).
+        authority = self._compute_para_authority_values()
+        authority_ratio = authority.get("ratio")
+        authority_loss: Decimal = authority.get("worst_loss") or Decimal("0")
+        authority_base: Decimal = authority.get("risk_capacity_buffered") or Decimal("0")
+
+        if authority_ratio is not None and authority_ratio >= threshold and authority_base > 0 and authority_loss > 0:
             already_active = self._risk_alert_active.get(PARA_RISK_ALERT_KEY, False)
             last_ts = self._risk_alert_last_ts.get(PARA_RISK_ALERT_KEY, 0.0)
             cooldown = self._para_risk_alert_cooldown if self._para_risk_alert_cooldown else self._risk_alert_cooldown
             if not already_active and (now - last_ts) >= cooldown:
-                # Dashboard treats the buffered risk capacity as the effective (“权威”) value.
-                # To keep alert history consistent with the dashboard cards, record the buffered
-                # value as base_value.
-                buffered_capacity, _, _ = _evaluate_risk_capacity_buffer(
-                    has_value=True,
-                    value=stats.risk_capacity,
-                    timestamp=now,
-                    base_note="",
-                    state=self._para_risk_capacity_buffer,
-                )
-                effective_capacity = buffered_capacity if buffered_capacity is not None else stats.risk_capacity
                 alerts.append(
                     RiskAlertInfo(
                         key=PARA_RISK_ALERT_KEY,
                         agent_id=stats.worst_agent_id or agent_id,
                         account_label=stats.worst_account_label or "PARA",
-                        ratio=stats.ratio,
-                        loss_value=stats.worst_loss_value,
-                        base_value=effective_capacity,
-                        base_label="risk_capacity(buffered)",
+                        ratio=float(authority_ratio),
+                        loss_value=authority_loss,
+                        base_value=authority_base,
+                        base_label="risk_capacity(frontend_authority)",
                     )
                 )
                 self._risk_alert_active[PARA_RISK_ALERT_KEY] = True
@@ -2466,21 +2642,35 @@ class HedgeCoordinator:
             base_value = self._decimal_from(base_value_raw)
             if base_value is None and stats:
                 candidate = None
-                if use_para and getattr(stats, "risk_capacity", None):
-                    candidate = getattr(stats, "risk_capacity")
-                elif (not use_para) and getattr(stats, "total_transferable", None):
+                if use_para:
+                    # For PARA test alerts, enforce dashboard-authoritative base value.
+                    authority = self._compute_para_authority_values()
+                    candidate = authority.get("risk_capacity_buffered")
+                elif getattr(stats, "total_transferable", None):
                     candidate = getattr(stats, "total_transferable")
                 if candidate:
-                    base_value = candidate
+                    base_value = cast(Decimal, candidate)
             if base_value is None:
                 base_value = Decimal("100000")
             loss_value_raw = overrides.get("loss_value")
             loss_value = self._decimal_from(loss_value_raw)
             if loss_value is None:
-                try:
-                    loss_value = Decimal(str(ratio)) * base_value
-                except Exception:
-                    loss_value = Decimal("50000")
+                if use_para:
+                    # For PARA test alerts, enforce dashboard-authoritative loss value.
+                    authority = self._compute_para_authority_values()
+                    candidate_loss = authority.get("worst_loss")
+                    if isinstance(candidate_loss, Decimal) and candidate_loss > 0:
+                        loss_value = candidate_loss
+                    else:
+                        try:
+                            loss_value = Decimal(str(ratio)) * base_value
+                        except Exception:
+                            loss_value = Decimal("50000")
+                else:
+                    try:
+                        loss_value = Decimal(str(ratio)) * base_value
+                    except Exception:
+                        loss_value = Decimal("50000")
             agent_id = (overrides.get("agent_id") or (stats.worst_agent_id if stats else None) or "test-agent")
             account_label = overrides.get("account_label") or (stats.worst_account_label if stats else None) or "Test Account"
             alert = RiskAlertInfo(
@@ -2492,7 +2682,7 @@ class HedgeCoordinator:
                 ratio=ratio,
                 loss_value=loss_value,
                 base_value=base_value,
-                base_label="risk_capacity(buffered)" if use_para else "Equity-IM",
+                base_label="risk_capacity(frontend_authority)" if use_para else "Equity-IM",
             )
 
         await self._send_risk_alert(alert, source="test")
