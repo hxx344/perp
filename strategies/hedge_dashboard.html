@@ -8119,6 +8119,9 @@
           baseNote: riskAllowanceBaseNote,
           state: paraRiskCapacityBufferState,
         });
+
+        // “风险裕量”卡片与 RISK LEVEL 卡片使用同一份（buffer 后的）权威裕量值。
+        // 告警历史会在后端侧做同口径写入。
         const effectiveRiskCapacity = Number.isFinite(bufferedRiskCapacity.displayValue)
           ? bufferedRiskCapacity.displayValue
           : null;

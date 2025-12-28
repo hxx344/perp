@@ -1971,6 +1971,13 @@ class HedgeCoordinator:
             "body": body,
             "error": error,
         }
+
+        if kind == "para_risk":
+            stats = self._para_risk_stats
+            if stats is not None:
+                entry["raw_base_value"] = self._format_decimal(stats.risk_capacity)
+                entry["raw_base_value_raw"] = _to_float(stats.risk_capacity)
+                entry["raw_base_label"] = "risk_capacity(raw)"
         async with self._alert_history_lock:
             self._alert_history.append(entry)
 
@@ -2213,6 +2220,17 @@ class HedgeCoordinator:
             last_ts = self._risk_alert_last_ts.get(PARA_RISK_ALERT_KEY, 0.0)
             cooldown = self._para_risk_alert_cooldown if self._para_risk_alert_cooldown else self._risk_alert_cooldown
             if not already_active and (now - last_ts) >= cooldown:
+                # Dashboard treats the buffered risk capacity as the effective (“权威”) value.
+                # To keep alert history consistent with the dashboard cards, record the buffered
+                # value as base_value.
+                buffered_capacity, _, _ = _evaluate_risk_capacity_buffer(
+                    has_value=True,
+                    value=stats.risk_capacity,
+                    timestamp=now,
+                    base_note="",
+                    state=self._para_risk_capacity_buffer,
+                )
+                effective_capacity = buffered_capacity if buffered_capacity is not None else stats.risk_capacity
                 alerts.append(
                     RiskAlertInfo(
                         key=PARA_RISK_ALERT_KEY,
@@ -2220,8 +2238,8 @@ class HedgeCoordinator:
                         account_label=stats.worst_account_label or "PARA",
                         ratio=stats.ratio,
                         loss_value=stats.worst_loss_value,
-                        base_value=stats.risk_capacity,
-                        base_label="Equity-1.5*max(IM)",
+                        base_value=effective_capacity,
+                        base_label="risk_capacity(buffered)",
                     )
                 )
                 self._risk_alert_active[PARA_RISK_ALERT_KEY] = True
@@ -2448,7 +2466,7 @@ class HedgeCoordinator:
                 ratio=ratio,
                 loss_value=loss_value,
                 base_value=base_value,
-                base_label="Equity-1.5*max(IM)" if use_para else "Equity-IM",
+                base_label="risk_capacity(buffered)" if use_para else "Equity-IM",
             )
 
         await self._send_risk_alert(alert, source="test")
