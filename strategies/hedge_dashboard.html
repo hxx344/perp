@@ -5807,9 +5807,33 @@
 
       function updateRiskMeta() {
         const parts = [];
-        if (Number.isFinite(latestGlobalRiskRatio)) {
-          parts.push(`当前风险 ${(latestGlobalRiskRatio * 100).toFixed(2)}%`);
+        // Global 面板显示 global/latest 的 risk ratio；PARA 面板严格显示 paraLatestRiskRatio
+        const views = getRiskViews();
+        for (const view of views) {
+          const viewParts = [];
+          const isPara = view.panel === paraRiskPanel;
+          const ratio = isPara ? paraLatestRiskRatio : latestGlobalRiskRatio;
+          if (Number.isFinite(ratio)) {
+            viewParts.push(`当前风险 ${(ratio * 100).toFixed(2)}%`);
+          }
+          const thresholdSummary = getRiskThresholdSummary();
+          if (thresholdSummary) {
+            viewParts.push(thresholdSummary);
+          }
+          const lastAlertTs = Number(riskSettingsSnapshot?.last_alert_at);
+          if (Number.isFinite(lastAlertTs) && lastAlertTs > 0) {
+            viewParts.push(`上次推送 ${formatTimestamp(lastAlertTs) || '—'}`);
+          }
+          const cooldownRemaining = Number(riskSettingsSnapshot?.cooldown_remaining);
+          if (Number.isFinite(cooldownRemaining) && cooldownRemaining > 0.5) {
+            viewParts.push(`冷却剩余 ${formatDuration(cooldownRemaining)}`);
+          }
+          const text = viewParts.length ? viewParts.join(' · ') : '等待风险数据…';
+          if (view.meta) {
+            view.meta.textContent = text;
+          }
         }
+        return;
         const thresholdSummary = getRiskThresholdSummary();
         if (thresholdSummary) {
           parts.push(thresholdSummary);
@@ -5905,7 +5929,10 @@
             }
             paraRiskHistoryBody.innerHTML = '';
             const filtered = Array.isArray(entries)
-              ? entries.filter((entry) => entry?.agent_id || entry?.account_label)
+              ? entries.filter((entry) => {
+                  const kind = String(entry?.kind || '').toLowerCase();
+                  return kind === 'para_risk' || kind === 'para_stale';
+                })
               : [];
             if (!filtered.length) {
               paraRiskHistoryEmpty.classList.remove('hidden');
@@ -6235,6 +6262,35 @@
         }
       }
 
+      async function loadParaRiskSettings({ silent = false } = {}) {
+        if (!paraRiskPanel || riskSettingsBusy) {
+          return;
+        }
+        riskSettingsBusy = true;
+        updateRiskButtons();
+        if (!silent) {
+          setRiskStatusMessage('读取 PARA 风险配置…');
+        }
+        try {
+          const response = await fetch('/para/risk_alert/settings', { cache: 'no-store' });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          applyRiskSettings(result.settings, { markClean: true });
+          if (!silent) {
+            setRiskStatusMessage('PARA 配置已同步');
+          }
+        } catch (error) {
+          setRiskStatusMessage(`读取失败：${error}`);
+        } finally {
+          riskSettingsBusy = false;
+          updateRiskButtons();
+        }
+      }
+
       async function saveRiskSettings({ enabledOverride } = {}) {
         if (!getRiskViews().length || riskSettingsBusy) {
           return;
@@ -6272,8 +6328,49 @@
         }
       }
 
+      async function saveParaRiskSettings({ enabledOverride } = {}) {
+        if (!paraRiskPanel || riskSettingsBusy) {
+          return;
+        }
+        let payload;
+        try {
+          payload = buildRiskSettingsPayload({ enabledOverride });
+        } catch (error) {
+          setRiskStatusMessage(error.message || String(error));
+          return;
+        }
+        riskSettingsBusy = true;
+        updateRiskButtons();
+        setRiskStatusMessage('保存 PARA 风险配置…');
+        try {
+          const response = await fetch('/para/risk_alert/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          applyRiskSettings(result.settings, { markClean: true });
+          setRiskStatusMessage('PARA 配置已保存');
+          await refreshMetrics();
+        } catch (error) {
+          setRiskStatusMessage(`保存失败：${error}`);
+        } finally {
+          riskSettingsBusy = false;
+          updateRiskButtons();
+        }
+      }
+
       async function disableRiskAlerts() {
         await saveRiskSettings({ enabledOverride: false });
+      }
+
+      async function disableParaRiskAlerts() {
+        await saveParaRiskSettings({ enabledOverride: false });
       }
 
       async function triggerRiskTest() {
@@ -6304,6 +6401,41 @@
           const ratioPercent = Number(alert.ratio_percent);
           const ratioText = Number.isFinite(ratioPercent) ? `${ratioPercent.toFixed(1)}%` : '--%';
           setRiskTestMessage(`推送成功 · 风险 ${ratioText}`);
+        } catch (error) {
+          setRiskTestMessage(`推送失败：${error}`);
+        } finally {
+          riskTestBusy = false;
+          updateRiskButtons();
+        }
+      }
+
+      async function triggerParaRiskTest() {
+        if (!paraRiskPanel || riskTestBusy) {
+          return;
+        }
+        riskTestBusy = true;
+        updateRiskButtons();
+        setRiskTestMessage('推送 PARA 测试通知…');
+        try {
+          const payload = { kind: 'para_risk' };
+          if (Number.isFinite(paraLatestRiskRatio) && paraLatestRiskRatio > 0) {
+            payload.ratio = paraLatestRiskRatio;
+          }
+          const response = await fetch('/risk_alert/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          const alert = result?.alert || {};
+          const ratioPercent = Number(alert.ratio_percent);
+          const ratioText = Number.isFinite(ratioPercent) ? `${ratioPercent.toFixed(1)}%` : '--%';
+          setRiskTestMessage(`推送成功 · PARA 风险 ${ratioText}`);
         } catch (error) {
           setRiskTestMessage(`推送失败：${error}`);
         } finally {
@@ -10011,7 +10143,7 @@
       }
       if (paraRiskSaveButton) {
         paraRiskSaveButton.addEventListener('click', () => {
-          saveRiskSettings();
+          saveParaRiskSettings();
         });
       }
       if (riskDisableButton) {
@@ -10021,7 +10153,7 @@
       }
       if (paraRiskDisableButton) {
         paraRiskDisableButton.addEventListener('click', () => {
-          disableRiskAlerts();
+          disableParaRiskAlerts();
         });
       }
       if (riskTestButton) {
@@ -10031,7 +10163,7 @@
       }
       if (paraRiskTestButton) {
         paraRiskTestButton.addEventListener('click', () => {
-          triggerRiskTest();
+          triggerParaRiskTest();
         });
       }
       if (riskRefreshButton) {
@@ -10041,7 +10173,7 @@
       }
       if (paraRiskRefreshButton) {
         paraRiskRefreshButton.addEventListener('click', () => {
-          loadRiskSettings({ silent: false });
+          loadParaRiskSettings({ silent: false });
         });
       }
       if (riskHistoryRefreshButton) {

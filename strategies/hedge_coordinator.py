@@ -156,6 +156,7 @@ MAX_SPREAD_HISTORY = 600
 MAX_STRATEGY_EVENTS = 400
 MAX_STRATEGY_TRADES = 200
 GLOBAL_RISK_ALERT_KEY = "__global_risk__"
+PARA_RISK_ALERT_KEY = "__para_risk__"
 TRANSFERABLE_HISTORY_LIMIT = 720
 TRANSFERABLE_HISTORY_MERGE_SECONDS = 20.0
 ALERT_HISTORY_LIMIT = 200
@@ -235,6 +236,15 @@ class GlobalRiskSnapshot:
     worst_account_label: Optional[str]
 
 
+@dataclass(frozen=True)
+class ParaRiskSnapshot:
+    ratio: Optional[float]
+    risk_capacity: Decimal
+    worst_loss_value: Decimal
+    worst_agent_id: Optional[str]
+    worst_account_label: Optional[str]
+
+
 @dataclass
 class RiskAlertSettings:
     threshold: Optional[float] = None
@@ -243,7 +253,7 @@ class RiskAlertSettings:
     bark_url: Optional[str] = None
     bark_append_payload: bool = False  # 仅使用 URL，不附带标题正文
     bark_timeout: float = 10.0
-    title_template: str = "GRVT Risk {ratio_percent:.1f}%"
+    title_template: str = "Global Risk {ratio_percent:.1f}%"
     body_template: str = (
         "{account_label} ({agent_id}) loss {loss_value} / {base_label} {base_value}"
     )
@@ -274,7 +284,7 @@ class RiskAlertSettings:
         cooldown = max(float(self.cooldown or 0), 0.0)
         timeout = max(float(self.bark_timeout or 0), 1.0)
         url = (self.bark_url or "").strip() or None
-        title = (self.title_template or "GRVT Risk {ratio_percent:.1f}%").strip()
+        title = (self.title_template or "Global Risk {ratio_percent:.1f}%").strip()
         body = (
             self.body_template
             or "{account_label} ({agent_id}) loss {loss_value} / {base_label} {base_value}"
@@ -310,6 +320,18 @@ class RiskAlertSettings:
             "bark_timeout": normalized.bark_timeout,
             "title_template": normalized.title_template,
             "body_template": normalized.body_template,
+        }
+
+
+@dataclass
+class DualRiskAlertSettings:
+    global_risk: RiskAlertSettings
+    para_risk: RiskAlertSettings
+
+    def to_payload(self) -> Dict[str, Any]:
+        return {
+            "global_risk": self.global_risk.to_payload(),
+            "para_risk": self.para_risk.to_payload(),
         }
 
 
@@ -1170,14 +1192,28 @@ class HedgeCoordinator:
         self._default_paused: bool = False
         self._alert_settings = (alert_settings or RiskAlertSettings()).normalized()
         self._alert_settings_updated_at = time.time()
+        self._para_alert_settings = RiskAlertSettings(
+            title_template="PARA Risk {ratio_percent:.1f}%",
+            body_template="{account_label} ({agent_id}) loss {loss_value} / {base_label} {base_value}",
+        ).normalized()
+        self._para_alert_settings_updated_at = time.time()
         self._bark_notifier: Optional[BarkNotifier] = None
+        self._para_bark_notifier: Optional[BarkNotifier] = None
         self._risk_alert_threshold: Optional[float] = None
         self._risk_alert_reset: Optional[float] = None
         self._risk_alert_cooldown: float = 0.0
+
+        self._para_risk_alert_threshold: Optional[float] = None
+        self._para_risk_alert_reset: Optional[float] = None
+        self._para_risk_alert_cooldown: float = 0.0
+
         self._para_stale_critical_seconds: float = 30.0
         self._apply_alert_settings()
+        self._apply_para_alert_settings()
         self._risk_alert_active: Dict[str, bool] = {}
         self._risk_alert_last_ts: Dict[str, float] = {}
+
+        self._para_risk_stats: Optional[ParaRiskSnapshot] = None
         self._global_risk_stats: Optional[GlobalRiskSnapshot] = None
         self._alert_history: Deque[Dict[str, Any]] = deque(maxlen=ALERT_HISTORY_LIMIT)
         self._alert_history_lock = asyncio.Lock()
@@ -1200,6 +1236,23 @@ class HedgeCoordinator:
         else:
             self._bark_notifier = None
 
+    def _apply_para_alert_settings(self, settings: Optional[RiskAlertSettings] = None) -> None:
+        if settings is not None:
+            self._para_alert_settings = settings.normalized()
+            self._para_alert_settings_updated_at = time.time()
+        config = self._para_alert_settings
+        self._para_risk_alert_threshold = config.threshold
+        self._para_risk_alert_reset = config.reset_ratio
+        self._para_risk_alert_cooldown = config.cooldown
+        if config.bark_url:
+            self._para_bark_notifier = BarkNotifier(
+                config.bark_url,
+                append_payload=False,
+                timeout=config.bark_timeout,
+            )
+        else:
+            self._para_bark_notifier = None
+
     def _alert_settings_payload(self, now: Optional[float] = None) -> Dict[str, Any]:
         payload = self._alert_settings.to_payload()
         payload["updated_at"] = self._alert_settings_updated_at
@@ -1217,9 +1270,30 @@ class HedgeCoordinator:
             payload["cooldown_remaining"] = 0.0
         return payload
 
+    def _para_alert_settings_payload(self, now: Optional[float] = None) -> Dict[str, Any]:
+        payload = self._para_alert_settings.to_payload()
+        payload["updated_at"] = self._para_alert_settings_updated_at
+        payload["active"] = bool(self._risk_alert_active.get(PARA_RISK_ALERT_KEY))
+        last_alert = self._risk_alert_last_ts.get(PARA_RISK_ALERT_KEY)
+        payload["last_alert_at"] = last_alert
+        cooldown = self._para_risk_alert_cooldown or 0.0
+        if last_alert is not None and cooldown > 0:
+            ready_at = last_alert + cooldown
+            payload["cooldown_ready_at"] = ready_at
+            current = now if now is not None else time.time()
+            payload["cooldown_remaining"] = max(0.0, ready_at - current)
+        else:
+            payload["cooldown_ready_at"] = None
+            payload["cooldown_remaining"] = 0.0
+        return payload
+
     async def alert_settings_snapshot(self) -> Dict[str, Any]:
         async with self._lock:
             return self._alert_settings_payload()
+
+    async def para_alert_settings_snapshot(self) -> Dict[str, Any]:
+        async with self._lock:
+            return self._para_alert_settings_payload()
 
     async def apply_alert_settings(self, settings: RiskAlertSettings) -> Dict[str, Any]:
         async with self._lock:
@@ -1227,6 +1301,13 @@ class HedgeCoordinator:
             self._risk_alert_active.clear()
             self._risk_alert_last_ts.clear()
             return self._alert_settings_payload()
+
+    async def apply_para_alert_settings(self, settings: RiskAlertSettings) -> Dict[str, Any]:
+        async with self._lock:
+            self._apply_para_alert_settings(settings)
+            self._risk_alert_active.pop(PARA_RISK_ALERT_KEY, None)
+            self._risk_alert_last_ts.pop(PARA_RISK_ALERT_KEY, None)
+            return self._para_alert_settings_payload()
 
     @staticmethod
     def _normalize_agent_id(raw: Any) -> str:
@@ -1283,6 +1364,7 @@ class HedgeCoordinator:
 
     def _recalculate_global_risk(self) -> None:
         self._global_risk_stats = self._calculate_global_risk()
+        self._para_risk_stats = self._calculate_para_risk()
 
     def _calculate_global_risk(self) -> Optional[GlobalRiskSnapshot]:
         total_equity_sum = Decimal("0")
@@ -1337,6 +1419,57 @@ class HedgeCoordinator:
         )
         self._record_transferable_history(snapshot.total_transferable)
         return snapshot
+
+    def _calculate_para_risk(self) -> Optional[ParaRiskSnapshot]:
+        total_equity_sum = Decimal("0")
+        max_initial_margin: Optional[Decimal] = None
+        worst_loss_value = Decimal("0")
+        worst_agent_id: Optional[str] = None
+        worst_account_label: Optional[str] = None
+
+        for agent_id, state in self._states.items():
+            payload = state.paradex_accounts
+            if not isinstance(payload, dict):
+                continue
+            summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else None
+            for _, account_label, account_payload in self._flatten_grvt_accounts(agent_id, payload):
+                equity_value = self._select_equity_value(account_payload, summary)
+                if equity_value is None or equity_value <= 0:
+                    continue
+                total_equity_sum += equity_value
+                total_pnl = self._decimal_from(account_payload.get("total_pnl"))
+                if total_pnl is None:
+                    total_pnl = self._decimal_from(account_payload.get("total"))
+                initial_margin = self._compute_initial_margin_total(account_payload)
+                if max_initial_margin is None or initial_margin > max_initial_margin:
+                    max_initial_margin = initial_margin
+                if total_pnl is not None and total_pnl < 0:
+                    abs_loss = abs(total_pnl)
+                    if abs_loss > worst_loss_value:
+                        worst_loss_value = abs_loss
+                        worst_agent_id = agent_id
+                        worst_account_label = account_label
+
+        max_im = max_initial_margin if max_initial_margin is not None else Decimal("0")
+        risk_capacity = total_equity_sum - (Decimal("1.5") * max_im)
+
+        if worst_loss_value <= 0 or risk_capacity <= 0:
+            return ParaRiskSnapshot(
+                ratio=None,
+                risk_capacity=risk_capacity if risk_capacity > 0 else Decimal("0"),
+                worst_loss_value=worst_loss_value,
+                worst_agent_id=worst_agent_id,
+                worst_account_label=worst_account_label,
+            )
+
+        ratio = float(worst_loss_value / risk_capacity)
+        return ParaRiskSnapshot(
+            ratio=ratio,
+            risk_capacity=risk_capacity,
+            worst_loss_value=worst_loss_value,
+            worst_agent_id=worst_agent_id,
+            worst_account_label=worst_account_label,
+        )
 
     def _record_transferable_history(self, total_value: Decimal) -> None:
         if total_value is None or total_value <= 0:
@@ -1530,6 +1663,15 @@ class HedgeCoordinator:
             "worst_account_label": stats.worst_account_label,
         }
 
+    def _serialize_para_risk(self, stats: ParaRiskSnapshot) -> Dict[str, Any]:
+        return {
+            "ratio": stats.ratio,
+            "risk_capacity": self._format_decimal(stats.risk_capacity),
+            "worst_loss": self._format_decimal(stats.worst_loss_value),
+            "worst_agent_id": stats.worst_agent_id,
+            "worst_account_label": stats.worst_account_label,
+        }
+
     async def alert_history_snapshot(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         async with self._alert_history_lock:
             entries = list(self._alert_history)
@@ -1556,7 +1698,12 @@ class HedgeCoordinator:
             except Exception:
                 return None
 
-        kind = "para_stale" if isinstance(alert.key, str) and alert.key.startswith("para_stale::") else "risk"
+        if isinstance(alert.key, str) and alert.key.startswith("para_stale::"):
+            kind = "para_stale"
+        elif alert.key == PARA_RISK_ALERT_KEY:
+            kind = "para_risk"
+        else:
+            kind = "risk"
 
         entry = {
             "timestamp": time.time(),
@@ -1681,10 +1828,12 @@ class HedgeCoordinator:
         }
         if paradex_map:
             snapshot["paradex_accounts"] = paradex_map
-        if self._global_risk_stats is None:
+        if self._global_risk_stats is None or self._para_risk_stats is None:
             self._recalculate_global_risk()
         if self._global_risk_stats is not None:
             snapshot["global_risk"] = self._serialize_global_risk(self._global_risk_stats)
+        if self._para_risk_stats is not None:
+            snapshot["para_risk"] = self._serialize_para_risk(self._para_risk_stats)
             transferable_history = self._serialize_transferable_history()
             if transferable_history:
                 snapshot["transferable_history"] = transferable_history
@@ -1703,6 +1852,7 @@ class HedgeCoordinator:
             state.update_from_payload(payload)
             self._recalculate_global_risk()
             alerts = self._prepare_risk_alerts(agent_id, state.grvt_accounts)
+            alerts = list(alerts) + list(self._prepare_para_risk_alerts(agent_id))
             alerts = list(alerts) + list(self._prepare_para_stale_alerts(now))
             self._prune_stale(now)
             self._last_agent_id = agent_id
@@ -1789,6 +1939,48 @@ class HedgeCoordinator:
         else:
             if stats.ratio < reset_ratio:
                 self._risk_alert_active.pop(GLOBAL_RISK_ALERT_KEY, None)
+
+        return alerts
+
+    def _prepare_para_risk_alerts(self, agent_id: str) -> Sequence[RiskAlertInfo]:
+        if self._bark_notifier is None or self._para_risk_alert_threshold is None:
+            return []
+
+        stats = self._para_risk_stats
+        if stats is None or stats.ratio is None:
+            self._risk_alert_active.pop(PARA_RISK_ALERT_KEY, None)
+            return []
+
+        threshold = self._para_risk_alert_threshold
+        reset_ratio = (
+            self._para_risk_alert_reset
+            if self._para_risk_alert_reset is not None
+            else threshold * 0.7
+        )
+        now = time.time()
+        alerts: List[RiskAlertInfo] = []
+
+        if stats.ratio >= threshold and stats.risk_capacity > 0 and stats.worst_loss_value > 0:
+            already_active = self._risk_alert_active.get(PARA_RISK_ALERT_KEY, False)
+            last_ts = self._risk_alert_last_ts.get(PARA_RISK_ALERT_KEY, 0.0)
+            cooldown = self._para_risk_alert_cooldown if self._para_risk_alert_cooldown else self._risk_alert_cooldown
+            if not already_active and (now - last_ts) >= cooldown:
+                alerts.append(
+                    RiskAlertInfo(
+                        key=PARA_RISK_ALERT_KEY,
+                        agent_id=stats.worst_agent_id or agent_id,
+                        account_label=stats.worst_account_label or "PARA",
+                        ratio=stats.ratio,
+                        loss_value=stats.worst_loss_value,
+                        base_value=stats.risk_capacity,
+                        base_label="Equity-1.5*max(IM)",
+                    )
+                )
+                self._risk_alert_active[PARA_RISK_ALERT_KEY] = True
+                self._risk_alert_last_ts[PARA_RISK_ALERT_KEY] = now
+        else:
+            if stats.ratio < reset_ratio:
+                self._risk_alert_active.pop(PARA_RISK_ALERT_KEY, None)
 
         return alerts
 
@@ -1919,7 +2111,7 @@ class HedgeCoordinator:
             return str(value)
 
     def _schedule_risk_alerts(self, alerts: Sequence[RiskAlertInfo]) -> None:
-        if not alerts or self._bark_notifier is None:
+        if not alerts:
             return
         try:
             loop = asyncio.get_running_loop()
@@ -1930,7 +2122,8 @@ class HedgeCoordinator:
             loop.create_task(self._send_risk_alert(alert, source="auto"))
 
     async def _send_risk_alert(self, alert: RiskAlertInfo, *, source: str = "auto") -> None:
-        if self._bark_notifier is None:
+        notifier = self._para_bark_notifier if alert.key == PARA_RISK_ALERT_KEY else self._bark_notifier
+        if notifier is None:
             return
         # Bark 只需 URL，不传标题/正文
         title = ""
@@ -1938,7 +2131,7 @@ class HedgeCoordinator:
         status = "sent"
         error_message = None
         try:
-            await self._bark_notifier.send(title=title, body=body)
+            await notifier.send(title=title, body=body)
         except Exception as exc:  # pragma: no cover - network path
             status = "error"
             error_message = str(exc)
@@ -1956,11 +2149,16 @@ class HedgeCoordinator:
     async def trigger_test_alert(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         overrides = overrides or {}
         async with self._lock:
-            notifier = self._bark_notifier
-            threshold = self._risk_alert_threshold
+            kind = None
+            if isinstance(overrides.get("kind"), str):
+                kind = str(overrides.get("kind") or "").strip().lower() or None
+            use_para = kind in {"para", "para_risk", "para-risk"}
+
+            notifier = self._para_bark_notifier if use_para else self._bark_notifier
+            threshold = self._para_risk_alert_threshold if use_para else self._risk_alert_threshold
             if notifier is None or threshold is None:
                 raise RuntimeError("Bark risk alerts are not enabled; configure Bark URL and threshold first.")
-            stats = self._global_risk_stats
+            stats = self._para_risk_stats if use_para else self._global_risk_stats
             ratio = overrides.get("ratio")
             if ratio is None and stats and stats.ratio:
                 ratio = stats.ratio
@@ -1974,8 +2172,14 @@ class HedgeCoordinator:
                 ratio = threshold
             base_value_raw = overrides.get("base_value")
             base_value = self._decimal_from(base_value_raw)
-            if base_value is None and stats and stats.total_transferable:
-                base_value = stats.total_transferable
+            if base_value is None and stats:
+                candidate = None
+                if use_para and getattr(stats, "risk_capacity", None):
+                    candidate = getattr(stats, "risk_capacity")
+                elif (not use_para) and getattr(stats, "total_transferable", None):
+                    candidate = getattr(stats, "total_transferable")
+                if candidate:
+                    base_value = candidate
             if base_value is None:
                 base_value = Decimal("100000")
             loss_value_raw = overrides.get("loss_value")
@@ -1988,13 +2192,13 @@ class HedgeCoordinator:
             agent_id = (overrides.get("agent_id") or (stats.worst_agent_id if stats else None) or "test-agent")
             account_label = overrides.get("account_label") or (stats.worst_account_label if stats else None) or "Test Account"
             alert = RiskAlertInfo(
-                key=f"test::{agent_id}",
+                key=PARA_RISK_ALERT_KEY if use_para else f"test::{agent_id}",
                 agent_id=agent_id,
                 account_label=account_label,
                 ratio=ratio,
                 loss_value=loss_value,
                 base_value=base_value,
-                base_label="Equity-IM",
+                base_label="Equity-1.5*max(IM)" if use_para else "Equity-IM",
             )
 
         await self._send_risk_alert(alert, source="test")
@@ -2089,6 +2293,8 @@ class CoordinatorApp:
                 web.post("/para/auto_balance/config", self.handle_para_auto_balance_update),
                 web.get("/risk_alert/settings", self.handle_risk_alert_settings),
                 web.post("/risk_alert/settings", self.handle_risk_alert_update),
+                web.get("/para/risk_alert/settings", self.handle_para_risk_alert_settings),
+                web.post("/para/risk_alert/settings", self.handle_para_risk_alert_update),
                 web.get("/risk_alert/history", self.handle_risk_alert_history),
                 web.post("/risk_alert/test", self.handle_risk_alert_test),
                 web.get("/grvt/adjustments", self.handle_grvt_adjustments),
@@ -2553,6 +2759,11 @@ class CoordinatorApp:
         payload = await self._coordinator.alert_settings_snapshot()
         return web.json_response({"settings": payload})
 
+    async def handle_para_risk_alert_settings(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        payload = await self._coordinator.para_alert_settings_snapshot()
+        return web.json_response({"settings": payload})
+
     async def handle_risk_alert_history(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
         limit_param = request.rel_url.query.get("limit")
@@ -2579,6 +2790,22 @@ class CoordinatorApp:
             raise web.HTTPBadRequest(text=str(exc))
         payload = await self._coordinator.apply_alert_settings(settings)
         LOGGER.info("Risk alert settings updated via dashboard")
+        return web.json_response({"settings": payload})
+
+    async def handle_para_risk_alert_update(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="risk settings payload must be JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="risk settings payload must be an object")
+        try:
+            settings = await self._build_risk_alert_settings(body)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        payload = await self._coordinator.apply_para_alert_settings(settings)
+        LOGGER.info("PARA risk alert settings updated via dashboard")
         return web.json_response({"settings": payload})
 
     async def handle_risk_alert_test(self, request: web.Request) -> web.Response:
