@@ -1618,12 +1618,9 @@
             <div class="value" id="para-total-pnl">--</div>
           </article>
           <article class="card grvt-summary-card">
-            <h3>ETH PnL</h3>
-            <div class="value" id="para-eth-pnl">--</div>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>BTC PnL</h3>
-            <div class="value" id="para-btc-pnl">--</div>
+            <h3>Max IM Req</h3>
+            <div class="value" id="para-max-im-req">--</div>
+            <p class="summary-sub">max(initial_margin_requirement)</p>
           </article>
           <article class="card grvt-summary-card">
             <h3>Net Equity</h3>
@@ -2590,8 +2587,8 @@
   const paraEmpty = document.getElementById('para-empty');
   const paraCard = document.getElementById('para-card');
   const paraTotalPnl = document.getElementById('para-total-pnl');
-  const paraEthPnl = document.getElementById('para-eth-pnl');
-  const paraBtcPnl = document.getElementById('para-btc-pnl');
+  const paraMaxImReq = document.getElementById('para-max-im-req');
+  // ETH/BTC PnL summary cards were removed from the PARA Multi-Account Monitor.
   const paraTotalEquity = document.getElementById('para-total-equity');
   const paraWalletBalance = document.getElementById('para-wallet-balance');
   const paraTransferableTotal = document.getElementById('para-transfer-total');
@@ -7887,8 +7884,9 @@
           paraEmpty.classList.remove('hidden');
           paraAccountCount.textContent = '0 accounts';
           paraTotalPnl.textContent = '--';
-          paraEthPnl.textContent = '--';
-          paraBtcPnl.textContent = '--';
+          if (paraMaxImReq) {
+            paraMaxImReq.textContent = '--';
+          }
           paraTotalEquity.textContent = '--';
           paraWalletBalance.textContent = 'Wallet --';
           if (paraSourceUpdates) {
@@ -7929,17 +7927,13 @@
         paraCard.classList.remove('hidden');
 
         let aggregateAccountCount = 0;
-        let aggregateTotalPnl = 0;
-        let aggregateEthPnl = 0;
-        let aggregateBtcPnl = 0;
-        let aggregateEquity = 0;
-        let aggregateWallet = 0;
-        let aggregateInitialMargin = 0;
+    let aggregateTotalPnl = 0;
+    let aggregateEquity = 0;
+    let aggregateWallet = 0;
+    let aggregateInitialMargin = 0;
   let aggregateMaintRequirement = 0;
   let aggregateMaintBase = 0;
   let hasTotal = false;
-  let hasEth = false;
-  let hasBtc = false;
   let hasEquity = false;
   let hasWallet = false;
   let latestUpdate = 0;
@@ -7974,13 +7968,13 @@
               for (const account of accounts) {
                 const accountObj = account && typeof account === 'object' ? account : {};
                 const total = parseDecimal(accountObj.total_pnl);
-                const eth = parseDecimal(accountObj.eth_pnl);
-                const btc = parseDecimal(accountObj.btc_pnl);
+                // ETH/BTC PnL removed from PARA cards.
                 const equity = parseDecimal(accountObj.equity ?? accountObj.available_equity);
                 const wallet = parseDecimal(accountObj.balance ?? accountObj.available_balance);
                 const available = parseDecimal(accountObj.available_balance ?? accountObj.available_equity);
                 const availableEquity = parseDecimal(accountObj.available_equity ?? accountObj.equity);
                 const initialMarginFromApi = parseDecimal(accountObj.initial_margin_requirement);
+                const initialMarginRequirement = parseDecimal(accountObj.initial_margin_requirement);
                 let initialMarginTotal = Number.isFinite(initialMarginFromApi) ? initialMarginFromApi : 0;
                 const positionsList = Array.isArray(accountObj.positions) ? accountObj.positions : [];
                 if (!Number.isFinite(initialMarginTotal) || initialMarginTotal === 0) {
@@ -8028,14 +8022,7 @@
                     }
                   }
                 }
-                if (Number.isFinite(eth)) {
-                  aggregateEthPnl += eth;
-                  hasEth = true;
-                }
-                if (Number.isFinite(btc)) {
-                  aggregateBtcPnl += btc;
-                  hasBtc = true;
-                }
+                // ETH/BTC PnL removed from Per Account Net PnL cards; keep parsing for backwards compatibility.
                 if (Number.isFinite(equity)) {
                   aggregateEquity += equity;
                   hasEquity = true;
@@ -8066,8 +8053,6 @@
                   agentId,
                   name: accountObj.name ?? accountObj.account_id ?? accountObj.id ?? 'Account',
                   total,
-                  eth,
-                  btc,
                   equity,
                   wallet,
                   available,
@@ -8076,19 +8061,20 @@
                   transferableValue,
                   positions: positionsList,
                   initialMarginTotal,
+                  initialMarginRequirement,
                   updatedTs: snapshotTs,
                   sortKey: buildAccountSortKey(agentId, accountObj, summary),
                 });
               }
             } else {
               const total = parseDecimal(summary.total_pnl);
-              const eth = parseDecimal(summary.eth_pnl);
-              const btc = parseDecimal(summary.btc_pnl);
+              // ETH/BTC PnL removed from PARA cards.
               const equity = parseDecimal(summary.equity ?? summary.available_equity);
               const wallet = parseDecimal(summary.balance ?? summary.available_balance);
               const available = parseDecimal(summary.available_balance ?? summary.available_equity);
               const availableEquity = parseDecimal(summary.available_equity ?? summary.equity);
               const initialMarginTotal = parseDecimal(summary.initial_margin_requirement);
+              const initialMarginRequirement = parseDecimal(summary.initial_margin_requirement);
               if (Number.isFinite(total)) {
                 aggregateTotalPnl += total;
                 hasTotal = true;
@@ -8107,14 +8093,7 @@
                   }
                 }
               }
-              if (Number.isFinite(eth)) {
-                aggregateEthPnl += eth;
-                hasEth = true;
-              }
-              if (Number.isFinite(btc)) {
-                aggregateBtcPnl += btc;
-                hasBtc = true;
-              }
+              // ETH/BTC PnL removed from Per Account Net PnL cards; keep parsing for backwards compatibility.
               if (Number.isFinite(equity)) {
                 aggregateEquity += equity;
                 hasEquity = true;
@@ -8150,8 +8129,6 @@
                 agentId,
                 name: summary.name ?? summary.label ?? agentId,
                 total,
-                eth,
-                btc,
                 equity,
                 wallet,
                 available,
@@ -8160,6 +8137,7 @@
                 transferableValue,
                 positions: [],
                 initialMarginTotal: Number.isFinite(initialMarginTotal) ? initialMarginTotal : 0,
+                initialMarginRequirement,
                 updatedTs: snapshotTs,
                 sortKey: buildAccountSortKey(agentId, null, summary),
               });
@@ -8174,8 +8152,6 @@
         paraAccountCount.textContent = `${aggregateAccountCount} ${accountLabel} across ${entries.length} ${sourcesLabel}`;
 
         paraTotalPnl.textContent = hasTotal ? numberFormatter.format(aggregateTotalPnl) : '--';
-        paraEthPnl.textContent = hasEth ? numberFormatter.format(aggregateEthPnl) : '--';
-        paraBtcPnl.textContent = hasBtc ? numberFormatter.format(aggregateBtcPnl) : '--';
         paraTotalEquity.textContent = hasEquity ? numberFormatter.format(aggregateEquity) : '--';
         paraWalletBalance.textContent = hasWallet
           ? `Wallet ${numberFormatter.format(aggregateWallet)}`
@@ -8183,6 +8159,12 @@
 
         const maxAbsPnlValue = Number.isFinite(maxAbsPnl) ? maxAbsPnl : 0;
         const maxInitialMarginValue = Number.isFinite(maxInitialMargin) ? maxInitialMargin : 0;
+
+        if (paraMaxImReq) {
+          paraMaxImReq.textContent = maxInitialMarginValue > 0
+            ? numberFormatter.format(maxInitialMarginValue)
+            : '--';
+        }
         const rawRiskAllowance = hasEquity
           ? aggregateEquity - 1.5 * maxInitialMarginValue
           : null;
@@ -8359,6 +8341,9 @@
           const initialMarginText = Number.isFinite(entry.initialMarginTotal)
             ? numberFormatter.format(entry.initialMarginTotal)
             : '--';
+          const initialMarginRequirementText = Number.isFinite(entry.initialMarginRequirement)
+            ? numberFormatter.format(entry.initialMarginRequirement)
+            : '--';
           const transferableCandidate = Number.isFinite(entry.transferableValue)
             ? entry.transferableValue
             : (entry.transferableEstimate && Number.isFinite(entry.transferableEstimate.value)
@@ -8399,7 +8384,7 @@
               <div><dt>Positions</dt><dd>${escapeHtml(positionsCountText)}</dd></div>
               <div><dt>Equity</dt><dd>${escapeHtml(equityText)}</dd></div>
               <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
-              <div><dt>Init Margin</dt><dd>${escapeHtml(initialMarginText)}</dd></div>
+              <div><dt>IM Req</dt><dd>${escapeHtml(initialMarginRequirementText)}</dd></div>
               <div><dt>Transferable</dt><dd>${escapeHtml(transferableText)}</dd></div>
               <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
             </dl>
@@ -8593,14 +8578,10 @@
         grvtEmpty.classList.add('hidden');
         grvtCard.classList.remove('hidden');
 
-        let aggregateAccountCount = 0;
-        let aggregateTotalPnl = 0;
-        let aggregateEthPnl = 0;
-        let aggregateBtcPnl = 0;
+  let aggregateAccountCount = 0;
+  let aggregateTotalPnl = 0;
         let latestUpdate = 0;
         let hasTotal = false;
-        let hasEth = false;
-        let hasBtc = false;
         const flattenedAccounts = [];
         const transferOptions = [];
 
@@ -8629,8 +8610,6 @@
           }
 
           let sourceHasTotal = false;
-          let sourceHasEth = false;
-          let sourceHasBtc = false;
 
           if (accounts.length) {
             for (const account of accounts) {
@@ -8639,20 +8618,6 @@
                 aggregateTotalPnl += accountTotal;
                 hasTotal = true;
                 sourceHasTotal = true;
-              }
-
-              const accountEth = parseDecimal(account.eth_pnl);
-              if (Number.isFinite(accountEth)) {
-                aggregateEthPnl += accountEth;
-                hasEth = true;
-                sourceHasEth = true;
-              }
-
-              const accountBtc = parseDecimal(account.btc_pnl);
-              if (Number.isFinite(accountBtc)) {
-                aggregateBtcPnl += accountBtc;
-                hasBtc = true;
-                sourceHasBtc = true;
               }
 
               const walletValue = parseDecimal(
@@ -8707,8 +8672,6 @@
                 summary,
                 updatedTs: accountTs,
                 totalValue: accountTotal,
-                ethValue: accountEth,
-                btcValue: accountBtc,
                 equityValue,
                 walletValue,
                 availableBalanceValue,
@@ -8730,26 +8693,8 @@
             }
           }
 
-          if (!sourceHasEth) {
-            const ethValue = parseDecimal(summary.eth_pnl);
-            if (Number.isFinite(ethValue)) {
-              aggregateEthPnl += ethValue;
-              hasEth = true;
-            }
-          }
-
-          if (!sourceHasBtc) {
-            const btcValue = parseDecimal(summary.btc_pnl);
-            if (Number.isFinite(btcValue)) {
-              aggregateBtcPnl += btcValue;
-              hasBtc = true;
-            }
-          }
-
           if (!accounts.length) {
             const placeholderTotal = parseDecimal(summary.total_pnl);
-            const placeholderEth = parseDecimal(summary.eth_pnl);
-            const placeholderBtc = parseDecimal(summary.btc_pnl);
             const fallbackWallet = parseDecimal(
               summary.balance ??
               summary.available_balance ??
@@ -8786,8 +8731,6 @@
               summary,
               updatedTs: snapshotTs,
               totalValue: placeholderTotal,
-              ethValue: placeholderEth,
-              btcValue: placeholderBtc,
               equityValue: fallbackEquity,
               walletValue: fallbackWallet,
               availableBalanceValue: fallbackAvailableBalance,
@@ -8838,8 +8781,9 @@
         grvtAccountCount.textContent = `${aggregateAccountCount} ${accountLabel} across ${entries.length} ${sourcesLabel}`;
 
         grvtTotalPnl.textContent = hasTotal ? numberFormatter.format(aggregateTotalPnl) : '--';
-        grvtEthPnl.textContent = hasEth ? numberFormatter.format(aggregateEthPnl) : '--';
-        grvtBtcPnl.textContent = hasBtc ? numberFormatter.format(aggregateBtcPnl) : '--';
+  // ETH/BTC PnL removed from Per Account Net PnL.
+  grvtEthPnl.textContent = '--';
+  grvtBtcPnl.textContent = '--';
         if (grvtTotalEquity) {
           grvtTotalEquity.textContent = hasEquity ? numberFormatter.format(aggregateEquity) : '--';
         }
