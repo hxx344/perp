@@ -31,6 +31,7 @@ import copy
 import logging
 import math
 import os
+import json
 import secrets
 import signal
 import statistics
@@ -53,6 +54,9 @@ except ImportError:  # pragma: no cover - script execution path
 
 BASE_DIR = Path(__file__).resolve().parent
 DASHBOARD_PATH = BASE_DIR / "hedge_dashboard.html"
+PERSISTED_STATE_DIR = BASE_DIR / ".coordinator_state"
+PERSISTED_STATE_DIR.mkdir(exist_ok=True)
+PERSISTED_PARA_AUTO_BALANCE_FILE = PERSISTED_STATE_DIR / "para_auto_balance.json"
 LOGIN_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"zh-CN\">
     <head>
@@ -2507,6 +2511,9 @@ class CoordinatorApp:
         }
         self._para_auto_balance_task: Optional[asyncio.Task] = None
         self._para_adjustments = GrvtAdjustmentManager()
+
+        # Load persisted PARA auto balance config (if any)
+        self._load_persisted_para_auto_balance_config()
         self._app = web.Application()
         self._app.add_routes(
             [
@@ -2547,6 +2554,44 @@ class CoordinatorApp:
             # still need Feishu background tasks even when volatility monitor is disabled
             self._app.on_startup.append(self._on_startup)
             self._app.on_cleanup.append(self._on_cleanup)
+
+    def _load_persisted_para_auto_balance_config(self) -> None:
+        path = PERSISTED_PARA_AUTO_BALANCE_FILE
+        if not path.exists():
+            return
+        try:
+            raw = path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+        except Exception as exc:
+            LOGGER.warning("Failed to load persisted PARA auto balance config: %s", exc)
+            return
+        if not isinstance(payload, dict):
+            return
+        enabled = payload.get("enabled")
+        if enabled is False:
+            return
+        config_block = payload.get("config")
+        if not isinstance(config_block, dict):
+            return
+        try:
+            cfg = self._parse_auto_balance_config(config_block, default_currency="USDC")
+        except Exception as exc:
+            LOGGER.warning("Ignoring persisted PARA auto balance config (invalid): %s", exc)
+            return
+        self._update_para_auto_balance_config(cfg)
+        LOGGER.info("Loaded persisted PARA auto balance config from disk")
+
+    def _persist_para_auto_balance_config(self) -> None:
+        path = PERSISTED_PARA_AUTO_BALANCE_FILE
+        try:
+            payload = {
+                "enabled": bool(self._para_auto_balance_cfg),
+                "config": self._para_auto_balance_config_as_payload(),
+                "updated_at": time.time(),
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            LOGGER.warning("Failed to persist PARA auto balance config: %s", exc)
 
     @property
     def app(self) -> web.Application:
@@ -2976,6 +3021,7 @@ class CoordinatorApp:
         enabled_flag = body.get("enabled")
         if enabled_flag is False or action == "disable":
             self._update_para_auto_balance_config(None)
+            self._persist_para_auto_balance_config()
             return web.json_response({
                 "config": None,
                 "status": self._para_auto_balance_status_snapshot(),
@@ -2987,6 +3033,7 @@ class CoordinatorApp:
             raise web.HTTPBadRequest(text=str(exc))
 
         self._update_para_auto_balance_config(config)
+        self._persist_para_auto_balance_config()
         return web.json_response({
             "config": self._para_auto_balance_config_as_payload(),
             "status": self._para_auto_balance_status_snapshot(),
