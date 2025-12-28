@@ -5857,8 +5857,14 @@
         });
       }
 
-      function setRiskStatusMessage(message) {
-        getRiskViews().forEach((view) => {
+      function setRiskStatusMessage(message, { scope = 'all' } = {}) {
+        const views = getRiskViews().filter((view) => {
+          if (scope === 'all') {
+            return true;
+          }
+          return scope === 'para' ? view.scope === 'para' : view.scope !== 'para';
+        });
+        views.forEach((view) => {
           if (view.message) {
             view.message.textContent = message || '未加载';
           }
@@ -6075,7 +6081,15 @@
           return;
         }
         riskSettingsDirty = true;
-        setRiskStatusMessage('配置未保存');
+        setRiskStatusMessage('配置未保存', { scope: 'global' });
+      }
+
+      function markParaRiskSettingsDirty() {
+        if (paraRiskSettingsBusy) {
+          return;
+        }
+        paraRiskSettingsDirty = true;
+        setRiskStatusMessage('配置未保存', { scope: 'para' });
       }
 
       let globalRiskSettingsSnapshot = null;
@@ -6155,8 +6169,12 @@
           updateRiskThresholdLabel(thresholdPercent);
         }
         if (markClean) {
-          riskSettingsDirty = false;
-          setRiskStatusMessage('配置已同步');
+          if (scope === 'para') {
+            paraRiskSettingsDirty = false;
+          } else {
+            riskSettingsDirty = false;
+          }
+          setRiskStatusMessage('配置已同步', { scope });
         }
         updateRiskButtons();
         updateRiskMeta();
@@ -6273,7 +6291,7 @@
         riskSettingsBusy = true;
         updateRiskButtons();
         if (!silent) {
-          setRiskStatusMessage('读取风险配置…');
+          setRiskStatusMessage('读取风险配置…', { scope: 'global' });
         }
         try {
           const response = await fetch('/risk_alert/settings', { cache: 'no-store' });
@@ -6284,11 +6302,9 @@
           }
           const result = await response.json();
           applyRiskSettings(result.settings, { markClean: true, scope: 'global' });
-          if (!silent) {
-            setRiskStatusMessage('配置已同步');
-          }
+          // applyRiskSettings(markClean) 会更新状态消息
         } catch (error) {
-          setRiskStatusMessage(`读取失败：${error}`);
+          setRiskStatusMessage(`读取失败：${error}`, { scope: 'global' });
         } finally {
           riskSettingsBusy = false;
           updateRiskButtons();
@@ -6302,7 +6318,7 @@
         paraRiskSettingsBusy = true;
         updateRiskButtons();
         if (!silent) {
-          setRiskStatusMessage('读取 PARA 风险配置…');
+          setRiskStatusMessage('读取 PARA 风险配置…', { scope: 'para' });
         }
         try {
           const response = await fetch('/para/risk_alert/settings', { cache: 'no-store' });
@@ -6313,11 +6329,9 @@
           }
           const result = await response.json();
           applyRiskSettings(result.settings, { markClean: true, scope: 'para' });
-          if (!silent) {
-            setRiskStatusMessage('PARA 配置已同步');
-          }
+          // applyRiskSettings(markClean) 会更新状态消息
         } catch (error) {
-          setRiskStatusMessage(`读取失败：${error}`);
+          setRiskStatusMessage(`读取失败：${error}`, { scope: 'para' });
         } finally {
           paraRiskSettingsBusy = false;
           updateRiskButtons();
@@ -6332,12 +6346,12 @@
         try {
           payload = buildRiskSettingsPayload({ enabledOverride });
         } catch (error) {
-          setRiskStatusMessage(error.message || String(error));
+          setRiskStatusMessage(error.message || String(error), { scope: 'global' });
           return;
         }
     riskSettingsBusy = true;
         updateRiskButtons();
-        setRiskStatusMessage('保存风险配置…');
+        setRiskStatusMessage('保存风险配置…', { scope: 'global' });
         try {
           const response = await fetch('/risk_alert/settings', {
             method: 'POST',
@@ -6350,11 +6364,11 @@
             throw new Error(text || `HTTP ${response.status}`);
           }
           const result = await response.json();
-          applyRiskSettings(result.settings, { markClean: true });
-          setRiskStatusMessage('配置已保存');
+          applyRiskSettings(result.settings, { markClean: true, scope: 'global' });
+          setRiskStatusMessage('配置已保存', { scope: 'global' });
           await refreshMetrics();
         } catch (error) {
-          setRiskStatusMessage(`保存失败：${error}`);
+          setRiskStatusMessage(`保存失败：${error}`, { scope: 'global' });
         } finally {
           riskSettingsBusy = false;
           updateRiskButtons();
@@ -6369,12 +6383,12 @@
         try {
           payload = buildRiskSettingsPayload({ enabledOverride });
         } catch (error) {
-          setRiskStatusMessage(error.message || String(error));
+          setRiskStatusMessage(error.message || String(error), { scope: 'para' });
           return;
         }
         paraRiskSettingsBusy = true;
         updateRiskButtons();
-        setRiskStatusMessage('保存 PARA 风险配置…');
+        setRiskStatusMessage('保存 PARA 风险配置…', { scope: 'para' });
         try {
           const response = await fetch('/para/risk_alert/settings', {
             method: 'POST',
@@ -6387,11 +6401,11 @@
             throw new Error(text || `HTTP ${response.status}`);
           }
           const result = await response.json();
-          applyRiskSettings(result.settings, { markClean: true });
-          setRiskStatusMessage('PARA 配置已保存');
+          applyRiskSettings(result.settings, { markClean: true, scope: 'para' });
+          setRiskStatusMessage('PARA 配置已保存', { scope: 'para' });
           await refreshMetrics();
         } catch (error) {
-          setRiskStatusMessage(`保存失败：${error}`);
+          setRiskStatusMessage(`保存失败：${error}`, { scope: 'para' });
         } finally {
           paraRiskSettingsBusy = false;
           updateRiskButtons();
