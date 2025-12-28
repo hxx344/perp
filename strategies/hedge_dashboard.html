@@ -3978,7 +3978,7 @@
         // Contract:
         // - Only meaningful when there are exactly 2 accounts (two sources/accounts).
         // - We exclude FF-USD position PnL impact entirely.
-        // Output: { ok, message, symbol, reduceSize, details }
+        // Output: { ok, message, symbol, actions, details }
         const accounts = Array.isArray(flattenedAccounts) ? flattenedAccounts : [];
         if (accounts.length !== 2) {
           return {
@@ -4011,11 +4011,14 @@
         const deltaBtc = aBtc - bBtc;
         const deltaEth = aEth - bEth;
 
-        // Decide which symbol reduction most reduces |deltaTotal|.
-        // Reducing exposure tends to move that account's PnL toward 0 on that symbol.
-        // Approx effect if we reduce fraction f in the account that is "ahead" on that symbol:
-        // deltaTotal' ≈ deltaTotal - f * deltaSymbol
-        // Choose symbol with larger alignment and propose f that minimizes absolute delta.
+        // Decide which symbol adjustment most reduces |deltaTotal|.
+        // User expectation: adjustment should be applied to BOTH accounts simultaneously.
+        // We treat it as a paired trade on a single symbol:
+        //   - reduce(symbol) on the account that is "ahead" on total pnl
+        //   - add(symbol)    on the other account
+        // This keeps total exposure more symmetric while pushing ΔTotal toward 0.
+        // Approx effect: ΔTotal' ≈ ΔTotal - f * ΔSymbol  (where ΔSymbol = aSymbolPnL - bSymbolPnL)
+        // Choose symbol with best alignment and propose f that minimizes |ΔTotal'|.
         const candidates = [
           { symbol: 'BTC', deltaSymbol: deltaBtc },
           { symbol: 'ETH', deltaSymbol: deltaEth },
@@ -4025,7 +4028,7 @@
           return {
             ok: true,
             symbol: null,
-            reduceSize: 0,
+            actions: [],
             details: `已基本平衡（排除 FF-USD 后 ΔPnL=${numberFormatter.format(deltaTotal)}）。`,
             message: '无需减仓',
           };
@@ -4061,43 +4064,37 @@
           };
         }
 
-        // Decide which account to reduce: the one contributing to deltaSymbol sign.
-        // deltaSymbol = a - b.
-        // If deltaTotal > 0 and deltaSymbol > 0, reduce symbol exposure on A.
-        // If deltaTotal < 0 and deltaSymbol < 0, reduce on B.
-        // Equivalent: reduce on the side where total PnL is higher (sign(deltaTotal)).
-        const reduceOnA = deltaTotal > 0;
-        const targetAccount = reduceOnA ? a : b;
-        const targetName = targetAccount?.name ?? (reduceOnA ? 'Account A' : 'Account B');
+        // Paired adjustment (two-sided reduce): both accounts reduce exposure on the same symbol.
+        // Reasoning: in your setup the two accounts typically hold opposite directions (one long one short).
+        // Reducing on BOTH sides shrinks gross exposure while keeping the hedge structure.
+        const aName = a?.name ?? 'Account A';
+        const bName = b?.name ?? 'Account B';
 
-        const totalAbsSize = estimateTotalAbsSize(targetAccount.positions, best.symbol);
-        if (!(totalAbsSize > 0)) {
+        const aCap = estimateTotalAbsSize(a.positions, best.symbol);
+        const bCap = estimateTotalAbsSize(b.positions, best.symbol);
+        const pairedCap = Math.min(aCap, bCap);
+        if (!(pairedCap > 0)) {
           return {
             ok: false,
-            message: `${targetName} 没有可减的 ${best.symbol} 仓位 (size=0)。`,
+            message: `两边都需要有 ${best.symbol} 仓位才能做“双边同时减仓”建议（${aName} 可用=${formatCoinAmount(aCap, 4)}，${bName} 可用=${formatCoinAmount(bCap, 4)}）。`,
           };
         }
 
-        // Convert fraction f to size recommendation.
-        // Use size-based (reduce f of total abs size). Also estimate pnl-per-unit check.
-        const rawReduceSize = best.f * totalAbsSize;
+        // Convert fraction f to paired size recommendation.
+        const rawPairedSize = best.f * pairedCap;
 
-        // Optional refinement: if we can estimate pnl per 1 coin, compute a size that closes delta.
-        // Need |dPnL/dSize| > 0.
-        const pnlPerUnit = estimatePnLPerUnit(targetAccount.positions, best.symbol);
+        // Optional refinement: Use a-side pnl sensitivity to translate ΔTotal to size.
+        // (This is a heuristic; we still clamp by pairedCap.)
+        const pnlPerUnit = estimatePnLPerUnit(a.positions, best.symbol);
         let refinedSize = null;
-        if (Number.isFinite(pnlPerUnit)) {
-          // We want reduceSize so that deltaTotal' = deltaTotal - reduceSize * pnlPerUnit (approx)
-          // but only if sign aligns.
-          if (deltaTotal * pnlPerUnit > 0) {
-            refinedSize = clamp(Math.abs(deltaTotal / pnlPerUnit), 0, totalAbsSize);
-          }
+        if (Number.isFinite(pnlPerUnit) && deltaTotal * pnlPerUnit > 0) {
+          refinedSize = clamp(Math.abs(deltaTotal / pnlPerUnit), 0, pairedCap);
         }
 
-        const suggestionSize = Number.isFinite(refinedSize) ? refinedSize : rawReduceSize;
-        const finalSize = clamp(suggestionSize, 0, totalAbsSize);
+        const suggestionSize = Number.isFinite(refinedSize) ? refinedSize : rawPairedSize;
+        const finalSize = clamp(suggestionSize, 0, pairedCap);
 
-        const main = `${best.symbol} 建议减仓 ~${formatCoinAmount(finalSize, 4)} （${targetName}）`;
+  const main = `${best.symbol} 双边同时减仓：${aName} 减仓 ~${formatCoinAmount(finalSize, 4)}；${bName} 减仓 ~${formatCoinAmount(finalSize, 4)}`;
         const detailParts = [];
         detailParts.push(`排除 FF-USD 后：ΔTotal=${numberFormatter.format(deltaTotal)} → 目标接近 0`);
         detailParts.push(`Δ${best.symbol}=${numberFormatter.format(best.deltaSymbol)}，按比例 f=${(best.f * 100).toFixed(1)}%`);
@@ -4106,12 +4103,15 @@
         }
         detailParts.push(`预计减仓后：ΔTotal≈${numberFormatter.format(best.newDelta)}（粗略）`);
 
+        const actions = [
+          { account: aName, action: 'reduce', symbol: best.symbol, size: finalSize },
+          { account: bName, action: 'reduce', symbol: best.symbol, size: finalSize },
+        ];
+
         return {
           ok: true,
           symbol: best.symbol,
-          reduceSize: finalSize,
-          reduceOn: reduceOnA ? 'A' : 'B',
-          reduceAccountName: targetName,
+          actions,
           message: main,
           details: detailParts.join(' · '),
         };
@@ -6001,7 +6001,15 @@
             riskHistoryStatus.textContent = `已加载 ${riskHistoryEntries.length} 条告警`;
           }
           if (paraRiskHistoryStatus) {
-            paraRiskHistoryStatus.textContent = `已加载 ${Array.isArray(paraRiskHistoryEntries) ? paraRiskHistoryEntries.length : 0} 条告警（PARA）`;
+            const paraCount = Array.isArray(paraRiskHistoryEntries)
+              ? paraRiskHistoryEntries.filter((entry) => {
+                  const kind = String(entry?.kind || '').toLowerCase();
+                  return kind === 'para_risk' || kind === 'para_stale';
+                }).length
+              : 0;
+            paraRiskHistoryStatus.textContent = paraCount
+              ? `已加载 ${paraCount} 条告警（PARA）`
+              : '暂无告警';
           }
         } catch (error) {
           if (riskHistoryStatus) {
