@@ -5974,13 +5974,35 @@
               const rawSuffix = rawBaseValue
                 ? `\nraw: ${rawBaseValue}${rawBaseLabel ? ` (${rawBaseLabel})` : ''}`
                 : '';
+
+              const computedAt = entry?.para_risk_computed_at;
+              const equitySum = entry?.para_equity_sum;
+              const maxIm = entry?.para_max_initial_margin;
+              const accountCount = entry?.para_account_count;
+              const inputParts = [];
+              if (Number.isFinite(Number(computedAt)) && Number(computedAt) > 0) {
+                inputParts.push(`ts: ${formatTimestamp(Number(computedAt)) || Number(computedAt)}`);
+              }
+              if (equitySum) {
+                inputParts.push(`equity_sum: ${equitySum}`);
+              }
+              if (maxIm) {
+                inputParts.push(`maxIM: ${maxIm}`);
+              }
+              if (Number.isFinite(Number(accountCount)) && Number(accountCount) >= 0) {
+                inputParts.push(`accounts: ${Number(accountCount)}`);
+              }
+              const inputsSuffix = inputParts.length ? `\ninputs: ${inputParts.join(' | ')}` : '';
               const combinedLossText = rawSuffix ? `${lossText}${rawSuffix}` : lossText;
+              const combinedLossTextWithInputs = inputsSuffix
+                ? `${combinedLossText}${inputsSuffix}`
+                : combinedLossText;
               row.innerHTML = `
                 <td>${escapeHtml(timeText)}</td>
                 <td>${escapeHtml(sourceText)}</td>
                 <td>${escapeHtml(accountLabel + agentLabel)}</td>
                 <td>${escapeHtml(ratioText)}</td>
-                <td style="white-space: pre-line;">${escapeHtml(combinedLossText)}</td>
+                <td style="white-space: pre-line;">${escapeHtml(combinedLossTextWithInputs)}</td>
               `;
               fragment.appendChild(row);
             }

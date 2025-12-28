@@ -383,6 +383,11 @@ class ParaRiskSnapshot:
     worst_loss_value: Decimal
     worst_agent_id: Optional[str]
     worst_account_label: Optional[str]
+    # Debug/forensics fields: inputs used to compute `risk_capacity`.
+    equity_sum: Optional[Decimal] = None
+    max_initial_margin: Optional[Decimal] = None
+    account_count: Optional[int] = None
+    computed_at: Optional[float] = None
 
 
 @dataclass
@@ -1665,6 +1670,7 @@ class HedgeCoordinator:
     def _calculate_para_risk(self) -> Optional[ParaRiskSnapshot]:
         total_equity_sum = Decimal("0")
         max_initial_margin: Optional[Decimal] = None
+        account_count = 0
         worst_loss_value = Decimal("0")
         worst_agent_id: Optional[str] = None
         worst_account_label: Optional[str] = None
@@ -1679,6 +1685,7 @@ class HedgeCoordinator:
                 if equity_value is None or equity_value <= 0:
                     continue
                 total_equity_sum += equity_value
+                account_count += 1
                 total_pnl = self._decimal_from(account_payload.get("total_pnl"))
                 if total_pnl is None:
                     total_pnl = self._decimal_from(account_payload.get("total"))
@@ -1708,6 +1715,10 @@ class HedgeCoordinator:
                 worst_loss_value=worst_loss_value,
                 worst_agent_id=worst_agent_id,
                 worst_account_label=worst_account_label,
+                equity_sum=total_equity_sum,
+                max_initial_margin=max_im,
+                account_count=account_count,
+                computed_at=time.time(),
             )
 
         ratio = float(worst_loss_value / risk_capacity)
@@ -1717,6 +1728,10 @@ class HedgeCoordinator:
             worst_loss_value=worst_loss_value,
             worst_agent_id=worst_agent_id,
             worst_account_label=worst_account_label,
+            equity_sum=total_equity_sum,
+            max_initial_margin=max_im,
+            account_count=account_count,
+            computed_at=time.time(),
         )
 
     def _record_transferable_history(self, total_value: Decimal) -> None:
@@ -1978,6 +1993,17 @@ class HedgeCoordinator:
                 entry["raw_base_value"] = self._format_decimal(stats.risk_capacity)
                 entry["raw_base_value_raw"] = _to_float(stats.risk_capacity)
                 entry["raw_base_label"] = "risk_capacity(raw)"
+
+                # Attach computation inputs so we can reconcile history vs dashboard cards.
+                entry["para_risk_computed_at"] = stats.computed_at
+                if stats.equity_sum is not None:
+                    entry["para_equity_sum"] = self._format_decimal(stats.equity_sum)
+                    entry["para_equity_sum_raw"] = _to_float(stats.equity_sum)
+                if stats.max_initial_margin is not None:
+                    entry["para_max_initial_margin"] = self._format_decimal(stats.max_initial_margin)
+                    entry["para_max_initial_margin_raw"] = _to_float(stats.max_initial_margin)
+                if stats.account_count is not None:
+                    entry["para_account_count"] = int(stats.account_count)
         async with self._alert_history_lock:
             self._alert_history.append(entry)
 
