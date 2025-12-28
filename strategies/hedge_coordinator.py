@@ -2471,6 +2471,7 @@ class CoordinatorApp:
         volatility_history_limit: int = 1800,
     ) -> None:
         self._coordinator = HedgeCoordinator(alert_settings=alert_settings)
+        # Para/global alert scopes are controlled by CLI; do not force inheritance here.
         self._adjustments = GrvtAdjustmentManager()
         self._vol_monitor = (
             VolatilityMonitor(
@@ -4603,6 +4604,14 @@ async def _run_app(args: argparse.Namespace) -> None:
         title_template=args.bark_title_template,
         body_template=args.bark_body_template,
     ).normalized()
+
+    scope_raw = (getattr(args, "risk_alert_scope", "both") or "both").strip().lower()
+    if scope_raw not in {"both", "global", "para", "none"}:
+        raise SystemExit("--risk-alert-scope must be one of: both, global, para, none")
+
+    global_settings: Optional[RiskAlertSettings] = alert_settings if scope_raw in {"both", "global"} else None
+    para_settings: Optional[RiskAlertSettings] = alert_settings if scope_raw in {"both", "para"} else None
+
     if alert_settings.threshold and alert_settings.bark_url:
         LOGGER.info(
             "Bark notifications enabled; risk alerts fire at %.1f%%",
@@ -4625,12 +4634,19 @@ async def _run_app(args: argparse.Namespace) -> None:
         dashboard_username=args.dashboard_username,
         dashboard_password=args.dashboard_password,
         dashboard_session_ttl=args.dashboard_session_ttl,
-        alert_settings=alert_settings,
+        alert_settings=global_settings,
         enable_volatility_monitor=enable_vol_monitor,
         volatility_symbols=volatility_symbols,
         volatility_poll_interval=max(getattr(args, "volatility_poll_interval", 60.0), 20.0),
         volatility_history_limit=max(getattr(args, "volatility_history_limit", 1800), 100),
     )
+
+    # Apply PARA settings after app starts so that the CLI can choose which scopes are enabled.
+    if para_settings is not None:
+        try:
+            coordinator_app._coordinator._apply_para_alert_settings(para_settings)
+        except Exception:
+            LOGGER.exception("Failed to apply PARA alert settings")
 
     if (args.dashboard_username or "") or (args.dashboard_password or ""):
         LOGGER.info("Dashboard authentication enabled; protected endpoints require HTTP Basic credentials")
@@ -4704,6 +4720,12 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=_env_float("DASHBOARD_SESSION_TTL", 7 * 24 * 3600),
         help="Seconds that a dashboard login session remains valid (default 7 days).",
+    )
+    parser.add_argument(
+        "--risk-alert-scope",
+        default=os.getenv("RISK_ALERT_SCOPE", "both"),
+        choices=["both", "global", "para", "none"],
+        help="Which risk alert scope(s) to enable: both|global|para|none (default both).",
     )
     parser.add_argument(
         "--risk-alert-threshold",
