@@ -5764,26 +5764,27 @@
         }
       }
 
-      function getRiskThresholdSummary() {
-        if (!riskSettingsSnapshot) {
+      function getRiskThresholdSummary(snapshotOverride = null) {
+        const snapshot = snapshotOverride || riskSettingsSnapshot;
+        if (!snapshot) {
           return GLOBAL_RISK_THRESHOLD_TEXT;
         }
         const parts = [];
-        const thresholdPercent = Number.isFinite(riskSettingsSnapshot.threshold_percent)
-          ? Number(riskSettingsSnapshot.threshold_percent)
-          : Number(riskSettingsSnapshot.threshold) * 100;
+        const thresholdPercent = Number.isFinite(snapshot.threshold_percent)
+          ? Number(snapshot.threshold_percent)
+          : Number(snapshot.threshold) * 100;
         if (Number.isFinite(thresholdPercent) && thresholdPercent > 0) {
           parts.push(`阈值 ${thresholdPercent.toFixed(1)}%`);
         }
-        const resetPercent = Number.isFinite(riskSettingsSnapshot.reset_ratio_percent)
-          ? Number(riskSettingsSnapshot.reset_ratio_percent)
-          : Number(riskSettingsSnapshot.reset_ratio) * 100;
+        const resetPercent = Number.isFinite(snapshot.reset_ratio_percent)
+          ? Number(snapshot.reset_ratio_percent)
+          : Number(snapshot.reset_ratio) * 100;
         if (Number.isFinite(resetPercent) && resetPercent > 0) {
           parts.push(`重置 ${resetPercent.toFixed(1)}%`);
         }
-        const cooldownSeconds = Number.isFinite(riskSettingsSnapshot.cooldown)
-          ? Number(riskSettingsSnapshot.cooldown)
-          : Number(riskSettingsSnapshot.cooldown_minutes) * 60;
+        const cooldownSeconds = Number.isFinite(snapshot.cooldown)
+          ? Number(snapshot.cooldown)
+          : Number(snapshot.cooldown_minutes) * 60;
         if (Number.isFinite(cooldownSeconds) && cooldownSeconds > 0) {
           if (cooldownSeconds >= 60) {
             const minutes = cooldownSeconds / 60;
@@ -5808,7 +5809,7 @@
         });
       }
 
-      function updateRiskMeta() {
+  function updateRiskMeta() {
         const parts = [];
         // Global 面板显示 global/latest 的 risk ratio；PARA 面板严格显示 paraLatestRiskRatio
         const views = getRiskViews();
@@ -5819,15 +5820,16 @@
           if (Number.isFinite(ratio)) {
             viewParts.push(`当前风险 ${(ratio * 100).toFixed(2)}%`);
           }
-          const thresholdSummary = getRiskThresholdSummary();
+          const snapshot = isPara ? paraRiskSettingsSnapshot : globalRiskSettingsSnapshot;
+          const thresholdSummary = getRiskThresholdSummary(snapshot);
           if (thresholdSummary) {
             viewParts.push(thresholdSummary);
           }
-          const lastAlertTs = Number(riskSettingsSnapshot?.last_alert_at);
+          const lastAlertTs = Number(snapshot?.last_alert_at);
           if (Number.isFinite(lastAlertTs) && lastAlertTs > 0) {
             viewParts.push(`上次推送 ${formatTimestamp(lastAlertTs) || '—'}`);
           }
-          const cooldownRemaining = Number(riskSettingsSnapshot?.cooldown_remaining);
+          const cooldownRemaining = Number(snapshot?.cooldown_remaining);
           if (Number.isFinite(cooldownRemaining) && cooldownRemaining > 0.5) {
             viewParts.push(`冷却剩余 ${formatDuration(cooldownRemaining)}`);
           }
@@ -6162,7 +6164,7 @@
             view.bodyTemplateInput.value = activeSnapshot?.body_template ?? '';
           }
           if (view.statusPill) {
-            view.statusPill.textContent = enabled ? `已启用 · ${getRiskThresholdSummary()}` : '未启用';
+            view.statusPill.textContent = enabled ? `已启用 · ${getRiskThresholdSummary(activeSnapshot)}` : '未启用';
           }
         });
         if (scope !== 'para') {
