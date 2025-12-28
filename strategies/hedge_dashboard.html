@@ -6444,14 +6444,18 @@
           }
           const result = await response.json();
           const alert = result?.alert || {};
+          const server = result?.server || null;
           const ratioPercent = Number(alert.ratio_percent);
           const ratioText = Number.isFinite(ratioPercent) ? `${ratioPercent.toFixed(1)}%` : '--%';
-          setRiskTestMessage(`推送成功 · PARA 风险 ${ratioText}`);
+          const serverText = server?.pid ? ` · pid=${server.pid}` : '';
+          setRiskTestMessage(`推送成功 · PARA 风险 ${ratioText}${serverText}`);
         } catch (error) {
           setRiskTestMessage(`推送失败：${error}`);
         } finally {
           riskTestBusy = false;
           updateRiskButtons();
+          // Force refresh history after testing to avoid confusion.
+          loadRiskHistory({ silent: false });
         }
       }
 

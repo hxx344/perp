@@ -45,6 +45,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import quote_plus
 
+import uuid
+
 from aiohttp import ClientSession, ClientTimeout, web
 
 try:
@@ -57,6 +59,10 @@ DASHBOARD_PATH = BASE_DIR / "hedge_dashboard.html"
 PERSISTED_STATE_DIR = BASE_DIR / ".coordinator_state"
 PERSISTED_STATE_DIR.mkdir(exist_ok=True)
 PERSISTED_PARA_AUTO_BALANCE_FILE = PERSISTED_STATE_DIR / "para_auto_balance.json"
+
+# Diagnostics for UI debugging: correlate requests across multi-process / multi-instance deployments.
+SERVER_INSTANCE_ID = uuid.uuid4().hex
+SERVER_PID = os.getpid()
 LOGIN_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"zh-CN\">
     <head>
@@ -3061,7 +3067,10 @@ class CoordinatorApp:
             except (TypeError, ValueError):
                 raise web.HTTPBadRequest(text="limit must be a positive integer")
         history = await self._coordinator.alert_history_snapshot(limit=limit)
-        return web.json_response({"history": history})
+        return web.json_response({
+            "history": history,
+            "server": {"instance_id": SERVER_INSTANCE_ID, "pid": SERVER_PID},
+        })
 
     async def handle_risk_alert_update(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
@@ -3140,7 +3149,10 @@ class CoordinatorApp:
         except RuntimeError as exc:
             raise web.HTTPBadRequest(text=str(exc))
         LOGGER.info("Risk alert test triggered for Bark destination")
-        return web.json_response({"alert": payload})
+        return web.json_response({
+            "alert": payload,
+            "server": {"instance_id": SERVER_INSTANCE_ID, "pid": SERVER_PID},
+        })
 
     async def handle_grvt_adjustments(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
