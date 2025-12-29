@@ -1674,6 +1674,7 @@ class HedgeCoordinator:
         worst_loss_value = Decimal("0")
         worst_agent_id: Optional[str] = None
         worst_account_label: Optional[str] = None
+        pnl_abs_records: List[Tuple[Decimal, str, str]] = []  # (abs_pnl, agent_id, account_label)
 
         for agent_id, state in self._states.items():
             payload = state.paradex_accounts
@@ -1698,12 +1699,23 @@ class HedgeCoordinator:
                     initial_margin = self._compute_initial_margin_total(account_payload)
                 if max_initial_margin is None or initial_margin > max_initial_margin:
                     max_initial_margin = initial_margin
-                if total_pnl is not None and total_pnl < 0:
-                    abs_loss = abs(total_pnl)
-                    if abs_loss > worst_loss_value:
-                        worst_loss_value = abs_loss
-                        worst_agent_id = agent_id
-                        worst_account_label = account_label
+                if total_pnl is not None:
+                    pnl_abs_records.append((abs(total_pnl), agent_id, account_label))
+
+        # Loss definition for PARA: when there are exactly 2 accounts, use
+        # max(|PnL_account_1|, |PnL_account_2|) regardless of sign.
+        # Otherwise (unexpected account count), fall back to max abs(PnL) across accounts.
+        if pnl_abs_records:
+            if len(pnl_abs_records) == 2:
+                abs_loss, agent_id, account_label = max(pnl_abs_records, key=lambda item: item[0])
+                worst_loss_value = abs_loss
+                worst_agent_id = agent_id
+                worst_account_label = account_label
+            else:
+                abs_loss, agent_id, account_label = max(pnl_abs_records, key=lambda item: item[0])
+                worst_loss_value = abs_loss
+                worst_agent_id = agent_id
+                worst_account_label = account_label
 
         max_im = max_initial_margin if max_initial_margin is not None else Decimal("0")
         risk_capacity = total_equity_sum - (Decimal("1.5") * max_im)
