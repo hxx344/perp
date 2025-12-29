@@ -1475,6 +1475,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--once", action="store_true", help="Collect and push a single snapshot, then exit")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
+    parser.add_argument(
+        "--quiet-http",
+        action="store_true",
+        help="Suppress noisy DEBUG logs from http libraries (httpcore/httpx/urllib3).",
+    )
     parser.add_argument("--log-file", help="Optional path to write agent logs (rotating file handler)")
     parser.add_argument(
         "--log-file-max-bytes",
@@ -1534,6 +1539,22 @@ def _configure_logging(args: argparse.Namespace) -> None:
             print(f"Failed to set up log file {log_file_path}: {exc}", file=sys.stderr)
 
     logging.basicConfig(level=level, handlers=handlers, format=log_format)
+
+    # Optional: suppress noisy low-level HTTP client DEBUG logs so that enabling DEBUG
+    # for this monitor doesn't get drowned in httpcore/httpx/urllib3 chatter.
+    quiet_http_env = os.getenv("PARADEX_QUIET_HTTP", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    quiet_http = bool(getattr(args, "quiet_http", False) or quiet_http_env)
+    if quiet_http:
+        noisy_loggers = (
+            "httpcore",
+            "httpx",
+            "urllib3",
+            "hpack",
+            "h2",
+            "charset_normalizer",
+        )
+        for name in noisy_loggers:
+            logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
