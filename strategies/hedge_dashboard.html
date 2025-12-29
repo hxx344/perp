@@ -3973,9 +3973,12 @@
       }
 
       function computeParaReduceSuggestion(flattenedAccounts) {
-        // Contract:
-        // - Only meaningful when there are exactly 2 accounts (two sources/accounts).
-        // - We exclude FF-USD position PnL impact entirely.
+        // Contract (1.B 2.A):
+        // - Only meaningful when there are exactly 2 accounts.
+        // - Pick the "worst" account by *non-FF* total PnL (total - ff_pnl).
+        // - Define target loss L = abs(nonFFTotalWorst) when worst is negative; otherwise no reduce.
+        // - Allocate L to symbols by their negative contribution (symbol pnl < 0) on the worst account.
+        // - Convert allocated loss to size via linear ratio: reduceSize = absPosSize * (allocation / abs(symbolNegPnl)).
         // Output: { ok, message, symbol, actions, details }
         const accounts = Array.isArray(flattenedAccounts) ? flattenedAccounts : [];
         if (accounts.length !== 2) {
@@ -3985,129 +3988,118 @@
           };
         }
 
-        const [a, b] = accounts;
         const exclude = new Set(['FF-USD', 'FFUSD']);
+        const fullFfKey = 'FF-USD';
 
-        // Total PnL (display-level) - remove FF-USD position pnl if present
-        const aPosPnl = sumPositionsPnlByBase(a.positions, { excludeSymbols: exclude });
-        const bPosPnl = sumPositionsPnlByBase(b.positions, { excludeSymbols: exclude });
-        const aFf = sumPositionsPnlByBase(a.positions, { excludeSymbols: new Set() });
-        const bFf = sumPositionsPnlByBase(b.positions, { excludeSymbols: new Set() });
-        const aFfPnl = Number.isFinite(aFf['FF-USD']) ? aFf['FF-USD'] : 0;
-        const bFfPnl = Number.isFinite(bFf['FF-USD']) ? bFf['FF-USD'] : 0;
+        const packAccount = (acct) => {
+          const posPnl = sumPositionsPnlByBase(acct?.positions, { excludeSymbols: exclude });
+          const posPnlAll = sumPositionsPnlByBase(acct?.positions, { excludeSymbols: new Set() });
+          const ffPnl = Number.isFinite(posPnlAll[fullFfKey]) ? posPnlAll[fullFfKey] : 0;
+          const totalRaw = Number.isFinite(acct?.total) ? acct.total : 0;
+          const nonFfTotal = totalRaw - ffPnl;
+          return {
+            name: acct?.name ?? 'Account',
+            positions: Array.isArray(acct?.positions) ? acct.positions : [],
+            totalRaw,
+            ffPnl,
+            nonFfTotal,
+            posPnl,
+          };
+        };
 
-        const aTotalRaw = Number.isFinite(a.total) ? a.total : 0;
-        const bTotalRaw = Number.isFinite(b.total) ? b.total : 0;
-        const aTotal = aTotalRaw - aFfPnl;
-        const bTotal = bTotalRaw - bFfPnl;
-        const deltaTotal = aTotal - bTotal; // want -> 0
+        const a = packAccount(accounts[0]);
+        const b = packAccount(accounts[1]);
 
-        const aBtc = Number.isFinite(aPosPnl.BTC) ? aPosPnl.BTC : 0;
-        const bBtc = Number.isFinite(bPosPnl.BTC) ? bPosPnl.BTC : 0;
-        const aEth = Number.isFinite(aPosPnl.ETH) ? aPosPnl.ETH : 0;
-        const bEth = Number.isFinite(bPosPnl.ETH) ? bPosPnl.ETH : 0;
-        const deltaBtc = aBtc - bBtc;
-        const deltaEth = aEth - bEth;
+        // Worst = smaller nonFF total
+        const worst = a.nonFfTotal <= b.nonFfTotal ? a : b;
+        const other = worst === a ? b : a;
 
-        // Decide which symbol adjustment most reduces |deltaTotal|.
-        // User expectation: adjustment should be applied to BOTH accounts simultaneously.
-        // We treat it as a paired trade on a single symbol:
-        //   - reduce(symbol) on the account that is "ahead" on total pnl
-        //   - add(symbol)    on the other account
-        // This keeps total exposure more symmetric while pushing ΔTotal toward 0.
-        // Approx effect: ΔTotal' ≈ ΔTotal - f * ΔSymbol  (where ΔSymbol = aSymbolPnL - bSymbolPnL)
-        // Choose symbol with best alignment and propose f that minimizes |ΔTotal'|.
-        const candidates = [
-          { symbol: 'BTC', deltaSymbol: deltaBtc },
-          { symbol: 'ETH', deltaSymbol: deltaEth },
-        ].filter((c) => Number.isFinite(c.deltaSymbol) && Math.abs(c.deltaSymbol) > 1e-9);
+        if (!Number.isFinite(worst.nonFfTotal)) {
+          return {
+            ok: false,
+            message: '缺少账户 total pnl，无法计算减仓建议。',
+          };
+        }
 
-        if (!Number.isFinite(deltaTotal) || Math.abs(deltaTotal) < 1e-6) {
+        // If worst account is not losing (excluding FF), no need to reduce.
+        if (worst.nonFfTotal >= -1e-6) {
           return {
             ok: true,
             symbol: null,
             actions: [],
-            details: `已基本平衡（排除 FF-USD 后 ΔPnL=${numberFormatter.format(deltaTotal)}）。`,
             message: '无需减仓',
+            details: `最坏账户（${worst.name}）排除 FF 后 PnL=${numberFormatter.format(worst.nonFfTotal)}，未出现净亏损。`,
           };
         }
 
-        if (!candidates.length) {
-          return {
-            ok: false,
-            message: '缺少 BTC/ETH 仓位 PnL（或仅有 FF-USD），无法计算减仓建议。',
-          };
-        }
+        const L = Math.abs(worst.nonFfTotal);
 
-        let best = null;
-        for (const c of candidates) {
-          // If deltaSymbol has opposite sign to deltaTotal, reducing that symbol would worsen.
-          const alignment = deltaTotal * c.deltaSymbol;
-          if (alignment <= 0) {
+        // Build candidates from negative symbol pnl on worst account.
+        // Only consider BTC/ETH to avoid surprising suggestions on small caps.
+        const allowedSymbols = new Set(['BTC', 'ETH']);
+        const symbolRows = [];
+        for (const [base, pnl] of Object.entries(worst.posPnl || {})) {
+          if (!allowedSymbols.has(base)) {
             continue;
           }
-          // optimal f = deltaTotal / deltaSymbol (clamped 0..1)
-          const f = clamp(deltaTotal / c.deltaSymbol, 0, 1);
-          const newDelta = deltaTotal - f * c.deltaSymbol;
-          const score = Math.abs(newDelta);
-          if (!best || score < best.score) {
-            best = { ...c, f, newDelta, score };
+          if (!Number.isFinite(pnl) || pnl >= -1e-9) {
+            continue;
           }
+          const cap = estimateTotalAbsSize(worst.positions, base);
+          if (!(cap > 0)) {
+            continue;
+          }
+          symbolRows.push({ symbol: base, negPnlAbs: Math.abs(pnl), cap });
         }
 
-        if (!best) {
+        if (!symbolRows.length) {
           return {
             ok: false,
-            message: `BTC/ETH 的 PnL 差与总 PnL 差方向不一致（ΔTotal=${numberFormatter.format(deltaTotal)}，ΔBTC=${numberFormatter.format(deltaBtc)}，ΔETH=${numberFormatter.format(deltaEth)}），按该规则不建议减仓。`,
+            message: '最坏账户没有可识别的 BTC/ETH 亏损标的（排除 FF）或缺少仓位 size，无法给出减仓建议。',
           };
         }
 
-        // Paired adjustment (two-sided reduce): both accounts reduce exposure on the same symbol.
-        // Reasoning: in your setup the two accounts typically hold opposite directions (one long one short).
-        // Reducing on BOTH sides shrinks gross exposure while keeping the hedge structure.
-        const aName = a?.name ?? 'Account A';
-        const bName = b?.name ?? 'Account B';
-
-        const aCap = estimateTotalAbsSize(a.positions, best.symbol);
-        const bCap = estimateTotalAbsSize(b.positions, best.symbol);
-        const pairedCap = Math.min(aCap, bCap);
-        if (!(pairedCap > 0)) {
+        const totalNegAbs = symbolRows.reduce((acc, r) => acc + r.negPnlAbs, 0);
+        if (!(totalNegAbs > 0)) {
           return {
             ok: false,
-            message: `两边都需要有 ${best.symbol} 仓位才能做“双边同时减仓”建议（${aName} 可用=${formatCoinAmount(aCap, 4)}，${bName} 可用=${formatCoinAmount(bCap, 4)}）。`,
+            message: '无法汇总最坏账户的负贡献标的（neg pnl）。',
           };
         }
 
-        // Convert fraction f to paired size recommendation.
-        const rawPairedSize = best.f * pairedCap;
+        // Allocate and compute sizes; pick the largest suggested reduction as the headline.
+        const computed = symbolRows
+          .map((r) => {
+            const allocation = (L * r.negPnlAbs) / totalNegAbs;
+            const ratio = r.negPnlAbs > 0 ? allocation / r.negPnlAbs : 0;
+            const size = clamp(r.cap * ratio, 0, r.cap);
+            return { ...r, allocation, ratio, size };
+          })
+          .filter((r) => Number.isFinite(r.size) && r.size > 0);
 
-        // Optional refinement: Use a-side pnl sensitivity to translate ΔTotal to size.
-        // (This is a heuristic; we still clamp by pairedCap.)
-        const pnlPerUnit = estimatePnLPerUnit(a.positions, best.symbol);
-        let refinedSize = null;
-        if (Number.isFinite(pnlPerUnit) && deltaTotal * pnlPerUnit > 0) {
-          refinedSize = clamp(Math.abs(deltaTotal / pnlPerUnit), 0, pairedCap);
+        if (!computed.length) {
+          return {
+            ok: false,
+            message: '减仓 size 计算结果为空（可能是仓位为 0 或输入异常）。',
+          };
         }
 
-  // For a hedged pair holding opposite directions on the same symbol,
-  // reducing BOTH sides by the same size usually impacts ΔTotal roughly twice
-  // compared to a single side reduction. Use half-size to avoid over-reducing.
-  const suggestionSize = Number.isFinite(refinedSize) ? refinedSize : rawPairedSize;
-  const finalSize = clamp(suggestionSize * 0.5, 0, pairedCap);
-
-  const main = `${best.symbol} 双边减仓 ${formatCoinAmount(finalSize, 4)}${best.symbol}`;
+        computed.sort((x, y) => y.size - x.size);
+        const best = computed[0];
+        const main = `${best.symbol} 单边减仓 ${formatCoinAmount(best.size, 4)}${best.symbol}`;
 
         const actions = [
-          { account: aName, action: 'reduce', symbol: best.symbol, size: finalSize },
-          { account: bName, action: 'reduce', symbol: best.symbol, size: finalSize },
+          { account: worst.name, action: 'reduce', symbol: best.symbol, size: best.size },
         ];
+
+        const details = `最坏账户=${worst.name}（raw=${numberFormatter.format(worst.totalRaw)}，FF=${numberFormatter.format(worst.ffPnl)}，非FF=${numberFormatter.format(worst.nonFfTotal)}，目标亏损L=${numberFormatter.format(L)}）。择优标的=${best.symbol}（negPnL=${numberFormatter.format(-best.negPnlAbs)}，cap=${formatCoinAmount(best.cap, 4)}，分摊=${numberFormatter.format(best.allocation)} → 减仓=${formatCoinAmount(best.size, 4)}）。对冲侧=${other.name} 不强制同步减仓。`;
 
         return {
           ok: true,
           symbol: best.symbol,
           actions,
           message: main,
-          details: null,
+          details,
         };
       }
 
