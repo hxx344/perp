@@ -1369,9 +1369,20 @@ class HedgeCoordinator:
         self._feishu_para_push_interval = max(_env_float(FEISHU_PARA_PUSH_INTERVAL_ENV, 300.0), 30.0)
         self._feishu_task: Optional[asyncio.Task[Any]] = None
         self._feishu_session: Optional[ClientSession] = None
+        self._feishu_start_diagnostic_logged = False
         self._para_risk_capacity_buffer = RiskCapacityBufferState()
 
     async def start_background_tasks(self) -> None:
+        if not self._feishu_start_diagnostic_logged:
+            self._feishu_start_diagnostic_logged = True
+            # Log once so operators can immediately tell why Feishu push is (not) active.
+            LOGGER.info(
+                "Feishu PARA push config: enabled=%s interval=%.0fs url=%s (set %s=1 to enable access logs)",
+                self._feishu_para_push_enabled,
+                self._feishu_para_push_interval,
+                "set" if self._feishu_webhook_url else "missing",
+                "AIOHTTP_ACCESS_LOG",
+            )
         if not self._feishu_webhook_url or not self._feishu_para_push_enabled:
             # Make misconfiguration obvious in logs.
             if not self._feishu_webhook_url and self._feishu_para_push_enabled:
