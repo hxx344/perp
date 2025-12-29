@@ -8058,6 +8058,7 @@
                   positions: positionsList,
                   initialMarginTotal,
                   initialMarginRequirement,
+                  imReqSource: (accountObj.im_req_source ?? accountObj.imReqSource ?? null),
                   updatedTs: snapshotTs,
                   sortKey: buildAccountSortKey(agentId, accountObj, summary),
                 });
@@ -8346,9 +8347,11 @@
           const initialMarginRequirementText = Number.isFinite(imReqCandidate)
             ? numberFormatter.format(imReqCandidate)
             : '--';
-          const initialMarginRequirementSource = Number.isFinite(entry.initialMarginRequirement)
-            ? 'initial_margin_requirement'
-            : (Number.isFinite(entry.initialMarginTotal) ? 'initial_margin_total (fallback)' : 'missing');
+          const initialMarginRequirementSource = entry.imReqSource
+            ? String(entry.imReqSource)
+            : (Number.isFinite(entry.initialMarginRequirement)
+              ? 'initial_margin_requirement'
+              : (Number.isFinite(entry.initialMarginTotal) ? 'initial_margin_total (fallback)' : 'missing'));
           const transferableCandidate = Number.isFinite(entry.transferableValue)
             ? entry.transferableValue
             : (entry.transferableEstimate && Number.isFinite(entry.transferableEstimate.value)
