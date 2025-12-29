@@ -8235,9 +8235,13 @@
           const suggestion = computeParaReduceSuggestion(meaningfulAccounts.length ? meaningfulAccounts : flattenedAccounts);
           if (suggestion?.ok) {
             paraReduceSuggestionMain.textContent = suggestion.message || '--';
-            paraReduceSuggestionDetail.textContent = suggestion.details || '—';
+            // When details is null/empty, don't render a dangling '-'/'—' second line.
+            const detailsText = typeof suggestion.details === 'string' ? suggestion.details.trim() : '';
+            paraReduceSuggestionDetail.textContent = detailsText;
+            paraReduceSuggestionDetail.style.display = detailsText ? '' : 'none';
           } else {
             paraReduceSuggestionMain.textContent = '—';
+            paraReduceSuggestionDetail.style.display = '';
             paraReduceSuggestionDetail.textContent = suggestion?.message || '等待账户与持仓数据…';
           }
         }
