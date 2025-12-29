@@ -1473,6 +1473,108 @@ class HedgeCoordinator:
             lines.append(f"备注: {capacity_note} ({capacity_status})")
         return "\n".join(lines)
 
+    @staticmethod
+    def _feishu_risk_color(ratio: Optional[float]) -> str:
+        """Return a Feishu card color token based on risk level.
+
+        We keep it intentionally simple:
+        - green: < 20%
+        - yellow: 20% - 30%
+        - red: >= 30%
+
+        Feishu interactive cards accept tokens like: green / orange / red / grey.
+        """
+
+        if ratio is None or not isinstance(ratio, (int, float)) or not math.isfinite(float(ratio)):
+            return "grey"
+        value = float(ratio)
+        if value >= 0.30:
+            return "red"
+        if value >= 0.20:
+            return "orange"
+        return "green"
+
+    def _build_para_risk_push_card(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        stats = self._para_risk_stats
+        if stats is None:
+            return None
+
+        authority = self._compute_para_authority_values()
+        buffered_capacity: Decimal = authority.get("risk_capacity_buffered") or Decimal("0")
+        worst_loss: Decimal = authority.get("worst_loss") or Decimal("0")
+        ratio: Optional[float] = authority.get("ratio")
+        capacity_note = authority.get("buffer_note")
+        capacity_status = authority.get("buffer_status")
+
+        ratio_text = _format_percent((ratio or 0.0) * 100, 2) if ratio is not None else "-"
+        worst_label = stats.worst_account_label or "-"
+        worst_agent = stats.worst_agent_id or "-"
+        color = self._feishu_risk_color(ratio)
+
+        fields: List[Dict[str, Any]] = [
+            {
+                "is_short": False,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**RISK LEVEL:** <font color=\"{color}\">{ratio_text}</font>",
+                },
+            },
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**风险裕量**\n{_format_decimal(buffered_capacity or Decimal('0'), 2)}",
+                },
+            },
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**最坏亏损**\n{_format_decimal(worst_loss, 2)}",
+                },
+            },
+            {
+                "is_short": False,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**最坏账户**\n{worst_label} ({worst_agent})",
+                },
+            },
+        ]
+
+        if capacity_note:
+            fields.append(
+                {
+                    "is_short": False,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**备注**\n{capacity_note} ({capacity_status})",
+                    },
+                }
+            )
+
+        # Feishu/Lark interactive card payload.
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": color,
+                "title": {"tag": "plain_text", "content": "[PARA] 风险播报"},
+            },
+            "elements": [
+                {"tag": "div", "fields": fields},
+                {
+                    "tag": "note",
+                    "elements": [
+                        {
+                            "tag": "plain_text",
+                            "content": f"source: frontend_authority · ts: {int((now or time.time()))}",
+                        }
+                    ],
+                },
+            ],
+        }
+        return {"msg_type": "interactive", "card": card}
+
     async def _try_send_feishu_para_snapshot(self) -> None:
         if not self._feishu_webhook_url or not self._feishu_para_push_enabled:
             return
@@ -1482,11 +1584,9 @@ class HedgeCoordinator:
             session = self._feishu_session
 
         async with self._lock:
-            text = self._build_para_risk_push_text()
-        if not text:
+            payload = self._build_para_risk_push_card()
+        if not payload:
             return
-
-        payload = {"msg_type": "text", "content": {"text": text}}
         try:
             async with session.post(self._feishu_webhook_url, json=payload) as resp:
                 if resp.status >= 400:
