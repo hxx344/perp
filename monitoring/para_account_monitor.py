@@ -731,11 +731,17 @@ class ParadexAccountMonitor:
             return None
 
         # Try known/likely method names (version dependent).
+        # NOTE: paradex-py has shifted naming across versions; keep this list broad.
         candidate_methods = (
             "fetch_account",
-            "account",
             "get_account",
+            "account",
             "fetch_account_summary",
+            "get_account_summary",
+            "fetch_account_info",
+            "get_account_info",
+            "fetch_user_account",
+            "get_user_account",
         )
         for name in candidate_methods:
             method = getattr(api_client, name, None)
@@ -752,7 +758,28 @@ class ParadexAccountMonitor:
             except Exception as exc:  # pragma: no cover - network path
                 LOGGER.debug("Paradex %s call failed: %s", name, exc)
                 continue
+
+            # Some clients return coroutines.
+            if inspect.iscoroutine(payload):
+                try:
+                    payload = asyncio.run(payload)  # best-effort in sync context
+                except RuntimeError:
+                    # If we're already in an event loop, skip awaiting.
+                    payload = None
+                except Exception as exc:  # pragma: no cover
+                    LOGGER.debug("Paradex %s await failed: %s", name, exc)
+                    payload = None
+
             if isinstance(payload, dict):
+                if PARA_IM_DEBUG:
+                    try:
+                        LOGGER.debug(
+                            "[PARA_IM_DEBUG] account_summary fetched via %s keys=%s",
+                            name,
+                            list(payload.keys()),
+                        )
+                    except Exception:
+                        pass
                 return payload
         return None
 
