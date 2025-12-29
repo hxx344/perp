@@ -3,13 +3,13 @@ from pathlib import Path
 
 
 def test_coordinator_loads_repo_root_dotenv(monkeypatch, tmp_path):
-    """Coordinator should load REPO_ROOT_DIR/.env at import time.
+    """Coordinator should load perp-dex-tools/.env at import time.
 
     This test simulates a repo layout:
-      repo_root/
-        .env
-        perp-dex-tools/
-          strategies/hedge_coordinator.py
+                repo_root/
+                    perp-dex-tools/
+                        .env
+                        strategies/hedge_coordinator.py
 
     We change into perp-dex-tools before importing so that the loader must not
     depend on current working directory.
@@ -26,12 +26,12 @@ def test_coordinator_loads_repo_root_dotenv(monkeypatch, tmp_path):
         "from pathlib import Path\n"
         "from dotenv import load_dotenv\n"
         "BASE_DIR = Path(__file__).resolve().parent\n"
-        "REPO_ROOT_DIR = BASE_DIR.parent.parent\n"
-        "load_dotenv(REPO_ROOT_DIR / '.env', override=False)\n",
+        "PDT_ROOT_DIR = BASE_DIR.parent\n"
+        "load_dotenv(PDT_ROOT_DIR / '.env', override=False)\n",
         encoding="utf-8",
     )
 
-    (repo_root / ".env").write_text("FEISHU_PARA_PUSH_ENABLED=true\n", encoding="utf-8")
+    (pdt_root / ".env").write_text("FEISHU_PARA_PUSH_ENABLED=true\n", encoding="utf-8")
 
     # Ensure a clean import environment.
     monkeypatch.delenv("FEISHU_PARA_PUSH_ENABLED", raising=False)
@@ -61,12 +61,12 @@ def test_dotenv_does_not_override_existing_env(monkeypatch, tmp_path):
         "from pathlib import Path\n"
         "from dotenv import load_dotenv\n"
         "BASE_DIR = Path(__file__).resolve().parent\n"
-        "REPO_ROOT_DIR = BASE_DIR.parent.parent\n"
-        "load_dotenv(REPO_ROOT_DIR / '.env', override=False)\n",
+        "PDT_ROOT_DIR = BASE_DIR.parent\n"
+        "load_dotenv(PDT_ROOT_DIR / '.env', override=False)\n",
         encoding="utf-8",
     )
 
-    (repo_root / ".env").write_text("FEISHU_PARA_PUSH_INTERVAL=30\n", encoding="utf-8")
+    (pdt_root / ".env").write_text("FEISHU_PARA_PUSH_INTERVAL=30\n", encoding="utf-8")
 
     monkeypatch.setenv("FEISHU_PARA_PUSH_INTERVAL", "999")
     monkeypatch.chdir(pdt_root)

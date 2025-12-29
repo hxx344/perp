@@ -129,8 +129,8 @@ Python 版本要求（最佳选项是 Python 3.10 - 3.12）：
    在项目根目录创建`.env`文件，并使用 env_example.txt 作为样本，修改为你的 api 密匙。
 
    **协调器（Dashboard / 风险告警 / 飞书推送）说明**：
-   - `strategies/hedge_coordinator.py` 会在启动时自动加载**仓库根目录**（也就是 `perp/`）下的 `.env`。
-   - 这意味着：即使你在 `perp-dex-tools/` 目录里启动 coordinator，只要 `.env` 放在 `d:/project8/.env`（仓库根目录）也会生效。
+   - `strategies/hedge_coordinator.py` 会在启动时自动加载 **`perp-dex-tools/` 目录**（与 `env_example.txt` 同目录）下的 `.env`。
+   - 这意味着：即使你从别的目录启动 coordinator，只要 `.env` 放在 `d:/project8/perp-dex-tools/.env` 也会生效。
    - 已存在的进程环境变量优先级更高（不会被 `.env` 覆盖）。
 
    飞书 webhook 推送（PARA 风险快照）常用配置示例：

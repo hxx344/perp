@@ -62,12 +62,12 @@ except ImportError:  # pragma: no cover - script execution path
     from grvt_adjustments import AdjustmentAction, GrvtAdjustmentManager
 
 BASE_DIR = Path(__file__).resolve().parent
-REPO_ROOT_DIR = BASE_DIR.parent.parent
+PDT_ROOT_DIR = BASE_DIR.parent
 
 # Load environment variables from repository root .env (if present).
 # Note: we deliberately do NOT override existing process environment variables.
 if load_dotenv is not None:
-    load_dotenv(REPO_ROOT_DIR / ".env", override=False)
+    load_dotenv(PDT_ROOT_DIR / ".env", override=False)
 
 DASHBOARD_PATH = BASE_DIR / "hedge_dashboard.html"
 PERSISTED_STATE_DIR = BASE_DIR / ".coordinator_state"
