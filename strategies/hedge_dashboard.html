@@ -8341,9 +8341,18 @@
           const initialMarginText = Number.isFinite(entry.initialMarginTotal)
             ? numberFormatter.format(entry.initialMarginTotal)
             : '--';
-          const initialMarginRequirementText = Number.isFinite(entry.initialMarginRequirement)
-            ? numberFormatter.format(entry.initialMarginRequirement)
+
+          // Prefer API initial_margin_requirement; fall back to legacy initial_margin/initial_margin_total.
+          // Note: treat 0 as a valid number (display "0"), only use "--" for missing/NaN.
+          const imReqCandidate = Number.isFinite(entry.initialMarginRequirement)
+            ? entry.initialMarginRequirement
+            : (Number.isFinite(entry.initialMarginTotal) ? entry.initialMarginTotal : null);
+          const initialMarginRequirementText = Number.isFinite(imReqCandidate)
+            ? numberFormatter.format(imReqCandidate)
             : '--';
+          const initialMarginRequirementSource = Number.isFinite(entry.initialMarginRequirement)
+            ? 'initial_margin_requirement'
+            : (Number.isFinite(entry.initialMarginTotal) ? 'initial_margin_total (fallback)' : 'missing');
           const transferableCandidate = Number.isFinite(entry.transferableValue)
             ? entry.transferableValue
             : (entry.transferableEstimate && Number.isFinite(entry.transferableEstimate.value)
@@ -8384,7 +8393,7 @@
               <div><dt>Positions</dt><dd>${escapeHtml(positionsCountText)}</dd></div>
               <div><dt>Equity</dt><dd>${escapeHtml(equityText)}</dd></div>
               <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
-              <div><dt>IM Req</dt><dd>${escapeHtml(initialMarginRequirementText)}</dd></div>
+              <div title="${escapeHtml(initialMarginRequirementSource)}"><dt>IM Req</dt><dd>${escapeHtml(initialMarginRequirementText)}</dd></div>
               <div><dt>Transferable</dt><dd>${escapeHtml(transferableText)}</dd></div>
               <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
             </dl>
