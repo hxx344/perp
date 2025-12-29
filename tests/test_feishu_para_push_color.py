@@ -31,18 +31,22 @@ class FeishuParaPushColorTests(unittest.TestCase):
             assert payload is not None
             header = payload["card"]["header"]
             self.assertEqual(header["template"], "green")
+            self.assertIn("RISK LEVEL", header["title"]["content"])
+            self.assertIn("10.00%", header["title"]["content"])
 
             coordinator._compute_para_authority_values = lambda: _authority(0.25)  # type: ignore[assignment]
             payload = coordinator._build_para_risk_push_card(now=0.0)
             assert payload is not None
             header = payload["card"]["header"]
             self.assertEqual(header["template"], "orange")
+            self.assertIn("25.00%", header["title"]["content"])
 
             coordinator._compute_para_authority_values = lambda: _authority(0.30)  # type: ignore[assignment]
             payload = coordinator._build_para_risk_push_card(now=0.0)
             assert payload is not None
             header = payload["card"]["header"]
             self.assertEqual(header["template"], "red")
+            self.assertIn("30.00%", header["title"]["content"])
 
         asyncio.run(_run())
 

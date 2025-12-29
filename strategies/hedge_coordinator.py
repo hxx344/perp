@@ -1554,11 +1554,12 @@ class HedgeCoordinator:
             )
 
         # Feishu/Lark interactive card payload.
+        header_title = f"[PARA] 风险播报 · RISK LEVEL: {ratio_text}"
         card = {
             "config": {"wide_screen_mode": True},
             "header": {
                 "template": color,
-                "title": {"tag": "plain_text", "content": "[PARA] 风险播报"},
+                "title": {"tag": "plain_text", "content": header_title},
             },
             "elements": [
                 {"tag": "div", "fields": fields},
