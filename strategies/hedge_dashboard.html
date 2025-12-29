@@ -4089,17 +4089,13 @@
           refinedSize = clamp(Math.abs(deltaTotal / pnlPerUnit), 0, pairedCap);
         }
 
-        const suggestionSize = Number.isFinite(refinedSize) ? refinedSize : rawPairedSize;
-        const finalSize = clamp(suggestionSize, 0, pairedCap);
+  // For a hedged pair holding opposite directions on the same symbol,
+  // reducing BOTH sides by the same size usually impacts ΔTotal roughly twice
+  // compared to a single side reduction. Use half-size to avoid over-reducing.
+  const suggestionSize = Number.isFinite(refinedSize) ? refinedSize : rawPairedSize;
+  const finalSize = clamp(suggestionSize * 0.5, 0, pairedCap);
 
-  const main = `${best.symbol} 双边同时减仓：${aName} 减仓 ~${formatCoinAmount(finalSize, 4)}；${bName} 减仓 ~${formatCoinAmount(finalSize, 4)}`;
-        const detailParts = [];
-        detailParts.push(`排除 FF-USD 后：ΔTotal=${numberFormatter.format(deltaTotal)} → 目标接近 0`);
-        detailParts.push(`Δ${best.symbol}=${numberFormatter.format(best.deltaSymbol)}，按比例 f=${(best.f * 100).toFixed(1)}%`);
-        if (Number.isFinite(pnlPerUnit)) {
-          detailParts.push(`估算 dPnL/dSize≈${formatSignedNumber(pnlPerUnit, 4)} / 1${best.symbol}`);
-        }
-        detailParts.push(`预计减仓后：ΔTotal≈${numberFormatter.format(best.newDelta)}（粗略）`);
+  const main = `${best.symbol} 双边减仓 ${formatCoinAmount(finalSize, 4)}${best.symbol}`;
 
         const actions = [
           { account: aName, action: 'reduce', symbol: best.symbol, size: finalSize },
@@ -4111,7 +4107,7 @@
           symbol: best.symbol,
           actions,
           message: main,
-          details: detailParts.join(' · '),
+          details: '',
         };
       }
 
