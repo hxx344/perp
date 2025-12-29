@@ -18,7 +18,7 @@ class TestParaRiskHistoryInputs(unittest.TestCase):
         finally:
             asyncio.set_event_loop(None)
 
-    def test_para_history_contains_input_fields(self):
+    def test_para_history_contains_loss_and_capacity_only(self):
         coordinator = HedgeCoordinator()
 
         # Force a para risk stats snapshot with known inputs.
@@ -57,13 +57,11 @@ class TestParaRiskHistoryInputs(unittest.TestCase):
             self.assertEqual(len(history), 1)
             entry = history[0]
             self.assertEqual(entry.get("kind"), "para_risk")
-            # Raw fields already existed.
-            self.assertIn("raw_base_value", entry)
-            # New input fields.
-            self.assertIn("para_risk_computed_at", entry)
-            self.assertIn("para_equity_sum", entry)
-            self.assertIn("para_max_initial_margin", entry)
-            self.assertIn("para_account_count", entry)
+            # History is intentionally slim: only keep the essentials for display.
+            self.assertIn("loss_value", entry)
+            self.assertIn("loss_value_raw", entry)
+            self.assertIn("base_value", entry)
+            self.assertIn("base_value_raw", entry)
 
         self._loop.run_until_complete(_run())
 

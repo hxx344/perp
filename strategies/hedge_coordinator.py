@@ -2136,65 +2136,9 @@ class HedgeCoordinator:
         }
 
         if kind == "para_risk":
-            stats = self._para_risk_stats
-            if stats is not None:
-                entry["raw_base_value"] = self._format_decimal(stats.risk_capacity)
-                entry["raw_base_value_raw"] = _to_float(stats.risk_capacity)
-                entry["raw_base_label"] = "risk_capacity(raw)"
-
-                # Attach computation inputs so we can reconcile history vs dashboard cards.
-                entry["para_risk_computed_at"] = stats.computed_at
-                if stats.equity_sum is not None:
-                    entry["para_equity_sum"] = self._format_decimal(stats.equity_sum)
-                    entry["para_equity_sum_raw"] = _to_float(stats.equity_sum)
-                if stats.max_initial_margin is not None:
-                    entry["para_max_initial_margin"] = self._format_decimal(stats.max_initial_margin)
-                    entry["para_max_initial_margin_raw"] = _to_float(stats.max_initial_margin)
-                if stats.account_count is not None:
-                    entry["para_account_count"] = int(stats.account_count)
-
-                # Dashboard-authoritative values (frontend field preference + buffering).
-                try:
-                    authority = self._compute_para_authority_values()
-                except Exception:
-                    authority = None
-                if isinstance(authority, dict):
-                    inputs = authority.get("inputs")
-                    if not isinstance(inputs, dict):
-                        inputs = {}
-                    auth_loss = authority.get("worst_loss")
-                    auth_base = authority.get("risk_capacity_buffered")
-                    auth_raw = authority.get("risk_capacity_raw")
-                    auth_ratio = authority.get("ratio")
-                    entry["authority_used"] = True
-                    entry["authority_base_label"] = "risk_capacity(frontend_authority)"
-                    if isinstance(auth_base, Decimal):
-                        entry["authority_base_value"] = self._format_decimal(auth_base)
-                        entry["authority_base_value_raw"] = _to_float(auth_base)
-                    if isinstance(auth_raw, Decimal):
-                        entry["authority_raw_base_value"] = self._format_decimal(auth_raw)
-                        entry["authority_raw_base_value_raw"] = _to_float(auth_raw)
-                    if isinstance(auth_loss, Decimal):
-                        entry["authority_loss_value"] = self._format_decimal(auth_loss)
-                        entry["authority_loss_value_raw"] = _to_float(auth_loss)
-                    if isinstance(auth_ratio, (int, float)) and math.isfinite(float(auth_ratio)):
-                        entry["authority_ratio"] = float(auth_ratio)
-                        entry["authority_ratio_percent"] = float(auth_ratio) * 100.0
-                    entry["authority_buffer_status"] = authority.get("buffer_status")
-                    entry["authority_buffer_note"] = authority.get("buffer_note")
-                    entry["authority_im_source"] = inputs.get("im_source")
-                    entry["authority_latest_update"] = inputs.get("latest_update")
-                    if isinstance(inputs.get("equity_sum"), Decimal):
-                        entry["authority_equity_sum"] = self._format_decimal(inputs["equity_sum"])
-                        entry["authority_equity_sum_raw"] = _to_float(inputs["equity_sum"])
-                    if isinstance(inputs.get("max_initial_margin"), Decimal):
-                        entry["authority_max_initial_margin"] = self._format_decimal(inputs["max_initial_margin"])
-                        entry["authority_max_initial_margin_raw"] = _to_float(inputs["max_initial_margin"])
-                    if inputs.get("account_count") is not None:
-                        try:
-                            entry["authority_account_count"] = int(inputs["account_count"])
-                        except Exception:
-                            pass
+            # PARA history only needs the essential numbers for display: loss / capacity.
+            # We intentionally avoid attaching extra forensics fields to keep the history light.
+            pass
         async with self._alert_history_lock:
             self._alert_history.append(entry)
 
