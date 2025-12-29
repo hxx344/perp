@@ -165,6 +165,46 @@ Assuming current ETH price is $2000 with take-profit set to 0.02%:
 - **Real-time Monitoring**: Continuously monitors positions and order status
 - **⚠️ No Stop Loss**: This strategy does not include stop-loss functionality and may face significant losses in adverse market conditions
 
+---
+
+## Hedge Metrics Dashboard (Para / GRVT)
+
+`strategies/hedge_coordinator.py` also serves a lightweight web dashboard (front-end page lives in `strategies/hedge_dashboard.html`) for multi-account monitoring.
+
+It provides:
+
+- **PARA Multi-Account Monitor**: aggregated Paradex accounts (Equity / PnL / IM Req / risk level)
+- **GRVT Multi-Account Monitor**: aggregated GRVT accounts core metrics
+- **Risk alerts (Bark)**: separate configurations and histories for `global` and `para`
+- **Reduce suggestion**: when exactly two PARA accounts are present, the UI shows a minimal “paired reduce” hint
+
+### Dashboard entry
+
+After starting the coordinator, open:
+
+- `http://<host>:8899/dashboard`
+
+If login is enabled, the browser will be redirected to `/login` first.
+
+### Risk alert scopes
+
+Risk alerts are split into two independent scopes:
+
+- `global`: legacy/global risk alert
+- `para`: PARA-only alert for the Para Multi-Account Monitor
+
+Each scope has its own enabled/threshold/reset/cooldown/bark_url settings and its own history.
+
+### IM Req (initial margin requirement) source
+
+The dashboard prefers `initial_margin_requirement` as the authoritative IM Req field.
+If it is missing, the UI may fall back to compatibility aggregates (e.g. `initial_margin_total`), but it's recommended to ensure the monitor payload includes `initial_margin_requirement`.
+
+### PARA summary cards & reduce suggestion
+
+- The PARA summary removed the ETH/BTC PnL sub-cards and added a `Max IM Req` summary card.
+- Reduce suggestion is intentionally minimal: `<SYMBOL> paired reduce <SIZE><SYMBOL>` (no extra details).
+
 ## Sample commands:
 
 ### EdgeX Exchange:

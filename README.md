@@ -361,6 +361,41 @@ python strategies/hedge_coordinator.py --host 0.0.0.0 --port 8899
 随后运行对冲脚本时带上 `--coordinator-url http://<host>:8899`，即可在浏览器访问 `/dashboard`
 查看当前 Lighter 仓位、累计循环次数、累计收益以及累计成交量等指标。
 
+#### Hedge Metrics Dashboard（Para / GRVT 监控面板）
+
+`strategies/hedge_coordinator.py` 同时提供一个用于多账户监控的前端页面（`strategies/hedge_dashboard.html`），用于汇总展示：
+
+- **PARA Multi-Account Monitor**：聚合多个 Paradex 账户的 Equity / PnL / IM Req / 风险水平等
+- **GRVT Multi-Account Monitor**：聚合多个 GRVT 账户的核心指标
+- **风险告警（Bark）**：支持全局（global）与 PARA（para）两套独立阈值与历史记录
+- **减仓建议**：当 PARA 仅配置两套对冲账户时，会给出“某币种双边减仓 size”的极简建议
+
+说明：该页面核心展示口径以“卡片输出”为权威口径；部分告警历史会附带 `authority_*` 字段用于与卡片对齐。
+
+##### 访问入口
+
+- 协调机启动后：浏览器访问 `http://<host>:8899/dashboard`
+- 若开启登录：会先跳转到 `/login`
+
+##### PARA 风险告警（scope）
+
+面板与接口将风险告警分为两套 scope：
+
+- `global`：全局风险告警（旧版兼容）
+- `para`：仅用于 PARA Multi-Account Monitor 的告警
+
+两套告警拥有**独立的 enabled/threshold/reset/cooldown/bark_url** 配置与**独立历史记录**。
+
+##### IM Req（初始保证金要求）口径
+
+面板中用于风险与统计的 IM 指标优先取上报字段 `initial_margin_requirement`（权威口径）。
+若数据源缺失，页面会回退到兼容字段（例如聚合后的 `initial_margin_total`），但建议尽量保证监控上报包含 `initial_margin_requirement`。
+
+##### PARA 顶部汇总卡片与减仓建议
+
+- PARA 顶部汇总卡片已移除 ETH/BTC PnL 子卡片，避免误导；新增 `Max IM Req` 汇总指标卡片。
+- “减仓建议”区域默认只展示一行：`<SYMBOL> 双边减仓 <SIZE><SYMBOL>`（不显示详情）。
+
 **面板登录保护**：
 
 - 启动协调机时加入 `--dashboard-username admin --dashboard-password secret` 即可开启账号密码登录，浏览器会先跳转到 `/login` 表单。
