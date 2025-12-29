@@ -1406,7 +1406,7 @@ class ParadexAccountMonitor:
             signature_timestamp=int(time.time() * 1000),
         )
         message = build_order_message(self._client.account.l2_chain_id, order)
-        signature = self._client.account.sign_message(message)
+        signature = self._sign_paradex_message(message)
         signature = flatten_signature(signature)
         valid_until = int(time.time() * 1000) + duration * 1000
         payload = {
@@ -1419,6 +1419,43 @@ class ParadexAccountMonitor:
             "valid_until": valid_until,
         }
         return self._client.api_client._post_authorized(path="algo/orders", payload=payload)
+
+    def _sign_paradex_message(self, message: Any) -> Any:
+        """Sign an L2 order message with best-effort compatibility.
+
+        paradex-py has changed account signing APIs across versions. Some expose
+        `sign_message`, others expose `sign`/`sign_message_hash`.
+
+        We try a small set of known method names and raise a helpful error if
+        none exist.
+        """
+
+        if not self._client or not getattr(self._client, "account", None):
+            raise RuntimeError("Paradex account client not initialized")
+        acct = self._client.account
+
+        # Most common (older) API.
+        fn = getattr(acct, "sign_message", None)
+        if callable(fn):
+            return fn(message)
+
+        # Newer variations seen in some SDKs.
+        fn = getattr(acct, "sign", None)
+        if callable(fn):
+            return fn(message)
+
+        fn = getattr(acct, "sign_message_hash", None)
+        if callable(fn):
+            return fn(message)
+
+        fn = getattr(acct, "sign_hash", None)
+        if callable(fn):
+            return fn(message)
+
+        raise AttributeError(
+            "ParadexAccount object has no signing method (tried sign_message/sign/sign_message_hash/sign_hash). "
+            "Please upgrade/downgrade paradex-py or update signing adapter."
+        )
 
     def _acknowledge_adjustment(self, request_id: str, status: str, note: Optional[str]) -> bool:
         payload = {
