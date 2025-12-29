@@ -710,12 +710,12 @@ class ParadexAccountMonitor:
                 LOGGER.debug("Paradex %s call failed: %s", name, exc)
                 continue
             if isinstance(payload, dict):
-                LOGGER.info("[DEBUG] raw balance payload via %s: %s", name, payload)
+                LOGGER.debug("[PARA_IM_DEBUG] raw balance payload via %s: %s", name, payload)
                 return payload
             if isinstance(payload, list) and payload:
                 first = payload[0]
                 if isinstance(first, dict):
-                    LOGGER.info("[DEBUG] raw balance payload via %s (list[0]): %s", name, first)
+                    LOGGER.debug("[PARA_IM_DEBUG] raw balance payload via %s (list[0]): %s", name, first)
                     return first
         return {}
 
@@ -740,7 +740,6 @@ class ParadexAccountMonitor:
         candidate_methods = (
             "fetch_account",
             "get_account",
-            "account",
             "fetch_account_summary",
             "get_account_summary",
             "fetch_account_info",
@@ -755,6 +754,7 @@ class ParadexAccountMonitor:
             try:
                 payload = method()
             except TypeError:
+                # Some methods expect a params dict.
                 try:
                     payload = method({})
                 except Exception as exc:  # pragma: no cover - network path
@@ -785,6 +785,19 @@ class ParadexAccountMonitor:
                         )
                     except Exception:
                         pass
+                return payload
+
+        # Fallback: some SDKs expose api_client.account as a *property* (already-fetched object),
+        # and trying to call it raises: 'ParadexAccount' object is not callable.
+        account_prop = getattr(api_client, "account", None)
+        if account_prop is not None and not callable(account_prop):
+            payload = getattr(account_prop, "__dict__", None)
+            if isinstance(payload, dict) and payload:
+                if _is_para_im_debug_enabled():
+                    LOGGER.debug(
+                        "[PARA_IM_DEBUG] account_summary via api_client.account property keys=%s",
+                        list(payload.keys()),
+                    )
                 return payload
         return None
 
@@ -817,6 +830,25 @@ class ParadexAccountMonitor:
                     return decimal_to_str(d)
             return None
 
+        def _normalize_account_payload(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            """Unwrap common REST shapes.
+
+            Some clients return:
+              {"results": [{...account fields...}]}
+            instead of a flat dict.
+            """
+
+            if not payload or not isinstance(payload, dict):
+                return payload
+            results = payload.get("results")
+            if isinstance(results, list) and results:
+                first = results[0]
+                if isinstance(first, dict):
+                    return first
+            if isinstance(results, dict):
+                return results
+            return payload
+
         # 1) From SDK account object
         im_req = getattr(account_obj, "initial_margin_requirement", None)
         if im_req is None:
@@ -835,18 +867,17 @@ class ParadexAccountMonitor:
         diag["initial_margin"] = _pick_decimal(im_val)
 
         # 2) From freshly fetched REST payload
-        if account_payload and diag["initial_margin_requirement"] is None:
+        account_payload_norm = _normalize_account_payload(account_payload)
+        if account_payload_norm and diag["initial_margin_requirement"] is None:
             diag["initial_margin_requirement"] = _pick_decimal(
-                account_payload.get("initial_margin_requirement"),
-                account_payload.get("initial_margin_requirement"),
+                account_payload_norm.get("initial_margin_requirement"),
             )
             if diag["initial_margin_requirement"] is not None:
                 diag["im_req_source"] = "rest:/v1/account"
 
-        if account_payload and diag["maintenance_margin_requirement"] is None:
+        if account_payload_norm and diag["maintenance_margin_requirement"] is None:
             diag["maintenance_margin_requirement"] = _pick_decimal(
-                account_payload.get("maintenance_margin_requirement"),
-                account_payload.get("maintenance_margin_requirement"),
+                account_payload_norm.get("maintenance_margin_requirement"),
             )
 
         return diag
