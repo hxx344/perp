@@ -735,21 +735,20 @@ class ParadexAccountMonitor:
         if api_client is None:
             return None
 
-        # Try known/likely method names (version dependent).
-        # NOTE: paradex-py has shifted naming across versions; keep this list broad.
-        # In paradex-py, the endpoint that maps to GET /v1/account (and contains
-        # initial_margin_requirement) is `fetch_account_summary()`.
-        # `fetch_account_info()` maps to GET /v1/account/info and may not include IM fields.
+        # Authority (paradex-py): GET /v1/account == api_client.fetch_account_summary().
+        # Only allow /v1/account/info fallback when explicitly enabled.
+        allow_info_fallback = _env_flag("PARADEX_ALLOW_ACCOUNT_INFO_FALLBACK")
+
         candidate_methods = (
             "fetch_account_summary",
             "get_account_summary",
-            "fetch_account",
-            "get_account",
-            "fetch_account_info",
-            "get_account_info",
-            "fetch_user_account",
-            "get_user_account",
         )
+
+        if allow_info_fallback:
+            candidate_methods = candidate_methods + (
+                "fetch_account_info",
+                "get_account_info",
+            )
         for name in candidate_methods:
             method = getattr(api_client, name, None)
             if method is None:
@@ -785,6 +784,12 @@ class ParadexAccountMonitor:
                             "[PARA_IM_DEBUG] account_summary fetched via %s keys=%s",
                             name,
                             list(payload.keys()),
+                        )
+                        LOGGER.debug(
+                            "[PARA_IM_DEBUG] account_summary via %s initial_margin_requirement=%s maintenance_margin_requirement=%s",
+                            name,
+                            payload.get("initial_margin_requirement"),
+                            payload.get("maintenance_margin_requirement"),
                         )
                     except Exception:
                         pass
@@ -1672,6 +1677,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "on" if quiet_http else "off",
             ",".join(env_files),
         )
+
+    if _is_para_im_debug_enabled() and _env_flag("PARADEX_ALLOW_ACCOUNT_INFO_FALLBACK"):
+        LOGGER.info("Diagnostics: PARADEX_ALLOW_ACCOUNT_INFO_FALLBACK=on")
 
     try:
         creds = load_single_account(label=args.account_label)
