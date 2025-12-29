@@ -2,6 +2,22 @@ import unittest
 
 
 class ParadexSigningAdapterTests(unittest.TestCase):
+    def test_starknet_sign_message_preferred(self):
+        from monitoring.para_account_monitor import ParadexAccountMonitor
+
+        monitor = ParadexAccountMonitor.__new__(ParadexAccountMonitor)
+
+        class _Starknet:
+            def sign_message(self, msg):
+                return ("starknet_signed", msg)
+
+        class _Acct:
+            starknet = _Starknet()
+
+        monitor._client = type("C", (), {"account": _Acct()})()
+        out = monitor._sign_paradex_message("hello")
+        self.assertEqual(out, ("starknet_signed", "hello"))
+
     def test_sign_message_preferred(self):
         from monitoring.para_account_monitor import ParadexAccountMonitor
 

@@ -1421,40 +1421,44 @@ class ParadexAccountMonitor:
         return self._client.api_client._post_authorized(path="algo/orders", payload=payload)
 
     def _sign_paradex_message(self, message: Any) -> Any:
-        """Sign an L2 order message with best-effort compatibility.
+        """Sign an L2 order message.
 
-        paradex-py has changed account signing APIs across versions. Some expose
-        `sign_message`, others expose `sign`/`sign_message_hash`.
+        方案A（当前首选）：不要依赖 `ParadexAccount.sign_*`。
+        paradex-py 源码里的 `ParadexAccount` 内部通常会持有一个 starknet 账户对象
+        `account.starknet`，它提供 `sign_message(typed_data)`。
 
-        We try a small set of known method names and raise a helpful error if
-        none exist.
+        兼容兜底：有些版本会在 api_client 上注入 `signer`（protocols.Signer），但
+        它通常是给 REST /orders 用的（签 order dict），这里仍尽量尝试。
         """
 
         if not self._client or not getattr(self._client, "account", None):
             raise RuntimeError("Paradex account client not initialized")
         acct = self._client.account
 
-        # Most common (older) API.
-        fn = getattr(acct, "sign_message", None)
+        # Preferred: use underlying starknet account held by ParadexAccount.
+        starknet_acct = getattr(acct, "starknet", None)
+        fn = getattr(starknet_acct, "sign_message", None)
         if callable(fn):
             return fn(message)
 
-        # Newer variations seen in some SDKs.
-        fn = getattr(acct, "sign", None)
+        # Alternative: some setups may expose a signer on the api client.
+        # Note: this signer typically signs order dict payloads, not typed data.
+        api_client = getattr(self._client, "api_client", None)
+        signer = getattr(api_client, "signer", None) if api_client is not None else None
+        fn = getattr(signer, "sign_message", None)
         if callable(fn):
             return fn(message)
 
-        fn = getattr(acct, "sign_message_hash", None)
-        if callable(fn):
-            return fn(message)
-
-        fn = getattr(acct, "sign_hash", None)
-        if callable(fn):
-            return fn(message)
+        # Legacy fallbacks (kept for older installs), but no longer required for TWAP.
+        for attr in ("sign_message", "sign", "sign_message_hash", "sign_hash"):
+            fn = getattr(acct, attr, None)
+            if callable(fn):
+                return fn(message)
 
         raise AttributeError(
-            "ParadexAccount object has no signing method (tried sign_message/sign/sign_message_hash/sign_hash). "
-            "Please upgrade/downgrade paradex-py or update signing adapter."
+            "No Paradex signing capability found for TWAP. Tried: account.starknet.sign_message, "
+            "api_client.signer.sign_message, and account sign_* fallbacks. "
+            "This usually means the Paradex client wasn't initialized with keys or uses an incompatible SDK build."
         )
 
     def _acknowledge_adjustment(self, request_id: str, status: str, note: Optional[str]) -> bool:
