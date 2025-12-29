@@ -1373,6 +1373,18 @@ class HedgeCoordinator:
 
     async def start_background_tasks(self) -> None:
         if not self._feishu_webhook_url or not self._feishu_para_push_enabled:
+            # Make misconfiguration obvious in logs.
+            if not self._feishu_webhook_url and self._feishu_para_push_enabled:
+                LOGGER.warning(
+                    "Feishu PARA push enabled but %s is missing/blank; push task will NOT start",
+                    FEISHU_WEBHOOK_ENV,
+                )
+            elif self._feishu_webhook_url and not self._feishu_para_push_enabled:
+                LOGGER.info(
+                    "Feishu PARA push is disabled (%s=%s); webhook is configured but push task will NOT start",
+                    FEISHU_PARA_PUSH_ENABLED_ENV,
+                    os.getenv(FEISHU_PARA_PUSH_ENABLED_ENV),
+                )
             return
         if self._feishu_task is not None:
             return
@@ -4797,6 +4809,12 @@ async def _run_app(args: argparse.Namespace) -> None:
     if getattr(args, "quiet", False):
         log_level_name = "WARNING"
     logging.basicConfig(level=getattr(logging, (log_level_name or "INFO").upper(), logging.INFO))
+
+    # Silence aiohttp access logs by default (they are very noisy in production).
+    # Set AIOHTTP_ACCESS_LOG=1/true to re-enable access logs.
+    access_log_enabled = _env_bool("AIOHTTP_ACCESS_LOG", False)
+    if not access_log_enabled:
+        logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 
     risk_threshold = args.risk_alert_threshold if args.risk_alert_threshold and args.risk_alert_threshold > 0 else None
     risk_reset = None
