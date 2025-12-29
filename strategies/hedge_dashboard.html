@@ -8045,7 +8045,6 @@
                   ? transferableEstimate.value
                   : null;
 
-                const imReqSourceRaw = (accountObj.im_req_source ?? accountObj.imReqSource ?? null);
                 flattenedAccounts.push({
                   agentId,
                   name: accountObj.name ?? accountObj.account_id ?? accountObj.id ?? 'Account',
@@ -8059,8 +8058,6 @@
                   positions: positionsList,
                   initialMarginTotal,
                   initialMarginRequirement,
-                  imReqSource: imReqSourceRaw,
-                  imReqRaw: (accountObj.initial_margin_requirement ?? null),
                   updatedTs: snapshotTs,
                   sortKey: buildAccountSortKey(agentId, accountObj, summary),
                 });
@@ -8353,14 +8350,6 @@
           const initialMarginRequirementText = Number.isFinite(imReqCandidate)
             ? numberFormatter.format(imReqCandidate)
             : '--';
-          const initialMarginRequirementSource = entry.imReqSource
-            ? String(entry.imReqSource)
-            : (Number.isFinite(entry.initialMarginRequirement)
-              ? 'initial_margin_requirement'
-              : (Number.isFinite(entry.initialMarginTotal) ? 'initial_margin_total (fallback)' : 'missing'));
-          const initialMarginRequirementDiagnostic = `${initialMarginRequirementSource}`
-            + (entry.imReqRaw != null ? ` · raw=${String(entry.imReqRaw)}` : '')
-            + (Number.isFinite(entry.initialMarginRequirement) ? ` · parsed=${String(entry.initialMarginRequirement)}` : '');
           const transferableCandidate = Number.isFinite(entry.transferableValue)
             ? entry.transferableValue
             : (entry.transferableEstimate && Number.isFinite(entry.transferableEstimate.value)
@@ -8402,7 +8391,6 @@
               <div><dt>Equity</dt><dd>${escapeHtml(equityText)}</dd></div>
               <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
               <div><dt>IM Req</dt><dd>${escapeHtml(initialMarginRequirementText)}</dd></div>
-              <div><dt>IM Src</dt><dd>${escapeHtml(initialMarginRequirementDiagnostic)}</dd></div>
               <div><dt>Transferable</dt><dd>${escapeHtml(transferableText)}</dd></div>
               <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
             </dl>
