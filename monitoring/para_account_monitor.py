@@ -737,11 +737,14 @@ class ParadexAccountMonitor:
 
         # Try known/likely method names (version dependent).
         # NOTE: paradex-py has shifted naming across versions; keep this list broad.
+        # In paradex-py, the endpoint that maps to GET /v1/account (and contains
+        # initial_margin_requirement) is `fetch_account_summary()`.
+        # `fetch_account_info()` maps to GET /v1/account/info and may not include IM fields.
         candidate_methods = (
-            "fetch_account",
-            "get_account",
             "fetch_account_summary",
             "get_account_summary",
+            "fetch_account",
+            "get_account",
             "fetch_account_info",
             "get_account_info",
             "fetch_user_account",
@@ -1191,53 +1194,6 @@ class ParadexAccountMonitor:
             return None
         return payload
 
-    def _place_market_order(self, symbol: str, side: str, quantity: Decimal) -> Any:
-        if quantity <= 0:
-            raise ValueError("Order quantity must be positive")
-        from paradex_py.common.order import Order, OrderType, OrderSide  # type: ignore
-
-        order_side = OrderSide.Buy if side.lower() == "buy" else OrderSide.Sell
-        order = Order(
-            market=symbol,
-            order_type=OrderType.Market,
-            order_side=order_side,
-            size=quantity,
-        )
-        return self._client.api_client.submit_order(order)
-
-    def _place_twap_order(self, symbol: str, side: str, quantity: Decimal, duration_seconds: int) -> Any:
-        if flatten_signature is None or build_order_message is None:
-            raise RuntimeError("TWAP requires paradex-py signing helpers (flatten_signature/build_order_message)")
-        if quantity <= 0:
-            raise ValueError("Order quantity must be positive")
-        if not self._client or not getattr(self._client, "account", None):
-            raise RuntimeError("Paradex account client not initialized")
-        from paradex_py.common.order import Order, OrderType, OrderSide  # type: ignore
-
-        order_side = OrderSide.Buy if side.lower() == "buy" else OrderSide.Sell
-        duration = max(30, min(86400, int(round(int(duration_seconds) / 30) * 30)))
-        order = Order(
-            market=symbol,
-            order_type=OrderType.Market,
-            order_side=order_side,
-            size=quantity,
-            signature_timestamp=int(time.time() * 1000),
-        )
-        message = build_order_message(self._client.account.l2_chain_id, order)
-        signature = flatten_signature(self._client.account.starknet.sign_message(message))
-
-        payload = {
-            "algo_type": "TWAP",
-            "duration_seconds": duration,
-            "market": symbol,
-            "side": order_side.name.upper(),
-            "size": str(order.size),
-            "type": "MARKET",
-            "signature": signature,
-            "signature_timestamp": order.signature_timestamp,
-        }
-        return self._client.api_client._post_authorized(path="algo/orders", payload=payload)
-
     def _execute_transfer(self, entry: Dict[str, Any]) -> Tuple[str, str]:
         if not self._client or not getattr(self._client, "account", None):
             raise RuntimeError("Paradex account client not initialized")
@@ -1398,6 +1354,54 @@ class ParadexAccountMonitor:
         if note_suffix:
             note_core = f"{note_core}; {note_suffix}"
         return "succeeded", note_core if order_id is None else f"{note_core}; order_id={order_id}"
+
+    def _place_market_order(self, symbol: str, side: str, quantity: Decimal) -> Any:
+        if quantity <= 0:
+            raise ValueError("Order quantity must be positive")
+        from paradex_py.common.order import Order, OrderType, OrderSide  # type: ignore
+
+        order_side = OrderSide.Buy if side.lower() == "buy" else OrderSide.Sell
+        order = Order(
+            market=symbol,
+            order_type=OrderType.Market,
+            order_side=order_side,
+            size=quantity,
+        )
+        return self._client.api_client.submit_order(order)
+
+    def _place_twap_order(self, symbol: str, side: str, quantity: Decimal, duration_seconds: int) -> Any:
+        """Place a TWAP order via algo/orders when signing utilities are available."""
+        if flatten_signature is None or build_order_message is None:
+            raise RuntimeError("TWAP requires paradex-py signing helpers (flatten_signature/build_order_message)")
+        if quantity <= 0:
+            raise ValueError("Order quantity must be positive")
+        if not self._client or not getattr(self._client, "account", None):
+            raise RuntimeError("Paradex account client not initialized")
+        from paradex_py.common.order import Order, OrderType, OrderSide  # type: ignore
+
+        order_side = OrderSide.Buy if side.lower() == "buy" else OrderSide.Sell
+        duration = max(30, min(86400, int(round(int(duration_seconds) / 30) * 30)))
+        order = Order(
+            market=symbol,
+            order_type=OrderType.Market,
+            order_side=order_side,
+            size=quantity,
+            signature_timestamp=int(time.time() * 1000),
+        )
+        message = build_order_message(self._client.account.l2_chain_id, order)
+        signature = self._client.account.sign_message(message)
+        signature = flatten_signature(signature)
+        valid_until = int(time.time() * 1000) + duration * 1000
+        payload = {
+            "market": symbol,
+            "side": order_side.name.upper(),
+            "size": str(order.size),
+            "type": "MARKET",
+            "signature": signature,
+            "signature_timestamp": order.signature_timestamp,
+            "valid_until": valid_until,
+        }
+        return self._client.api_client._post_authorized(path="algo/orders", payload=payload)
 
     def _acknowledge_adjustment(self, request_id: str, status: str, note: Optional[str]) -> bool:
         payload = {
