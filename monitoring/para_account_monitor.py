@@ -821,6 +821,8 @@ class ParadexAccountMonitor:
             "maintenance_margin_requirement": None,
             "initial_margin": None,
             "im_req_source": None,
+            # Diagnostics
+            "im_req_field": None,
         }
 
         def _pick_decimal(*values: Any) -> Optional[str]:
@@ -868,17 +870,67 @@ class ParadexAccountMonitor:
 
         # 2) From freshly fetched REST payload
         account_payload_norm = _normalize_account_payload(account_payload)
+        if _is_para_im_debug_enabled() and isinstance(account_payload_norm, dict):
+            try:
+                # Only log structure + a few fields to avoid huge spam.
+                sample = {k: account_payload_norm.get(k) for k in (
+                    "initial_margin_requirement",
+                    "maintenance_margin_requirement",
+                    "initial_margin",
+                    "account_value",
+                    "free_collateral",
+                    "equity",
+                    "margin_requirement",
+                ) if k in account_payload_norm or account_payload_norm.get(k) is not None}
+                LOGGER.debug(
+                    "[PARA_IM_DEBUG] normalized account_payload keys=%s sample=%s",
+                    list(account_payload_norm.keys())[:50],
+                    sample,
+                )
+            except Exception:
+                pass
         if account_payload_norm and diag["initial_margin_requirement"] is None:
-            diag["initial_margin_requirement"] = _pick_decimal(
-                account_payload_norm.get("initial_margin_requirement"),
+            # Try multiple possible keys used across API/SDK versions.
+            candidates = (
+                "initial_margin_requirement",
+                "initialMarginRequirement",
+                "initial_margin",
+                "initialMargin",
+                "im_requirement",
+                "margin_requirement",
+                "marginRequirement",
             )
-            if diag["initial_margin_requirement"] is not None:
+            for key in candidates:
+                if not isinstance(account_payload_norm, dict):
+                    break
+                if key not in account_payload_norm:
+                    continue
+                picked = _pick_decimal(account_payload_norm.get(key))
+                if picked is None:
+                    continue
+                diag["initial_margin_requirement"] = picked
                 diag["im_req_source"] = "rest:/v1/account"
+                diag["im_req_field"] = key
+                break
 
         if account_payload_norm and diag["maintenance_margin_requirement"] is None:
-            diag["maintenance_margin_requirement"] = _pick_decimal(
-                account_payload_norm.get("maintenance_margin_requirement"),
+            mm_candidates = (
+                "maintenance_margin_requirement",
+                "maintenanceMarginRequirement",
+                "maintenance_margin",
+                "maintenanceMargin",
+                "mm_requirement",
             )
+            for key in mm_candidates:
+                if not isinstance(account_payload_norm, dict):
+                    break
+                if key not in account_payload_norm:
+                    continue
+                picked = _pick_decimal(account_payload_norm.get(key))
+                if picked is None:
+                    continue
+                diag["maintenance_margin_requirement"] = picked
+                break
 
         return diag
 
@@ -1037,6 +1089,7 @@ class ParadexAccountMonitor:
             "maintenance_margin_requirement": None,
             "initial_margin": None,
             "im_req_source": None,
+            "im_req_field": None,
             "updated_at": timestamp,
         }
 
@@ -1048,6 +1101,7 @@ class ParadexAccountMonitor:
                 summary["maintenance_margin_requirement"] = extracted.get("maintenance_margin_requirement")
                 summary["initial_margin"] = extracted.get("initial_margin")
                 summary["im_req_source"] = extracted.get("im_req_source")
+                summary["im_req_field"] = extracted.get("im_req_field")
 
                 if _is_para_im_debug_enabled():
                     LOGGER.debug(
@@ -1079,6 +1133,7 @@ class ParadexAccountMonitor:
                         "maintenance_margin_requirement": summary.get("maintenance_margin_requirement"),
                         "initial_margin": summary.get("initial_margin"),
                         "im_req_source": summary.get("im_req_source"),
+                        "im_req_field": summary.get("im_req_field"),
                         "positions": position_rows,
                         "updated_at": timestamp,
                     }
