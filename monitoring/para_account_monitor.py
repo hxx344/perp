@@ -42,6 +42,10 @@ except ImportError:  # pragma: no cover - dependency guard
 getcontext().prec = 28
 
 LOGGER = logging.getLogger("monitor.paradex_accounts")
+
+# Enable extra, de-identified logging for IM requirement field debugging.
+# This is intentionally opt-in to avoid noisy logs in production.
+PARA_IM_DEBUG = os.getenv("PARA_IM_DEBUG", "").strip().lower() in {"1", "true", "yes", "y", "on"}
 DEFAULT_RPC_VERSION = "v0_9"
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -888,6 +892,25 @@ class ParadexAccountMonitor:
         account_snapshot = self._refresh_account_summary()
         positions = self._fetch_positions()
 
+        if PARA_IM_DEBUG:
+            try:
+                snapshot_keys = list(account_snapshot.keys()) if isinstance(account_snapshot, dict) else None
+                LOGGER.debug(
+                    "[PARA_IM_DEBUG] account_snapshot=%s keys=%s",
+                    "ok" if isinstance(account_snapshot, dict) else "none",
+                    snapshot_keys,
+                )
+                if isinstance(account_snapshot, dict):
+                    im_raw = account_snapshot.get("initial_margin_requirement")
+                    mm_raw = account_snapshot.get("maintenance_margin_requirement")
+                    LOGGER.debug(
+                        "[PARA_IM_DEBUG] account_snapshot fields initial_margin_requirement=%s maintenance_margin_requirement=%s",
+                        im_raw,
+                        mm_raw,
+                    )
+            except Exception as exc:  # pragma: no cover
+                LOGGER.debug("[PARA_IM_DEBUG] snapshot logging failed: %s", exc)
+
         account_total = Decimal("0")
         account_eth = Decimal("0")
         account_btc = Decimal("0")
@@ -962,6 +985,14 @@ class ParadexAccountMonitor:
                 summary["maintenance_margin_requirement"] = extracted.get("maintenance_margin_requirement")
                 summary["initial_margin"] = extracted.get("initial_margin")
                 summary["im_req_source"] = extracted.get("im_req_source")
+
+                if PARA_IM_DEBUG:
+                    LOGGER.debug(
+                        "[PARA_IM_DEBUG] extracted initial_margin_requirement=%s maintenance_margin_requirement=%s im_req_source=%s",
+                        summary.get("initial_margin_requirement"),
+                        summary.get("maintenance_margin_requirement"),
+                        summary.get("im_req_source"),
+                    )
             except Exception:
                 pass
 
