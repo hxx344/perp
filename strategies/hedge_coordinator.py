@@ -1448,22 +1448,15 @@ class HedgeCoordinator:
         if stats is None:
             return None
 
-        ts = now if now is not None else time.time()
-        base_note = ""
-        buffered_capacity, capacity_note, capacity_status = _evaluate_risk_capacity_buffer(
-            has_value=True,
-            value=stats.risk_capacity,
-            timestamp=ts,
-            base_note=base_note,
-            state=self._para_risk_capacity_buffer,
-        )
+        # Keep Feishu push aligned with PARA alert history (frontend-authoritative fields).
+        authority = self._compute_para_authority_values()
 
-        ratio = None
-        if buffered_capacity is not None and buffered_capacity > 0 and stats.worst_loss_value > 0:
-            try:
-                ratio = float(stats.worst_loss_value / buffered_capacity)
-            except Exception:
-                ratio = None
+        ts = now if now is not None else time.time()
+        buffered_capacity: Decimal = authority.get("risk_capacity_buffered") or Decimal("0")
+        worst_loss: Decimal = authority.get("worst_loss") or Decimal("0")
+        ratio = authority.get("ratio")
+        capacity_note = authority.get("buffer_note")
+        capacity_status = authority.get("buffer_status")
 
         ratio_text = _format_percent((ratio or 0.0) * 100, 2) if ratio is not None else "-"
         worst_label = stats.worst_account_label or "-"
@@ -1473,7 +1466,7 @@ class HedgeCoordinator:
             "[PARA] 风险播报",
             f"RISK LEVEL: {ratio_text}",
             f"风险裕量(risk_capacity): {_format_decimal(buffered_capacity or Decimal('0'), 2)}",
-            f"最坏亏损(worst_loss): {_format_decimal(stats.worst_loss_value, 2)}",
+            f"最坏亏损(worst_loss): {_format_decimal(worst_loss, 2)}",
             f"最坏账户: {worst_label} ({worst_agent})",
         ]
         if capacity_note:
