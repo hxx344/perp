@@ -1459,8 +1459,11 @@ class HedgeCoordinator:
         capacity_status = authority.get("buffer_status")
 
         ratio_text = _format_percent((ratio or 0.0) * 100, 2) if ratio is not None else "-"
-        worst_label = stats.worst_account_label or "-"
-        worst_agent = stats.worst_agent_id or "-"
+        authority_inputs = authority.get("inputs") if isinstance(authority, dict) else None
+        if not isinstance(authority_inputs, dict):
+            authority_inputs = {}
+        worst_label = authority_inputs.get("worst_account_label") or stats.worst_account_label or "-"
+        worst_agent = authority_inputs.get("worst_agent_id") or stats.worst_agent_id or "-"
 
         lines = [
             "[PARA] 风险播报",
@@ -1507,8 +1510,11 @@ class HedgeCoordinator:
         capacity_status = authority.get("buffer_status")
 
         ratio_text = _format_percent((ratio or 0.0) * 100, 2) if ratio is not None else "-"
-        worst_label = stats.worst_account_label or "-"
-        worst_agent = stats.worst_agent_id or "-"
+        authority_inputs = authority.get("inputs") if isinstance(authority, dict) else None
+        if not isinstance(authority_inputs, dict):
+            authority_inputs = {}
+        worst_label = authority_inputs.get("worst_account_label") or stats.worst_account_label or "-"
+        worst_agent = authority_inputs.get("worst_agent_id") or stats.worst_agent_id or "-"
         color = self._feishu_risk_color(ratio)
 
         fields: List[Dict[str, Any]] = [

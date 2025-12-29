@@ -21,6 +21,10 @@ class FeishuParaPushAlignmentTests(unittest.TestCase):
 
             def _fake_authority():
                 return {
+                    "inputs": {
+                        "worst_account_label": "AUTH_LABEL",
+                        "worst_agent_id": "AUTH_AGENT",
+                    },
                     "risk_capacity_buffered": Decimal("123"),
                     "worst_loss": Decimal("456"),
                     "ratio": 0.25,
@@ -41,6 +45,11 @@ class FeishuParaPushAlignmentTests(unittest.TestCase):
             # Ensure it does NOT leak the non-authority numbers from ParaRiskSnapshot.
             self.assertNotIn("999.00", text)
             self.assertNotIn("888.00", text)
+
+            # Worst account should also come from authority inputs, not ParaRiskSnapshot.
+            assert "最坏账户" in text
+            assert "AUTH_LABEL" in text
+            assert "(AUTH_AGENT)" in text
 
         asyncio.run(_run())
 
