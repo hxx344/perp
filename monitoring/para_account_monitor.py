@@ -1397,7 +1397,15 @@ class ParadexAccountMonitor:
         from paradex_py.common.order import Order, OrderType, OrderSide  # type: ignore
 
         order_side = OrderSide.Buy if side.lower() == "buy" else OrderSide.Sell
-        duration = max(30, min(86400, int(round(int(duration_seconds) / 30) * 30)))
+        # Paradex TWAP API validation expects:
+        # - algo_type: non-blank (e.g. "TWAP")
+        # - duration_seconds >= freq (freq minimum is 30 seconds)
+        # We snap duration to 30s grid to keep behavior stable.
+        freq_seconds = 30
+        duration = max(
+            freq_seconds,
+            min(86400, int(round(int(duration_seconds) / freq_seconds) * freq_seconds)),
+        )
         order = Order(
             market=symbol,
             order_type=OrderType.Market,
@@ -1410,10 +1418,13 @@ class ParadexAccountMonitor:
         signature = flatten_signature(signature)
         valid_until = int(time.time() * 1000) + duration * 1000
         payload = {
+            "algo_type": "TWAP",
             "market": symbol,
             "side": order_side.name.upper(),
             "size": str(order.size),
             "type": "MARKET",
+            "freq": freq_seconds,
+            "duration_seconds": duration,
             "signature": signature,
             "signature_timestamp": order.signature_timestamp,
             "valid_until": valid_until,
