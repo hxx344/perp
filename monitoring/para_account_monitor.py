@@ -710,6 +710,111 @@ class ParadexAccountMonitor:
                     return first
         return {}
 
+    def _refresh_account_summary(self) -> Optional[Dict[str, Any]]:
+        """Best-effort refresh of Paradex account summary.
+
+        Paradex REST GET /v1/account returns fields like:
+        - initial_margin_requirement
+        - maintenance_margin_requirement
+        - account_value
+        - free_collateral
+
+        Different paradex-py versions may expose different method names; we try a few.
+        """
+
+        api_client = getattr(self._client, "api_client", None)
+        if api_client is None:
+            return None
+
+        # Try known/likely method names (version dependent).
+        candidate_methods = (
+            "fetch_account",
+            "account",
+            "get_account",
+            "fetch_account_summary",
+        )
+        for name in candidate_methods:
+            method = getattr(api_client, name, None)
+            if method is None:
+                continue
+            try:
+                payload = method()
+            except TypeError:
+                try:
+                    payload = method({})
+                except Exception as exc:  # pragma: no cover - network path
+                    LOGGER.debug("Paradex %s call failed: %s", name, exc)
+                    continue
+            except Exception as exc:  # pragma: no cover - network path
+                LOGGER.debug("Paradex %s call failed: %s", name, exc)
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    @staticmethod
+    def _extract_account_im_fields(account_obj: Any, account_payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Extract IM requirement fields with REST field-name compatibility.
+
+        Preferred:
+        - account_obj.initial_margin_requirement (dashboard authoritative)
+
+        REST /v1/account returns snake_case:
+        - initial_margin_requirement
+
+        Older/other SDKs might expose:
+        - initial_margin_requirement
+        - initial_margin
+        """
+
+        diag: Dict[str, Any] = {
+            "initial_margin_requirement": None,
+            "maintenance_margin_requirement": None,
+            "initial_margin": None,
+            "im_req_source": None,
+        }
+
+        def _pick_decimal(*values: Any) -> Optional[str]:
+            for v in values:
+                d = decimal_from(v)
+                if d is not None:
+                    return decimal_to_str(d)
+            return None
+
+        # 1) From SDK account object
+        im_req = getattr(account_obj, "initial_margin_requirement", None)
+        if im_req is None:
+            # REST field name / older SDK mapping
+            im_req = getattr(account_obj, "initial_margin_requirement", None)
+        diag["initial_margin_requirement"] = _pick_decimal(im_req)
+        if diag["initial_margin_requirement"] is not None:
+            diag["im_req_source"] = "sdk.account"
+
+        mm_req = getattr(account_obj, "maintenance_margin_requirement", None)
+        if mm_req is None:
+            mm_req = getattr(account_obj, "maintenance_margin_requirement", None)
+        diag["maintenance_margin_requirement"] = _pick_decimal(mm_req)
+
+        im_val = getattr(account_obj, "initial_margin", None)
+        diag["initial_margin"] = _pick_decimal(im_val)
+
+        # 2) From freshly fetched REST payload
+        if account_payload and diag["initial_margin_requirement"] is None:
+            diag["initial_margin_requirement"] = _pick_decimal(
+                account_payload.get("initial_margin_requirement"),
+                account_payload.get("initial_margin_requirement"),
+            )
+            if diag["initial_margin_requirement"] is not None:
+                diag["im_req_source"] = "rest:/v1/account"
+
+        if account_payload and diag["maintenance_margin_requirement"] is None:
+            diag["maintenance_margin_requirement"] = _pick_decimal(
+                account_payload.get("maintenance_margin_requirement"),
+                account_payload.get("maintenance_margin_requirement"),
+            )
+
+        return diag
+
     def _parse_balances(self, balance_payload: Dict[str, Any]) -> Tuple[Optional[Decimal], Optional[Decimal]]:
         balance_total: Optional[Decimal] = None
         balance_available: Optional[Decimal] = None
@@ -777,6 +882,10 @@ class ParadexAccountMonitor:
 
     def _collect(self) -> Optional[Dict[str, Any]]:
         timestamp = time.time()
+
+        # Keep SDK account snapshot fresh. Some paradex-py versions only refresh account fields
+        # after an explicit fetch call.
+        account_snapshot = self._refresh_account_summary()
         positions = self._fetch_positions()
 
         account_total = Decimal("0")
@@ -839,22 +948,20 @@ class ParadexAccountMonitor:
             # Dashboard-authoritative IM (preferred when available): Paradex account.initial_margin_requirement
             # We also ship `initial_margin` (if present) as a diagnostic/legacy field.
             "initial_margin_requirement": None,
+            "maintenance_margin_requirement": None,
             "initial_margin": None,
+            "im_req_source": None,
             "updated_at": timestamp,
         }
 
         account_obj = getattr(self._client, "account", None)
         if account_obj is not None:
             try:
-                # paradex-py AccountSummaryResponse exposes these as strings.
-                im_req = getattr(account_obj, "initial_margin_requirement", None)
-                summary["initial_margin_requirement"] = decimal_to_str(decimal_from(im_req))
-            except Exception:
-                pass
-            try:
-                # Some environments expose `initial_margin` (not the same as requirement).
-                im_val = getattr(account_obj, "initial_margin", None)
-                summary["initial_margin"] = decimal_to_str(decimal_from(im_val))
+                extracted = self._extract_account_im_fields(account_obj, account_snapshot)
+                summary["initial_margin_requirement"] = extracted.get("initial_margin_requirement")
+                summary["maintenance_margin_requirement"] = extracted.get("maintenance_margin_requirement")
+                summary["initial_margin"] = extracted.get("initial_margin")
+                summary["im_req_source"] = extracted.get("im_req_source")
             except Exception:
                 pass
 
@@ -875,7 +982,9 @@ class ParadexAccountMonitor:
                         "equity": decimal_to_str(equity_total),
                         "available_equity": decimal_to_str(equity_available),
                         "initial_margin_requirement": summary.get("initial_margin_requirement"),
+                        "maintenance_margin_requirement": summary.get("maintenance_margin_requirement"),
                         "initial_margin": summary.get("initial_margin"),
+                        "im_req_source": summary.get("im_req_source"),
                         "positions": position_rows,
                         "updated_at": timestamp,
                     }
