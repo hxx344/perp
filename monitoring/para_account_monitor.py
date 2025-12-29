@@ -44,8 +44,13 @@ getcontext().prec = 28
 LOGGER = logging.getLogger("monitor.paradex_accounts")
 
 # Enable extra, de-identified logging for IM requirement field debugging.
-# This is intentionally opt-in to avoid noisy logs in production.
-PARA_IM_DEBUG = os.getenv("PARA_IM_DEBUG", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+# NOTE: .env is loaded later in main(), so this must be evaluated at runtime.
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _is_para_im_debug_enabled() -> bool:
+    return _env_flag("PARA_IM_DEBUG")
 DEFAULT_RPC_VERSION = "v0_9"
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -771,7 +776,7 @@ class ParadexAccountMonitor:
                     payload = None
 
             if isinstance(payload, dict):
-                if PARA_IM_DEBUG:
+                if _is_para_im_debug_enabled():
                     try:
                         LOGGER.debug(
                             "[PARA_IM_DEBUG] account_summary fetched via %s keys=%s",
@@ -919,7 +924,7 @@ class ParadexAccountMonitor:
         account_snapshot = self._refresh_account_summary()
         positions = self._fetch_positions()
 
-        if PARA_IM_DEBUG:
+        if _is_para_im_debug_enabled():
             try:
                 snapshot_keys = list(account_snapshot.keys()) if isinstance(account_snapshot, dict) else None
                 LOGGER.debug(
@@ -1013,7 +1018,7 @@ class ParadexAccountMonitor:
                 summary["initial_margin"] = extracted.get("initial_margin")
                 summary["im_req_source"] = extracted.get("im_req_source")
 
-                if PARA_IM_DEBUG:
+                if _is_para_im_debug_enabled():
                     LOGGER.debug(
                         "[PARA_IM_DEBUG] extracted initial_margin_requirement=%s maintenance_margin_requirement=%s im_req_source=%s",
                         summary.get("initial_margin_requirement"),
@@ -1540,21 +1545,22 @@ def _configure_logging(args: argparse.Namespace) -> None:
 
     logging.basicConfig(level=level, handlers=handlers, format=log_format)
 
-    # Optional: suppress noisy low-level HTTP client DEBUG logs so that enabling DEBUG
-    # for this monitor doesn't get drowned in httpcore/httpx/urllib3 chatter.
-    quiet_http_env = os.getenv("PARADEX_QUIET_HTTP", "").strip().lower() in {"1", "true", "yes", "y", "on"}
-    quiet_http = bool(getattr(args, "quiet_http", False) or quiet_http_env)
-    if quiet_http:
-        noisy_loggers = (
-            "httpcore",
-            "httpx",
-            "urllib3",
-            "hpack",
-            "h2",
-            "charset_normalizer",
-        )
-        for name in noisy_loggers:
-            logging.getLogger(name).setLevel(logging.WARNING)
+    # NOTE: PARADEX_QUIET_HTTP from .env is loaded later; we re-apply after load_env_files().
+    if bool(getattr(args, "quiet_http", False)):
+        _apply_quiet_http_logging()
+
+
+def _apply_quiet_http_logging() -> None:
+    noisy_loggers = (
+        "httpcore",
+        "httpx",
+        "urllib3",
+        "hpack",
+        "h2",
+        "charset_normalizer",
+    )
+    for name in noisy_loggers:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -1563,6 +1569,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     env_files = args.env_file if args.env_file is not None else [".env"]
     load_env_files(env_files)
+
+    # Re-apply env-controlled toggles after .env is loaded.
+    quiet_http = bool(getattr(args, "quiet_http", False) or _env_flag("PARADEX_QUIET_HTTP"))
+    if quiet_http:
+        _apply_quiet_http_logging()
+
+    if _is_para_im_debug_enabled() or quiet_http:
+        LOGGER.info(
+            "Diagnostics: PARA_IM_DEBUG=%s, PARADEX_QUIET_HTTP=%s (env_files=%s)",
+            "on" if _is_para_im_debug_enabled() else "off",
+            "on" if quiet_http else "off",
+            ",".join(env_files),
+        )
 
     try:
         creds = load_single_account(label=args.account_label)
