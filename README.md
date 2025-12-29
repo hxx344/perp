@@ -128,6 +128,19 @@ Python 版本要求（最佳选项是 Python 3.10 - 3.12）：
 4. **设置环境变量**：
    在项目根目录创建`.env`文件，并使用 env_example.txt 作为样本，修改为你的 api 密匙。
 
+   **协调器（Dashboard / 风险告警 / 飞书推送）说明**：
+   - `strategies/hedge_coordinator.py` 会在启动时自动加载**仓库根目录**（也就是 `perp/`）下的 `.env`。
+   - 这意味着：即使你在 `perp-dex-tools/` 目录里启动 coordinator，只要 `.env` 放在 `d:/project8/.env`（仓库根目录）也会生效。
+   - 已存在的进程环境变量优先级更高（不会被 `.env` 覆盖）。
+
+   飞书 webhook 推送（PARA 风险快照）常用配置示例：
+
+   ```text
+   FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+   FEISHU_PARA_PUSH_ENABLED=true
+   FEISHU_PARA_PUSH_INTERVAL=30
+   ```
+
 5. **Telegram 机器人设置（可选）**：
    如需接收交易通知，请参考 [Telegram 机器人设置指南](docs/telegram-bot-setup.md) 配置 Telegram 机器人。
 
