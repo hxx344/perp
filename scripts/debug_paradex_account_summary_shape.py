@@ -15,7 +15,10 @@ Usage (PowerShell):
 
 from __future__ import annotations
 
+import sys
+import traceback
 from dataclasses import dataclass
+from pathlib import Path
 
 
 # Keep this dataclass aligned with paradex-py/paradex_py/api/models.py::AccountSummary
@@ -35,9 +38,13 @@ class AccountSummary:
 
 
 def main() -> None:
+    # Make import stable regardless of how the script is launched.
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root))
     try:
         from monitoring.para_account_monitor import ParadexAccountMonitor
     except Exception as exc:
+        traceback.print_exc()
         raise SystemExit(
             "Failed to import monitoring.para_account_monitor. "
             "Run this from the perp-dex-tools folder with the same venv as the monitor. "

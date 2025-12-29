@@ -763,7 +763,10 @@ class ParadexAccountMonitor:
                     LOGGER.debug("Paradex %s call failed: %s", name, exc)
                     continue
             except Exception as exc:  # pragma: no cover - network path
-                LOGGER.debug("Paradex %s call failed: %s", name, exc)
+                if _is_para_im_debug_enabled():
+                    LOGGER.debug("[PARA_IM_DEBUG] Paradex %s call failed: %r", name, exc)
+                else:
+                    LOGGER.debug("Paradex %s call failed: %s", name, exc)
                 continue
 
             # Some clients return coroutines.
@@ -776,6 +779,13 @@ class ParadexAccountMonitor:
                 except Exception as exc:  # pragma: no cover
                     LOGGER.debug("Paradex %s await failed: %s", name, exc)
                     payload = None
+
+            # Normalise return type (paradex-py may return a dataclass for account summary).
+            if payload is not None and not isinstance(payload, dict) and hasattr(payload, "__dict__"):
+                try:
+                    payload = dict(getattr(payload, "__dict__"))
+                except Exception:
+                    pass
 
             if isinstance(payload, dict):
                 if _is_para_im_debug_enabled():
@@ -795,18 +805,20 @@ class ParadexAccountMonitor:
                         pass
                 return payload
 
-        # Fallback: some SDKs expose api_client.account as a *property* (already-fetched object),
-        # and trying to call it raises: 'ParadexAccount' object is not callable.
-        account_prop = getattr(api_client, "account", None)
-        if account_prop is not None and not callable(account_prop):
-            payload = getattr(account_prop, "__dict__", None)
-            if isinstance(payload, dict) and payload:
-                if _is_para_im_debug_enabled():
-                    LOGGER.debug(
-                        "[PARA_IM_DEBUG] account_summary via api_client.account property keys=%s",
-                        list(payload.keys()),
-                    )
-                return payload
+        # Fallback (explicit): some SDKs expose api_client.account as a *property* (key material),
+        # which is NOT the /v1/account summary. Only use this when explicitly enabled, otherwise
+        # it misleads IM debugging.
+        if allow_info_fallback:
+            account_prop = getattr(api_client, "account", None)
+            if account_prop is not None and not callable(account_prop):
+                payload = getattr(account_prop, "__dict__", None)
+                if isinstance(payload, dict) and payload:
+                    if _is_para_im_debug_enabled():
+                        LOGGER.debug(
+                            "[PARA_IM_DEBUG] account_summary via api_client.account property keys=%s",
+                            list(payload.keys()),
+                        )
+                    return payload
         return None
 
     @staticmethod
