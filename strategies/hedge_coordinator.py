@@ -1513,13 +1513,6 @@ class HedgeCoordinator:
 
         fields: List[Dict[str, Any]] = [
             {
-                "is_short": False,
-                "text": {
-                    "tag": "lark_md",
-                    "content": f"**RISK LEVEL:** <font color=\"{color}\">{ratio_text}</font>",
-                },
-            },
-            {
                 "is_short": True,
                 "text": {
                     "tag": "lark_md",
