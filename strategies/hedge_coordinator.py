@@ -2501,7 +2501,9 @@ class HedgeCoordinator:
         return alerts
 
     def _prepare_para_risk_alerts(self, agent_id: str) -> Sequence[RiskAlertInfo]:
-        if self._bark_notifier is None or self._para_risk_alert_threshold is None:
+        # PARA risk alerts must be gated by PARA notifier/settings only.
+        # Otherwise a missing *global* Bark config would incorrectly disable PARA alerts.
+        if self._para_bark_notifier is None or self._para_risk_alert_threshold is None:
             return []
 
         stats = self._para_risk_stats
@@ -2549,7 +2551,8 @@ class HedgeCoordinator:
         return alerts
 
     def _prepare_para_stale_alerts(self, now: float) -> Sequence[RiskAlertInfo]:
-        if self._bark_notifier is None:
+        # PARA stale alerts are also scoped to PARA notifier.
+        if self._para_bark_notifier is None:
             return []
         critical = max(float(self._para_stale_critical_seconds or 0), 0.0)
         if critical <= 0:

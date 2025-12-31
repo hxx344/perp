@@ -10,8 +10,6 @@ This conftest ensures `perp-dex-tools/` is importable, so `strategies` can be
 resolved as a top-level package.
 """
 
-from __future__ import annotations
-
 import sys
 from pathlib import Path
 
