@@ -3979,7 +3979,7 @@
         // - Define target loss L = abs(nonFFTotalWorst) when worst is negative; otherwise no reduce.
         // - Allocate L to symbols by their negative contribution (symbol pnl < 0) on the worst account.
         // - Convert allocated loss to size via linear ratio: reduceSize = absPosSize * (allocation / abs(symbolNegPnl)).
-        // Output: { ok, message, symbol, actions, details }
+  // Output: { ok, message, symbol, actions }
         const accounts = Array.isArray(flattenedAccounts) ? flattenedAccounts : [];
         if (accounts.length !== 2) {
           return {
@@ -4028,7 +4028,6 @@
             symbol: null,
             actions: [],
             message: '无需减仓',
-            details: `最坏账户（${worst.name}）排除 FF 后 PnL=${numberFormatter.format(worst.nonFfTotal)}，未出现净亏损。`,
           };
         }
 
@@ -4086,20 +4085,17 @@
 
         computed.sort((x, y) => y.size - x.size);
         const best = computed[0];
-        const main = `${best.symbol} 单边减仓 ${formatCoinAmount(best.size, 4)}${best.symbol}`;
+  const main = `${best.symbol} 减仓 ${formatCoinAmount(best.size, 4)}${best.symbol}`;
 
         const actions = [
           { account: worst.name, action: 'reduce', symbol: best.symbol, size: best.size },
         ];
-
-        const details = `最坏账户=${worst.name}（raw=${numberFormatter.format(worst.totalRaw)}，FF=${numberFormatter.format(worst.ffPnl)}，非FF=${numberFormatter.format(worst.nonFfTotal)}，目标亏损L=${numberFormatter.format(L)}）。择优标的=${best.symbol}（negPnL=${numberFormatter.format(-best.negPnlAbs)}，cap=${formatCoinAmount(best.cap, 4)}，分摊=${numberFormatter.format(best.allocation)} → 减仓=${formatCoinAmount(best.size, 4)}）。对冲侧=${other.name} 不强制同步减仓。`;
 
         return {
           ok: true,
           symbol: best.symbol,
           actions,
           message: main,
-          details,
         };
       }
 
@@ -8224,14 +8220,14 @@
           const suggestion = computeParaReduceSuggestion(meaningfulAccounts.length ? meaningfulAccounts : flattenedAccounts);
           if (suggestion?.ok) {
             paraReduceSuggestionMain.textContent = suggestion.message || '--';
-            // When details is null/empty, don't render a dangling '-'/'—' second line.
-            const detailsText = typeof suggestion.details === 'string' ? suggestion.details.trim() : '';
-            paraReduceSuggestionDetail.textContent = detailsText;
-            paraReduceSuggestionDetail.style.display = detailsText ? '' : 'none';
+            // 减仓建议只保留一行，不展示详情。
+            paraReduceSuggestionDetail.textContent = '';
+            paraReduceSuggestionDetail.style.display = 'none';
           } else {
             paraReduceSuggestionMain.textContent = '—';
-            paraReduceSuggestionDetail.style.display = '';
-            paraReduceSuggestionDetail.textContent = suggestion?.message || '等待账户与持仓数据…';
+            // 失败/不可用时也不展示第二行详情，避免噪音。
+            paraReduceSuggestionDetail.textContent = '';
+            paraReduceSuggestionDetail.style.display = 'none';
           }
         }
 
