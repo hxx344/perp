@@ -176,6 +176,24 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
 """
 
 LOGGER = logging.getLogger("hedge.coordinator")
+
+
+def _env_debug(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        text = str(raw).strip().lower()
+    except Exception:
+        return default
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+PARA_STALE_DEBUG_ENV = "PARA_STALE_DEBUG"
 MAX_SPREAD_HISTORY = 600
 MAX_STRATEGY_EVENTS = 400
 MAX_STRATEGY_TRADES = 200
@@ -2553,14 +2571,24 @@ class HedgeCoordinator:
     def _prepare_para_stale_alerts(self, now: float) -> Sequence[RiskAlertInfo]:
         # PARA stale alerts are also scoped to PARA notifier.
         if self._para_bark_notifier is None:
+            if _env_debug(PARA_STALE_DEBUG_ENV, False):
+                LOGGER.debug("[para_stale] skipped: para notifier missing")
             return []
         critical = max(float(self._para_stale_critical_seconds or 0), 0.0)
         if critical <= 0:
+            if _env_debug(PARA_STALE_DEBUG_ENV, False):
+                LOGGER.debug("[para_stale] skipped: critical<=0 (critical=%.2f)", critical)
             return []
         alerts: List[RiskAlertInfo] = []
         for agent_id, state in self._states.items():
             para_block = state.paradex_accounts
             if not isinstance(para_block, dict):
+                if _env_debug(PARA_STALE_DEBUG_ENV, False):
+                    LOGGER.debug(
+                        "[para_stale] agent=%s skipped: paradex_accounts missing/non-dict (type=%s)",
+                        agent_id,
+                        type(para_block).__name__,
+                    )
                 continue
             summary = para_block.get("summary") if isinstance(para_block.get("summary"), dict) else None
             ts_raw = None
@@ -2578,13 +2606,36 @@ class HedgeCoordinator:
             except Exception:
                 ts = None
             if ts is None:
+                if _env_debug(PARA_STALE_DEBUG_ENV, False):
+                    LOGGER.debug(
+                        "[para_stale] agent=%s skipped: ts parse failed (ts_raw=%r)",
+                        agent_id,
+                        ts_raw,
+                    )
                 continue
             age = now - ts
             if age < critical:
+                if _env_debug(PARA_STALE_DEBUG_ENV, False):
+                    LOGGER.debug(
+                        "[para_stale] agent=%s ok: age<critical (age=%.2fs critical=%.2fs ts=%.3f now=%.3f)",
+                        agent_id,
+                        age,
+                        critical,
+                        ts,
+                        now,
+                    )
                 continue
             key = f"para_stale::{agent_id}"
             last_ts = self._risk_alert_last_ts.get(key, 0.0)
             if (now - last_ts) < self._risk_alert_cooldown:
+                if _env_debug(PARA_STALE_DEBUG_ENV, False):
+                    LOGGER.debug(
+                        "[para_stale] agent=%s skipped: cooldown (since_last=%.2fs cooldown=%.2fs last_ts=%.3f)",
+                        agent_id,
+                        now - last_ts,
+                        self._risk_alert_cooldown,
+                        last_ts,
+                    )
                 continue
             account_label = None
             if summary:
@@ -2608,6 +2659,15 @@ class HedgeCoordinator:
                 )
             )
             self._risk_alert_last_ts[key] = now
+            if _env_debug(PARA_STALE_DEBUG_ENV, False):
+                LOGGER.debug(
+                    "[para_stale] agent=%s ALERT queued: age=%.2fs critical=%.2fs ratio=%.4f label=%s",
+                    agent_id,
+                    age,
+                    critical,
+                    ratio,
+                    (account_label or "PARA"),
+                )
         return alerts
 
     def _flatten_grvt_accounts(
