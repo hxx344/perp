@@ -194,6 +194,7 @@ def _env_debug(name: str, default: bool = False) -> bool:
 
 
 PARA_STALE_DEBUG_ENV = "PARA_STALE_DEBUG"
+PARA_RISK_DEBUG_ENV = "PARA_RISK_DEBUG"
 MAX_SPREAD_HISTORY = 600
 MAX_STRATEGY_EVENTS = 400
 MAX_STRATEGY_TRADES = 200
@@ -2522,10 +2523,18 @@ class HedgeCoordinator:
         # PARA risk alerts must be gated by PARA notifier/settings only.
         # Otherwise a missing *global* Bark config would incorrectly disable PARA alerts.
         if self._para_bark_notifier is None or self._para_risk_alert_threshold is None:
+            if _env_debug(PARA_RISK_DEBUG_ENV, False):
+                LOGGER.debug(
+                    "[para_risk] skipped: notifier/threshold missing (notifier=%s threshold=%r)",
+                    "set" if self._para_bark_notifier is not None else "missing",
+                    self._para_risk_alert_threshold,
+                )
             return []
 
         stats = self._para_risk_stats
         if stats is None or stats.ratio is None:
+            if _env_debug(PARA_RISK_DEBUG_ENV, False):
+                LOGGER.debug("[para_risk] skipped: stats missing (stats=%r)", stats)
             self._risk_alert_active.pop(PARA_RISK_ALERT_KEY, None)
             return []
 
@@ -2543,6 +2552,16 @@ class HedgeCoordinator:
         authority_ratio = authority.get("ratio")
         authority_loss: Decimal = authority.get("worst_loss") or Decimal("0")
         authority_base: Decimal = authority.get("risk_capacity_buffered") or Decimal("0")
+
+        if _env_debug(PARA_RISK_DEBUG_ENV, False):
+            LOGGER.debug(
+                "[para_risk] eval: threshold=%.4f ratio=%r base=%s loss=%s active=%s",
+                float(threshold),
+                authority_ratio,
+                str(authority_base),
+                str(authority_loss),
+                bool(self._risk_alert_active.get(PARA_RISK_ALERT_KEY, False)),
+            )
 
         if authority_ratio is not None and authority_ratio >= threshold and authority_base > 0 and authority_loss > 0:
             already_active = self._risk_alert_active.get(PARA_RISK_ALERT_KEY, False)
@@ -2562,6 +2581,22 @@ class HedgeCoordinator:
                 )
                 self._risk_alert_active[PARA_RISK_ALERT_KEY] = True
                 self._risk_alert_last_ts[PARA_RISK_ALERT_KEY] = now
+                if _env_debug(PARA_RISK_DEBUG_ENV, False):
+                    LOGGER.debug(
+                        "[para_risk] ALERT queued: ratio=%.4f threshold=%.4f cooldown=%.2fs since_last=%.2fs",
+                        float(authority_ratio),
+                        float(threshold),
+                        float(cooldown or 0.0),
+                        float(now - last_ts),
+                    )
+            else:
+                if _env_debug(PARA_RISK_DEBUG_ENV, False):
+                    LOGGER.debug(
+                        "[para_risk] blocked: active=%s since_last=%.2fs cooldown=%.2fs",
+                        bool(already_active),
+                        float(now - last_ts),
+                        float(cooldown or 0.0),
+                    )
         else:
             if stats.ratio < reset_ratio:
                 self._risk_alert_active.pop(PARA_RISK_ALERT_KEY, None)
@@ -2658,7 +2693,6 @@ class HedgeCoordinator:
                     base_label="stale_seconds",
                 )
             )
-            self._risk_alert_last_ts[key] = now
             if _env_debug(PARA_STALE_DEBUG_ENV, False):
                 LOGGER.debug(
                     "[para_stale] agent=%s ALERT queued: age=%.2fs critical=%.2fs ratio=%.4f label=%s",
@@ -2749,20 +2783,41 @@ class HedgeCoordinator:
             loop.create_task(self._send_risk_alert(alert, source="auto"))
 
     async def _send_risk_alert(self, alert: RiskAlertInfo, *, source: str = "auto") -> None:
-        notifier = self._para_bark_notifier if alert.key == PARA_RISK_ALERT_KEY else self._bark_notifier
+        use_para = False
+        if alert.key == PARA_RISK_ALERT_KEY:
+            use_para = True
+        elif isinstance(alert.key, str) and alert.key.startswith("para_stale::"):
+            use_para = True
+
+        notifier = self._para_bark_notifier if use_para else self._bark_notifier
         if notifier is None:
+            # Avoid permanently suppressing alerts when the notifier is misconfigured.
+            if isinstance(alert.key, str) and alert.key.startswith("para_stale::"):
+                # keep stale evaluation active so it can recover once notifier is configured
+                self._risk_alert_last_ts.pop(alert.key, None)
+            if _env_debug(PARA_RISK_DEBUG_ENV, False) and alert.key == PARA_RISK_ALERT_KEY:
+                LOGGER.debug("[para_risk] delivery skipped: para notifier missing")
             return
+
+        # Stale alerts use per-agent keys; record cooldown timestamp only when we will actually attempt delivery.
+        if isinstance(alert.key, str) and alert.key.startswith("para_stale::"):
+            self._risk_alert_last_ts[alert.key] = time.time()
         # Bark 只需 URL，不传标题/正文
         title = ""
         body = ""
         status = "sent"
         error_message = None
         try:
+            if _env_debug(PARA_RISK_DEBUG_ENV, False) and use_para:
+                LOGGER.debug("[para_risk] delivering alert key=%s source=%s", alert.key, source)
             await notifier.send(title=title, body=body)
         except Exception as exc:  # pragma: no cover - network path
             status = "error"
             error_message = str(exc)
             LOGGER.warning("Bark alert delivery failed: %s", exc)
+        else:
+            if _env_debug(PARA_RISK_DEBUG_ENV, False) and use_para:
+                LOGGER.debug("[para_risk] delivery ok: key=%s source=%s", alert.key, source)
         finally:
             await self._record_alert_history(
                 alert,
