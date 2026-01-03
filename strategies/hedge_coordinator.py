@@ -4910,6 +4910,11 @@ class CoordinatorApp:
             "algo_last_updated_at",
             "algo_remaining_size",
             "algo_size",
+            # Raw history timestamps for dashboard time/duration.
+            "created_at",
+            "last_updated_at",
+            "updated_at",
+            "end_at",
         ):
             if key in body:
                 ack_extra[key] = body.get(key)
