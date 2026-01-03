@@ -89,6 +89,9 @@ DEFAULT_TIMEOUT_SECONDS = 10.0
 # TWAP progress polling defaults (used to refresh avg_price/filled_qty while algo is open).
 DEFAULT_TWAP_PROGRESS_POLL_SECONDS = float(os.getenv("PARA_TWAP_PROGRESS_POLL_SECONDS", "2.0") or "2.0")
 DEFAULT_TWAP_PROGRESS_MAX_SECONDS = float(os.getenv("PARA_TWAP_PROGRESS_MAX_SECONDS", "1800") or "1800")
+# History pagination (history-only mode)
+DEFAULT_TWAP_HISTORY_PAGE_LIMIT = int(os.getenv("PARA_TWAP_HISTORY_PAGE_LIMIT", "50") or "50")
+DEFAULT_TWAP_HISTORY_MAX_PAGES = int(os.getenv("PARA_TWAP_HISTORY_MAX_PAGES", "1") or "1")
 # 每个账号上报的持仓条数上限。
 # 之前默认 12 会导致 dashboard 看起来“最多只有 12 条持仓”。
 # 设为 None 表示默认不截断（上报全量）。
@@ -1401,10 +1404,14 @@ class ParadexAccountMonitor:
         else:
             order = self._place_market_order(symbol, side, trade_quantity)
         order_id = None
+        algo_id = None
         filled_qty: Any = None
         avg_price: Any = None
         if isinstance(order, dict):
             order_id = order.get("id") or order.get("order_id")
+            # For TWAP, the algo order ID is the primary key for subsequent progress lookups.
+            # API docs: AlgoOrderResp.id
+            algo_id = order.get("id")
             # Response shape depends on endpoint:
             # - POST /orders (market) can resemble a fill (size/price)
             # - POST /algo/orders (TWAP) returns an algo order (size is total size, NOT filled)
@@ -1475,6 +1482,8 @@ class ParadexAccountMonitor:
             if twap_duration_seconds is not None:
                 ack_extra["twap_duration_seconds"] = int(twap_duration_seconds)
             ack_extra["algo_started_at_ms"] = int(time.time() * 1000)
+            if algo_id is not None:
+                ack_extra["algo_id"] = str(algo_id)
 
         note_out = note_core if order_id is None else f"{note_core}; order_id={order_id}"
         return "succeeded", note_out, ack_extra
@@ -1638,6 +1647,7 @@ class ParadexAccountMonitor:
         market = str(extra.get("algo_market") or "").strip()
         side = str(extra.get("algo_side") or "").strip().upper()
         expected_size = str(extra.get("algo_expected_size") or "").strip()
+        expected_algo_id = str(extra.get("algo_id") or "").strip()
         started_at_ms = int(extra.get("algo_started_at_ms") or 0)
         if not market or side not in {"BUY", "SELL"} or not expected_size:
             if debug_enabled:
@@ -1680,6 +1690,9 @@ class ParadexAccountMonitor:
                 return False
             if str(row.get("size") or "").strip() != expected_size:
                 return False
+            # In history-only mode, history may already show CLOSED records.
+            if history_only:
+                return True
             if started_at_ms:
                 try:
                     created_at_ms = int(row.get("created_at") or 0)
@@ -1688,6 +1701,85 @@ class ParadexAccountMonitor:
                 if created_at_ms and abs(created_at_ms - started_at_ms) > 120_000:
                     return False
             return True
+
+        def _pick_best_history(rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            """Pick the best matching algo from orders-history.
+
+            When started_at_ms is available, choose the row with created_at closest to it.
+            Otherwise fall back to the newest created_at.
+            """
+
+            if not rows:
+                return None
+
+            if expected_algo_id:
+                for row in rows:
+                    if str(row.get("id") or "").strip() == expected_algo_id:
+                        return row
+
+            def _created_at(row: Dict[str, Any]) -> int:
+                try:
+                    return int(row.get("created_at") or 0)
+                except Exception:
+                    return 0
+
+            if started_at_ms:
+                return min(rows, key=lambda r: abs(_created_at(r) - started_at_ms) or 10**30)
+            return max(rows, key=_created_at)
+
+        def _fetch_history_pages() -> Tuple[List[Dict[str, Any]], int]:
+            """Fetch history results, following pagination (next cursor) if needed.
+
+            Returns (combined_rows, pages_fetched).
+            """
+
+            if private_client is None:
+                return [], 0
+
+            window_start = started_at_ms - 10 * 60_000 if started_at_ms else None
+            window_end = started_at_ms + 60 * 60_000 if started_at_ms else None
+            limit = max(1, int(DEFAULT_TWAP_HISTORY_PAGE_LIMIT))
+            max_pages = max(1, int(DEFAULT_TWAP_HISTORY_MAX_PAGES))
+
+            combined: List[Dict[str, Any]] = []
+            cursor: Optional[str] = None
+            pages = 0
+
+            while pages < max_pages:
+                resp = private_client.fetch_algo_orders_history(
+                    status=None,
+                    market=market,
+                    side=side,
+                    algo_type="TWAP",
+                    start=window_start,
+                    end=window_end,
+                    limit=limit,
+                    cursor=cursor,
+                )
+                pages += 1
+                rows = _extract_rows(resp)
+                combined.extend(rows)
+
+                next_cursor = resp.get("next") if isinstance(resp, dict) else None
+                if debug_enabled:
+                    LOGGER.info(
+                        "TWAP progress[%s] history page %s/%s: results=%s next=%s",
+                        request_id,
+                        pages,
+                        max_pages,
+                        len(rows),
+                        "yes" if next_cursor else "no",
+                    )
+
+                # Stop early if we've already found the targeted algo_id in the already-fetched rows.
+                if expected_algo_id and any(str(r.get("id") or "").strip() == expected_algo_id for r in rows):
+                    break
+
+                if not next_cursor:
+                    break
+                cursor = str(next_cursor)
+
+            return combined, pages
 
         last_sent: Dict[str, Any] = {}
 
@@ -1841,18 +1933,24 @@ class ParadexAccountMonitor:
                     return
                 if history_only:
                     # Use history endpoint for the full lifecycle (OPEN/NEW/CLOSED).
-                    window_start = started_at_ms - 10 * 60_000 if started_at_ms else None
-                    window_end = started_at_ms + 60 * 60_000 if started_at_ms else None
-                    resp = private_client.fetch_algo_orders_history(
-                        status=None,
-                        market=market,
-                        side=side,
-                        algo_type="TWAP",
-                        start=window_start,
-                        end=window_end,
-                        limit=50,
-                    )
-                    _debug_dump_history(resp)
+                    rows, pages = _fetch_history_pages()
+                    if debug_enabled and pages:
+                        LOGGER.info("TWAP progress[%s] history fetched pages=%s total_rows=%s", request_id, pages, len(rows))
+                    # Keep a one-page raw dump for structure debugging.
+                    if debug_enabled and not rows:
+                        # If we got nothing, still show top-level envelope keys.
+                        window_start = started_at_ms - 10 * 60_000 if started_at_ms else None
+                        window_end = started_at_ms + 60 * 60_000 if started_at_ms else None
+                        resp = private_client.fetch_algo_orders_history(
+                            status=None,
+                            market=market,
+                            side=side,
+                            algo_type="TWAP",
+                            start=window_start,
+                            end=window_end,
+                            limit=max(1, int(DEFAULT_TWAP_HISTORY_PAGE_LIMIT)),
+                        )
+                        _debug_dump_history(resp)
                 else:
                     if algo_client is None:
                         if debug_enabled:
@@ -1867,9 +1965,10 @@ class ParadexAccountMonitor:
                 time.sleep(poll_interval)
                 continue
 
-            rows = _extract_rows(resp)
+            if not history_only:
+                rows = _extract_rows(resp)
 
-            if debug_enabled:
+            if debug_enabled and not history_only:
                 LOGGER.info(
                     "TWAP progress[%s] fetched %s algos (%s)",
                     request_id,
@@ -1877,7 +1976,25 @@ class ParadexAccountMonitor:
                     "history" if history_only else "open",
                 )
 
-            algo = next((row for row in rows if _match_algo(row)), None)
+            if history_only:
+                candidates = [row for row in rows if _match_algo(row)]
+                algo = _pick_best_history(candidates)
+                if debug_enabled and algo is not None and started_at_ms:
+                    try:
+                        created_at_ms = int(algo.get("created_at") or 0)
+                    except Exception:
+                        created_at_ms = 0
+                    LOGGER.info(
+                        "TWAP progress[%s] history picked id=%s status=%s created_at=%s started_at=%s delta_ms=%s",
+                        request_id,
+                        algo.get("id"),
+                        algo.get("status"),
+                        created_at_ms,
+                        started_at_ms,
+                        abs(created_at_ms - started_at_ms) if (created_at_ms and started_at_ms) else None,
+                    )
+            else:
+                algo = next((row for row in rows if _match_algo(row)), None)
             if not algo:
                 if debug_enabled:
                     LOGGER.info("TWAP progress[%s] stop: no matching TWAP in open orders", request_id)
