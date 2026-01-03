@@ -1701,7 +1701,15 @@
               <table>
                 <thead>
                   <tr>
-                    <th>时间</th><th>动作</th><th>数量</th><th>币种</th><th>状态</th><th>节点</th><th>下单</th><th>均价</th><th>成交</th>
+                    <th rowspan="2">时间</th>
+                    <th rowspan="2">动作</th>
+                    <th rowspan="2">数量</th>
+                    <th rowspan="2">币种</th>
+                    <th rowspan="2">状态</th>
+                    <th colspan="4" style="text-align:center;">VPS 明细</th>
+                  </tr>
+                  <tr>
+                    <th>节点</th><th>下单</th><th>均价</th><th>成交</th>
                   </tr>
                 </thead>
                 <tbody id="para-adjust-history"><tr><td colspan="9">暂无记录</td></tr></tbody>
@@ -7037,6 +7045,37 @@
             return safeText(extra[key]);
           };
 
+          const buildAgentBadges = (agents) => agents
+            .map((agent) => {
+              const status = normalizeStatus(agent.status || 'pending');
+              const label = escapeHtml(agent.agent_id || 'agent');
+              const cls = status === 'completed'
+                ? 'badge-success'
+                : status === 'failed'
+                  ? 'badge-danger'
+                  : 'badge-muted';
+              return `<span class="badge ${cls}" title="${escapeHtml(status)}">${label}</span>`;
+            })
+            .join(' ');
+
+          const renderAgentDetailFields = (agent) => {
+            if (!agent || typeof agent !== 'object') {
+              return {
+                agentId: '--',
+                orderType: '--',
+                avgPrice: '--',
+                filledQty: '--'
+              };
+            }
+            const extra = agent.extra;
+            return {
+              agentId: safeText(agent.agent_id),
+              orderType: pickExtraField(extra, 'order_type'),
+              avgPrice: pickExtraField(extra, 'avg_price'),
+              filledQty: pickExtraField(extra, 'filled_qty')
+            };
+          };
+
           for (const request of adjustmentRequests.slice(0, 6)) {
             const statusText = request.overall_status || 'pending';
             const createdText = formatTimestamp(request.created_at) ?? '--';
@@ -7053,20 +7092,41 @@
             }
             const statusCombined = statusMeta.length ? `${statusText}（${statusMeta.join(' / ')}）` : statusText;
 
-            const badges = agents
-              .map((agent) => {
-                const status = normalizeStatus(agent.status || 'pending');
-                const label = escapeHtml(agent.agent_id || 'agent');
-                const cls = status === 'completed'
-                  ? 'badge-success'
-                  : status === 'failed'
-                    ? 'badge-danger'
-                    : 'badge-muted';
-                return `<span class="badge ${cls}" title="${escapeHtml(status)}">${label}</span>`;
-              })
-              .join(' ');
+            const badges = buildAgentBadges(agents);
 
-            // 1) Summary row
+            const sortedAgents = agents
+              .filter((agent) => agent && typeof agent === 'object')
+              .slice()
+              .sort((a, b) => String(a.agent_id || '').localeCompare(String(b.agent_id || '')))
+              .slice(0, 2);
+
+            const leftAgent = sortedAgents[0] || null;
+            const rightAgent = sortedAgents[1] || null;
+
+            const left = renderAgentDetailFields(leftAgent);
+            const right = renderAgentDetailFields(rightAgent);
+
+            const nodeSummaryParts = [];
+            if (leftAgent) {
+              nodeSummaryParts.push(`${escapeHtml(left.agentId)} (${escapeHtml(safeText(leftAgent.status))})`);
+            }
+            if (rightAgent) {
+              nodeSummaryParts.push(`${escapeHtml(right.agentId)} (${escapeHtml(safeText(rightAgent.status))})`);
+            }
+            const nodeSummary = nodeSummaryParts.length ? nodeSummaryParts.join(' · ') : (badges || '—');
+
+            // Request-level order mode: if any agent reports TWAP then treat as TWAP.
+            const orderModes = sortedAgents
+              .map((agent) => pickExtraField(agent?.extra, 'order_type'))
+              .filter((v) => v && v !== '--')
+              .map((v) => String(v).toUpperCase());
+            const orderModeText = orderModes.includes('TWAP')
+              ? 'TWAP'
+              : orderModes.length
+                ? orderModes[0]
+                : '市价';
+
+            // Row 1: summary + merged node cell (colspan=4)
             historyRows.push(`
               <tr>
                 <td>${escapeHtml(createdText)}</td>
@@ -7074,49 +7134,62 @@
                 <td>${escapeHtml(String(request.magnitude ?? '--'))}</td>
                 <td>${escapeHtml(scopeText)}</td>
                 <td>${escapeHtml(statusCombined)}</td>
-                <td>${badges || '—'}</td>
-                <td>—</td>
-                <td>—</td>
-                <td>—</td>
+                <td colspan="4" style="text-align:center;">
+                  <span style="color:#8a94a6; margin-right:0.5rem;">${escapeHtml(orderModeText)}</span>
+                  <span>${nodeSummary}</span>
+                </td>
               </tr>
             `);
 
-            // 2) Detail rows per VPS (PARA is typically 2 VPS)
-            const sortedAgents = agents
-              .filter((agent) => agent && typeof agent === 'object')
-              .slice()
-              .sort((a, b) => String(a.agent_id || '').localeCompare(String(b.agent_id || '')));
+            // Row 2: only per-VPS differing fields (both VPS rendered inside one row)
 
-            for (const agent of sortedAgents.slice(0, 2)) {
-              const agentId = safeText(agent.agent_id);
-              const agentStatus = safeText(agent.status);
-              const extra = agent.extra;
-              const orderType = pickExtraField(extra, 'order_type');
-              const avgPrice = pickExtraField(extra, 'avg_price');
-              const filledQty = pickExtraField(extra, 'filled_qty');
-              const orderId = pickExtraField(extra, 'order_id');
-              const note = safeText(agent.note);
+            const filledDisplay = (filled, total) => {
+              const f = safeText(filled);
+              const t = safeText(total);
+              if (f === '--' && t === '--') {
+                return '--';
+              }
+              return `${f}/${t}`;
+            };
 
-              const statusCell = orderId !== '--'
-                ? `${agentStatus}; order_id=${orderId}`
-                : `${agentStatus}`;
+            const renderDetailCard = (agent) => `
+              <div style="padding:0.1rem 0;">
+                <div style="display:flex; justify-content:space-between; gap:0.5rem; align-items:baseline;">
+                  <div><strong>${escapeHtml(agent.agentId)}</strong></div>
+                </div>
+                <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:0.35rem 0.75rem; margin-top:0.25rem; font-variant-numeric:tabular-nums;">
+                  <div><span style="color:#8a94a6;">下单</span> ${escapeHtml(agent.orderType)}</div>
+                  <div><span style="color:#8a94a6;">均价</span> ${escapeHtml(agent.avgPrice)}</div>
+                  <div><span style="color:#8a94a6;">成交</span> ${escapeHtml(agent.filledText)}</div>
+                </div>
+              </div>
+            `;
 
-              const scopeCell = note !== '--' ? `note: ${note}` : '—';
+            const leftCard = renderDetailCard({
+              agentId: left.agentId,
+              orderType: left.orderType,
+              avgPrice: left.avgPrice,
+              filledText: filledDisplay(left.filledQty, request.magnitude)
+            });
+            const rightCard = renderDetailCard({
+              agentId: right.agentId,
+              orderType: right.orderType,
+              avgPrice: right.avgPrice,
+              filledText: filledDisplay(right.filledQty, request.magnitude)
+            });
 
-              historyRows.push(`
-                <tr>
-                  <td>↳</td>
-                  <td>VPS</td>
-                  <td>—</td>
-                  <td>${escapeHtml(scopeCell)}</td>
-                  <td>${escapeHtml(statusCell)}</td>
-                  <td>${escapeHtml(agentId)}</td>
-                  <td>${escapeHtml(orderType)}</td>
-                  <td>${escapeHtml(avgPrice)}</td>
-                  <td>${escapeHtml(filledQty)}</td>
-                </tr>
-              `);
-            }
+            historyRows.push(`
+              <tr>
+                <td>↳</td>
+                <td colspan="4" style="color:#8a94a6;">VPS 详情</td>
+                <td colspan="4">
+                  <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem;">
+                    <div style="border-right:1px solid rgba(255,255,255,0.05); padding-right:0.75rem;">${leftCard}</div>
+                    <div style="padding-left:0.25rem;">${rightCard}</div>
+                  </div>
+                </td>
+              </tr>
+            `);
           }
           paraAdjustHistoryBody.innerHTML = historyRows.join('');
         }
