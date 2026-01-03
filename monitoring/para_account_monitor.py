@@ -1734,6 +1734,10 @@ class ParadexAccountMonitor:
         private_client: Optional[ParadexPrivateClient] = None
         if isinstance(base_url, str) and base_url and isinstance(token, str) and token:
             base_url_norm = base_url.rstrip("/")
+            # Some paradex-py versions expose api_url already suffixed with /v1.
+            # Our helper clients append /v1 internally, so strip it to avoid /v1/v1.
+            if base_url_norm.lower().endswith("/v1"):
+                base_url_norm = base_url_norm[:-3]
             timeout_val = float(getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS)
             algo_client = ParadexAlgoClient(
                 ParadexAlgoClientConfig(
