@@ -75,13 +75,15 @@ def _is_para_twap_progress_debug_enabled() -> bool:
 
 
 def _is_para_twap_progress_history_only_enabled() -> bool:
-    """When enabled, use GET /v1/algo/orders-history for the whole TWAP progress loop.
+    """DEPRECATED.
 
-    Default is off because orders-history may be heavier and more ambiguous when multiple
-    similar algos exist; but it is more reliable for capturing the final CLOSED state.
+    TWAP progress polling now always uses GET /v1/algo/orders-history because it is the
+    most reliable way to capture OPEN -> CLOSED transitions and the final fill.
+
+    Kept for backward compatibility with older code paths/tests.
     """
 
-    return _env_flag("PARA_TWAP_PROGRESS_HISTORY_ONLY")
+    return True
 DEFAULT_RPC_VERSION = "v0_9"
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -1662,7 +1664,7 @@ class ParadexAccountMonitor:
         """
 
         debug_enabled = _is_para_twap_progress_debug_enabled()
-        history_only = _is_para_twap_progress_history_only_enabled()
+        history_only = True
 
         record = self._processed_adjustments.get(request_id) or {}
         extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}

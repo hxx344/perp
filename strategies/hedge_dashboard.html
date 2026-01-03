@@ -1718,7 +1718,7 @@
                 下单方式
                 <select id="para-order-mode">
                   <option value="market">市价</option>
-                  <option value="twap">TWAP</option>
+                  <option value="twap" selected>TWAP</option>
                 </select>
               </label>
               <label id="para-twap-duration-wrapper">
@@ -6943,7 +6943,7 @@
       }
 
       function updateTwapVisibility() {
-        const mode = (paraOrderModeSelect?.value || 'market').toLowerCase();
+  const mode = (paraOrderModeSelect?.value || 'twap').toLowerCase();
         if (paraTwapDurationWrapper) {
           paraTwapDurationWrapper.style.display = mode === 'twap' ? 'block' : 'none';
         }
@@ -6967,7 +6967,7 @@
           payload.symbols = symbols;
         }
 
-        const orderMode = (paraOrderModeSelect?.value || 'market').toLowerCase();
+  const orderMode = (paraOrderModeSelect?.value || 'twap').toLowerCase();
         if (orderMode === 'twap') {
           const duration = clampTwapDurationSeconds(paraTwapDurationInput?.value ?? 0) || 900;
           payload.order_mode = 'twap';
