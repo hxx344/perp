@@ -6880,27 +6880,42 @@
         if (!paraAdjustSymbolsSelect) {
           return;
         }
+        // If the user is currently interacting with the dropdown, avoid rebuilding options.
+        // Rebuilding causes the list to jump around and can interrupt selection.
+        // We'll refresh once focus returns.
+        if (document.activeElement === paraAdjustSymbolsSelect) {
+          return;
+        }
         const normalized = Array.from(
           new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => normalizeSymbolLabel(symbol)).filter(Boolean))
         ).sort();
         const previousValue = normalizeSymbolLabel(paraAdjustSymbolsSelect.value);
-        paraAdjustSymbolsSelect.innerHTML = '';
-        paraAdjustSymbolsSelect.disabled = normalized.length === 0;
+        const disabled = normalized.length === 0;
+        paraAdjustSymbolsSelect.disabled = disabled;
         if (paraResetSymbolButton) {
-          paraResetSymbolButton.disabled = normalized.length === 0;
+          paraResetSymbolButton.disabled = disabled;
         }
-        let matched = false;
-        for (const symbol of normalized) {
-          const option = document.createElement('option');
-          option.value = symbol;
-          option.textContent = symbol;
-          if (previousValue === symbol) {
-            option.selected = true;
-            matched = true;
+
+        // Diff-update options instead of resetting innerHTML to keep the UI stable.
+        const existingValues = Array.from(paraAdjustSymbolsSelect.options).map((opt) => normalizeSymbolLabel(opt.value));
+        const sameList = existingValues.length === normalized.length && existingValues.every((v, i) => v === normalized[i]);
+        if (!sameList) {
+          const oldScrollTop = paraAdjustSymbolsSelect.scrollTop;
+          paraAdjustSymbolsSelect.innerHTML = '';
+          for (const symbol of normalized) {
+            const option = document.createElement('option');
+            option.value = symbol;
+            option.textContent = symbol;
+            paraAdjustSymbolsSelect.appendChild(option);
           }
-          paraAdjustSymbolsSelect.appendChild(option);
+          // Best-effort restore scroll position.
+          paraAdjustSymbolsSelect.scrollTop = oldScrollTop;
         }
-        if (!matched) {
+
+        // Preserve selection if possible.
+        if (previousValue && normalized.includes(previousValue)) {
+          paraAdjustSymbolsSelect.value = previousValue;
+        } else {
           paraAdjustSymbolsSelect.selectedIndex = -1;
         }
       }
@@ -6922,6 +6937,17 @@
         }
         paraAdjustSymbolsSelect.value = '';
         paraAdjustSymbolsSelect.selectedIndex = -1;
+      }
+
+      // Refresh the symbol list after the user closes the dropdown.
+      // While focused, we intentionally skip option rebuilds to avoid the UI jumping.
+      if (paraAdjustSymbolsSelect) {
+        paraAdjustSymbolsSelect.addEventListener('blur', () => {
+          refreshMetrics();
+        });
+        paraAdjustSymbolsSelect.addEventListener('change', () => {
+          refreshMetrics();
+        });
       }
 
       function updateParaAdjustButtons() {
