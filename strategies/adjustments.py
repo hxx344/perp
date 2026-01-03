@@ -11,10 +11,24 @@ from __future__ import annotations
 
 # Re-export the implementation from the legacy module for now.
 # This keeps diffs small while giving us a neutral import path going forward.
-from .grvt_adjustments import (  # noqa: F401
+#
+# IMPORTANT: This module must work in both of these execution modes:
+# 1) Package import: `from strategies.adjustments import ...` (relative import works)
+# 2) Script-style execution where `strategies/` isn't a package parent (no known parent package)
+#    In that case we fall back to absolute imports.
+try:
+  from .grvt_adjustments import (  # type: ignore  # noqa: F401
     AdjustmentAction,
     AdjustmentAgentState,
     AdjustmentAgentStatus,
     AdjustmentRequest,
     GrvtAdjustmentManager,
-)
+  )
+except ImportError:  # pragma: no cover
+  from grvt_adjustments import (  # type: ignore  # noqa: F401
+    AdjustmentAction,
+    AdjustmentAgentState,
+    AdjustmentAgentStatus,
+    AdjustmentRequest,
+    GrvtAdjustmentManager,
+  )
