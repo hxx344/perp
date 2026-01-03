@@ -1858,6 +1858,12 @@ class ParadexAccountMonitor:
 
         algo_client: Optional[ParadexAlgoClient] = None
         private_client: Optional[ParadexPrivateClient] = None
+        # When history polling is unauthorized, try to self-heal by re-reading the latest
+        # bearer token from the underlying client headers. This prevents stale-token
+        # issues from leaving the request pending forever.
+        consecutive_unauthorized = 0
+        max_consecutive_unauthorized = 3
+        last_token: Optional[str] = token if isinstance(token, str) and token else None
         if isinstance(base_url, str) and base_url and isinstance(token, str) and token:
             base_url_norm = base_url.rstrip("/")
             # Some paradex-py versions expose api_url already suffixed with /v1.
@@ -1879,6 +1885,72 @@ class ParadexAccountMonitor:
                     timeout_seconds=timeout_val,
                 )
             )
+
+        def _rebuild_clients_from_latest_token() -> bool:
+            """Re-extract bearer token from the attached paradex client and rebuild helper clients."""
+            nonlocal algo_client, private_client, last_token, consecutive_unauthorized
+            api_client_local = getattr(self._client, "api_client", None) if getattr(self, "_client", None) is not None else None
+            base_url_local = getattr(api_client_local, "api_url", None)
+            if not isinstance(base_url_local, str) or not base_url_local:
+                return False
+
+            def _extract_bearer_local(value: Any) -> Optional[str]:
+                if not isinstance(value, str):
+                    return None
+                text = value.strip()
+                if not text.lower().startswith("bearer "):
+                    return None
+                out = text.split(" ", 1)[1].strip()
+                return out or None
+
+            token_local: Optional[str] = None
+            try:
+                headers_local = getattr(getattr(api_client_local, "client", None), "headers", None)
+                auth_val_local: Any = None
+                if headers_local is not None:
+                    getter = getattr(headers_local, "get", None)
+                    if callable(getter):
+                        auth_val_local = getter("Authorization")
+                        if auth_val_local is None:
+                            auth_val_local = getter("authorization")
+                token_local = _extract_bearer_local(auth_val_local)
+            except Exception:
+                token_local = None
+            if not token_local and api_client_local is not None:
+                token_local = getattr(api_client_local, "_manual_token", None)
+            if not token_local and getattr(self, "_client", None) is not None:
+                acct_local = getattr(self._client, "account", None)
+                token_local = getattr(acct_local, "jwt_token", None) if acct_local is not None else None
+
+            if not isinstance(token_local, str) or not token_local:
+                return False
+            if last_token and token_local == last_token:
+                return False
+
+            base_url_norm_local = base_url_local.rstrip("/")
+            if base_url_norm_local.lower().endswith("/v1"):
+                base_url_norm_local = base_url_norm_local[:-3]
+            timeout_val_local = float(getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS)
+            algo_client = ParadexAlgoClient(
+                ParadexAlgoClientConfig(
+                    base_url=base_url_norm_local,
+                    jwt_token=token_local,
+                    timeout_seconds=timeout_val_local,
+                )
+            )
+            private_client = ParadexPrivateClient(
+                ParadexPrivateClientConfig(
+                    base_url=base_url_norm_local,
+                    jwt_token=token_local,
+                    timeout_seconds=timeout_val_local,
+                )
+            )
+            last_token = token_local
+            # Reset counter on successful token refresh.
+            consecutive_unauthorized = 0
+            if debug_enabled:
+                LOGGER.info("TWAP progress[%s] refreshed token from client headers", request_id)
+            return True
 
         if debug_enabled:
             LOGGER.info(
@@ -1998,6 +2070,38 @@ class ParadexAccountMonitor:
                 if debug_enabled:
                     LOGGER.info("TWAP progress[%s] fetch failed: %s", request_id, exc)
                 LOGGER.debug("TWAP progress algo/orders fetch failed for %s: %s", request_id, exc)
+
+                # If unauthorized, try to self-heal (token refresh) and avoid leaving the
+                # request pending forever. After a few consecutive unauthorized failures,
+                # send a final failed ACK so the coordinator can surface the error.
+                exc_text = str(exc)
+                if "401" in exc_text and "Unauthorized" in exc_text:
+                    consecutive_unauthorized += 1
+                    _rebuild_clients_from_latest_token()
+                    if consecutive_unauthorized >= max_consecutive_unauthorized:
+                        note = "TWAP progress polling unauthorized (401); token expired or invalid"
+                        if debug_enabled:
+                            LOGGER.info(
+                                "TWAP progress[%s] stop: %s (consecutive=%s)",
+                                request_id,
+                                note,
+                                consecutive_unauthorized,
+                            )
+                        try:
+                            self._acknowledge_adjustment(
+                                request_id,
+                                status="failed",
+                                note=note,
+                                extra={
+                                    "progress": True,
+                                    "algo_status": "unknown",
+                                    "progress_error": "unauthorized",
+                                },
+                            )
+                        except Exception:
+                            pass
+                        return
+
                 time.sleep(poll_interval)
                 continue
 
