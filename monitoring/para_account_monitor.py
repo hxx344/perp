@@ -63,6 +63,10 @@ def _env_flag(name: str) -> bool:
 
 def _is_para_im_debug_enabled() -> bool:
     return _env_flag("PARA_IM_DEBUG")
+
+
+def _is_para_twap_progress_debug_enabled() -> bool:
+    return _env_flag("PARA_TWAP_PROGRESS_DEBUG")
 DEFAULT_RPC_VERSION = "v0_9"
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -1606,9 +1610,13 @@ class ParadexAccountMonitor:
         or when a time limit is reached.
         """
 
+        debug_enabled = _is_para_twap_progress_debug_enabled()
+
         record = self._processed_adjustments.get(request_id) or {}
         extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
         if not isinstance(extra, dict):
+            if debug_enabled:
+                LOGGER.info("TWAP progress[%s] skipped: missing extra dict", request_id)
             return
 
         market = str(extra.get("algo_market") or "").strip()
@@ -1616,6 +1624,14 @@ class ParadexAccountMonitor:
         expected_size = str(extra.get("algo_expected_size") or "").strip()
         started_at_ms = int(extra.get("algo_started_at_ms") or 0)
         if not market or side not in {"BUY", "SELL"} or not expected_size:
+            if debug_enabled:
+                LOGGER.info(
+                    "TWAP progress[%s] skipped: match context incomplete market=%s side=%s expected_size=%s",
+                    request_id,
+                    market or "",
+                    side or "",
+                    expected_size or "",
+                )
             return
 
         duration_hint = extra.get("twap_duration_seconds")
@@ -1680,10 +1696,26 @@ class ParadexAccountMonitor:
                     timeout_seconds=float(getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS),
                 )
             )
+
+        if debug_enabled:
+            LOGGER.info(
+                "TWAP progress[%s] start poll: market=%s side=%s expected_size=%s poll=%.1fs deadline=%.0fs base_url=%s token=%s",
+                request_id,
+                market,
+                side,
+                expected_size,
+                poll_interval,
+                hard_deadline - time.time(),
+                str(base_url or "")[:64],
+                "ok" if algo_client is not None else "missing",
+            )
+
         while time.time() < hard_deadline:
             try:
                 if algo_client is None:
                     # Older setups may not expose base_url/token; in that case we can't poll.
+                    if debug_enabled:
+                        LOGGER.info("TWAP progress[%s] stop: missing base_url/token for algo client", request_id)
                     return
                 resp = algo_client.fetch_open_algo_orders()
             except Exception as exc:  # pragma: no cover
@@ -1696,8 +1728,13 @@ class ParadexAccountMonitor:
             if isinstance(results, list):
                 rows = [r for r in results if isinstance(r, dict)]
 
+            if debug_enabled:
+                LOGGER.info("TWAP progress[%s] fetched %s open algos", request_id, len(rows))
+
             algo = next((row for row in rows if _match_algo(row)), None)
             if not algo:
+                if debug_enabled:
+                    LOGGER.info("TWAP progress[%s] stop: no matching TWAP in open orders", request_id)
                 break  # no longer open
 
             size_val = _to_float(algo.get("size"))
@@ -1726,6 +1763,16 @@ class ParadexAccountMonitor:
                     None,
                     {"progress": True, **progress_extra},
                 )
+                if debug_enabled:
+                    LOGGER.info(
+                        "TWAP progress[%s] ack progress=%s status=%s avg_price=%s filled_qty=%s remaining=%s",
+                        request_id,
+                        "ok" if ok else "fail",
+                        progress_extra.get("algo_status"),
+                        progress_extra.get("avg_price"),
+                        progress_extra.get("filled_qty"),
+                        progress_extra.get("algo_remaining_size"),
+                    )
                 if ok:
                     merged = dict(extra)
                     merged.update(progress_extra)
