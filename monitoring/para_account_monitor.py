@@ -1715,6 +1715,10 @@ class ParadexAccountMonitor:
         def _match_algo(row: Dict[str, Any]) -> bool:
             if not isinstance(row, dict):
                 return False
+            # If we already know the expected algo id, only match by id.
+            # This avoids false negatives caused by formatting differences in size (e.g. "1" vs "1.0").
+            if expected_algo_id:
+                return str(row.get("id") or "").strip() == expected_algo_id
             if str(row.get("algo_type") or "").upper() != "TWAP":
                 return False
             if str(row.get("market") or "").strip().upper() != market.upper():
