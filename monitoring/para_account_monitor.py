@@ -2223,6 +2223,15 @@ class ParadexAccountMonitor:
                                 "algo_remaining_size": hist_algo.get("remaining_size"),
                                 "algo_size": hist_algo.get("size"),
                             }
+                            # Export raw timestamps for the dashboard time/duration fields.
+                            if hist_algo.get("created_at") is not None:
+                                progress_extra["created_at"] = hist_algo.get("created_at")
+                            if hist_algo.get("last_updated_at") is not None:
+                                progress_extra["last_updated_at"] = hist_algo.get("last_updated_at")
+                            elif hist_algo.get("updated_at") is not None:
+                                progress_extra["updated_at"] = hist_algo.get("updated_at")
+                            if hist_algo.get("end_at") is not None:
+                                progress_extra["end_at"] = hist_algo.get("end_at")
                             avg_price_fmt = _format_decimal_places(hist_algo.get("avg_fill_price"), 2)
                             if avg_price_fmt is not None:
                                 progress_extra["avg_price"] = avg_price_fmt
@@ -2276,6 +2285,15 @@ class ParadexAccountMonitor:
                 "algo_remaining_size": algo.get("remaining_size"),
                 "algo_size": algo.get("size"),
             }
+            # Export raw timestamps for the dashboard time/duration fields.
+            if algo.get("created_at") is not None:
+                progress_extra["created_at"] = algo.get("created_at")
+            if algo.get("last_updated_at") is not None:
+                progress_extra["last_updated_at"] = algo.get("last_updated_at")
+            elif algo.get("updated_at") is not None:
+                progress_extra["updated_at"] = algo.get("updated_at")
+            if algo.get("end_at") is not None:
+                progress_extra["end_at"] = algo.get("end_at")
             avg_price_fmt = _format_decimal_places(algo.get("avg_fill_price"), 2)
             if avg_price_fmt is not None:
                 progress_extra["avg_price"] = avg_price_fmt
