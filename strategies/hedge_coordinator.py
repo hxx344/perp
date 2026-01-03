@@ -57,9 +57,9 @@ except Exception:  # pragma: no cover
 from aiohttp import ClientSession, ClientTimeout, web
 
 try:
-    from .grvt_adjustments import AdjustmentAction, GrvtAdjustmentManager
+    from .adjustments import AdjustmentAction, GrvtAdjustmentManager
 except ImportError:  # pragma: no cover - script execution path
-    from grvt_adjustments import AdjustmentAction, GrvtAdjustmentManager
+    from adjustments import AdjustmentAction, GrvtAdjustmentManager
 
 BASE_DIR = Path(__file__).resolve().parent
 PDT_ROOT_DIR = BASE_DIR.parent
@@ -3752,7 +3752,9 @@ class CoordinatorApp:
 
         created_by = request.remote or "dashboard"
         action = cast(AdjustmentAction, action_raw)
-        order_mode_raw = str(body.get("order_mode") or "market").strip().lower()
+        # Default PARA adjustments to TWAP unless explicitly overridden.
+        # (Dashboard / API can still force market by setting order_mode='market')
+        order_mode_raw = str(body.get("order_mode") or "twap").strip().lower()
         extras: Dict[str, Any] = {}
         if order_mode_raw == "twap":
             duration_raw = body.get("twap_duration_seconds")
@@ -4892,6 +4894,12 @@ class CoordinatorApp:
         status = body.get("status") or "acknowledged"
         note = body.get("note")
 
+        # Optional structured execution fields sent by PARA monitors.
+        ack_extra: Dict[str, Any] = {}
+        for key in ("order_type", "avg_price", "filled_qty", "order_id"):
+            if key in body:
+                ack_extra[key] = body.get(key)
+
         if not request_id:
             raise web.HTTPBadRequest(text="request_id is required")
         if not agent_id:
@@ -4903,6 +4911,7 @@ class CoordinatorApp:
                 agent_id=agent_id,
                 status=status,
                 note=(note if isinstance(note, str) else None),
+                extra=ack_extra,
             )
         except KeyError as exc:
             raise web.HTTPNotFound(text=str(exc))

@@ -1307,7 +1307,7 @@ class ParadexAccountMonitor:
 
         return loop.run_until_complete(coro)
 
-    def _execute_adjustment(self, entry: Dict[str, Any]) -> Tuple[str, str]:
+    def _execute_adjustment(self, entry: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
         action = str(entry.get("action", "")).strip().lower()
         if action not in {"add", "reduce"}:
             raise ValueError(f"Unsupported adjustment action '{action}'")
@@ -1328,6 +1328,11 @@ class ParadexAccountMonitor:
         order_mode = str(payload_cfg.get("order_mode") or "").strip().lower()
         twap_duration = payload_cfg.get("twap_duration_seconds")
         algo_type = str(payload_cfg.get("algo_type") or "").upper()
+
+        # Default PARA adjustments to TWAP unless explicitly overridden.
+        if not order_mode and not algo_type:
+            order_mode = "twap"
+            algo_type = "TWAP"
 
         trade_quantity = magnitude
         note_suffix: Optional[str] = None
@@ -1359,18 +1364,67 @@ class ParadexAccountMonitor:
         else:
             order = self._place_market_order(symbol, side, trade_quantity)
         order_id = None
+        filled_qty: Any = None
+        avg_price: Any = None
         if isinstance(order, dict):
             order_id = order.get("id") or order.get("order_id")
+            # paradex-py schema references:
+            # - FillResult.size (filled size)
+            # - AlgoOrderResp.avg_fill_price (average fill price for TWAP)
+            filled_qty = order.get("filled_size")
+            if filled_qty is None:
+                filled_qty = (
+                    order.get("size")  # FillResult.size
+                    or order.get("filled")
+                    or order.get("filled_qty")
+                    or order.get("filled_quantity")
+                )
+            avg_price = order.get("avg_price")
+            if avg_price is None:
+                avg_price = (
+                    order.get("avg_fill_price")  # AlgoOrderResp.avg_fill_price
+                    or order.get("avgFillPrice")
+                    or order.get("average_price")
+                    or order.get("price")  # FillResult.price (if only a single fill/market fill)
+                )
         delta = trade_quantity if side == "buy" else -trade_quantity
         new_net = net_size + delta
         self._update_cached_position(symbol, new_net)
+
+        mode_label = "TWAP" if (order_mode == "twap" or algo_type == "TWAP") else "MARKET"
+        fill_note_parts: List[str] = []
+        if filled_qty is not None:
+            fill_note_parts.append(f"filled={filled_qty}")
+        if avg_price is not None:
+            fill_note_parts.append(f"avg_price={avg_price}")
+        fill_note = "; ".join(fill_note_parts)
+
         note_core = (
             f"{side.upper()} {decimal_to_str(trade_quantity) or trade_quantity} {symbol} "
-            f"(net {decimal_to_str(net_size) or net_size} -> {decimal_to_str(new_net) or new_net})"
+            f"(net {decimal_to_str(net_size) or net_size} -> {decimal_to_str(new_net) or new_net}); "
+            f"order_type={mode_label}"
         )
         if note_suffix:
             note_core = f"{note_core}; {note_suffix}"
-        return "succeeded", note_core if order_id is None else f"{note_core}; order_id={order_id}"
+        if fill_note:
+            note_core = f"{note_core}; {fill_note}"
+
+        ack_extra: Dict[str, Any] = {
+            "order_type": mode_label,
+        }
+        # NOTE: These keys are internal to perp-dex-tools and are populated from Paradex API responses.
+        # When changing PARA API integration, please reference paradex-py (generated schemas):
+        # - AlgoOrderResp.avg_fill_price -> here we publish as avg_price
+        # - FillResult.size -> here we publish as filled_qty
+        if order_id is not None:
+            ack_extra["order_id"] = order_id
+        if filled_qty is not None:
+            ack_extra["filled_qty"] = filled_qty
+        if avg_price is not None:
+            ack_extra["avg_price"] = avg_price
+
+        note_out = note_core if order_id is None else f"{note_core}; order_id={order_id}"
+        return "succeeded", note_out, ack_extra
 
     def _place_market_order(self, symbol: str, side: str, quantity: Decimal) -> Any:
         if quantity <= 0:
@@ -1472,7 +1526,13 @@ class ParadexAccountMonitor:
             "This usually means the Paradex client wasn't initialized with keys or uses an incompatible SDK build."
         )
 
-    def _acknowledge_adjustment(self, request_id: str, status: str, note: Optional[str]) -> bool:
+    def _acknowledge_adjustment(
+        self,
+        request_id: str,
+        status: str,
+        note: Optional[str],
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         payload = {
             "request_id": request_id,
             "agent_id": self._agent_id,
@@ -1480,6 +1540,8 @@ class ParadexAccountMonitor:
         }
         if note is not None:
             payload["note"] = note
+        if isinstance(extra, dict) and extra:
+            payload.update(extra)
         try:
             response = self._http.post(
                 self._ack_endpoint,
@@ -1525,20 +1587,22 @@ class ParadexAccountMonitor:
             def _worker(entry_copy: Dict[str, Any], req_id: str) -> None:
                 status = "failed"
                 note: Optional[str] = None
+                extra: Optional[Dict[str, Any]] = None
                 try:
                     action = str(entry_copy.get("action") or "").strip().lower()
                     if action == "transfer":
                         status, note = self._execute_transfer(entry_copy)
                     else:
-                        status, note = self._execute_adjustment(entry_copy)
+                        status, note, extra = self._execute_adjustment(entry_copy)
                 except Exception as exc:  # pragma: no cover - runtime error path
                     status = "failed"
                     note = f"execution error: {exc}"
                     LOGGER.error("Adjustment %s execution failed: %s", req_id, exc)
-                acked = self._acknowledge_adjustment(req_id, status, note)
+                acked = self._acknowledge_adjustment(req_id, status, note, extra)
                 self._processed_adjustments[req_id] = {
                     "status": status,
                     "note": note,
+                    "extra": extra,
                     "acked": acked,
                     "timestamp": time.time(),
                     "inflight": False,

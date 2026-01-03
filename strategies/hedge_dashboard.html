@@ -1701,10 +1701,10 @@
               <table>
                 <thead>
                   <tr>
-                    <th>时间</th><th>动作</th><th>数量</th><th>币种</th><th>状态</th><th>节点</th>
+                    <th>时间</th><th>动作</th><th>数量</th><th>币种</th><th>状态</th><th>节点</th><th>下单</th><th>均价</th><th>成交</th>
                   </tr>
                 </thead>
-                <tbody id="para-adjust-history"><tr><td colspan="6">暂无记录</td></tr></tbody>
+                <tbody id="para-adjust-history"><tr><td colspan="9">暂无记录</td></tr></tbody>
               </table>
             </div>
           </div>
@@ -7018,9 +7018,25 @@
         updateParaAdjustButtons();
 
         if (!adjustmentRequests.length) {
-          paraAdjustHistoryBody.innerHTML = '<tr><td colspan="6">暂无广播记录</td></tr>';
+          paraAdjustHistoryBody.innerHTML = '<tr><td colspan="9">暂无广播记录</td></tr>';
         } else {
           const historyRows = [];
+
+          const safeText = (value) => {
+            if (value === undefined || value === null) {
+              return '--';
+            }
+            const text = String(value).trim();
+            return text ? text : '--';
+          };
+
+          const pickExtraField = (extra, key) => {
+            if (!extra || typeof extra !== 'object') {
+              return '--';
+            }
+            return safeText(extra[key]);
+          };
+
           for (const request of adjustmentRequests.slice(0, 6)) {
             const statusText = request.overall_status || 'pending';
             const createdText = formatTimestamp(request.created_at) ?? '--';
@@ -7036,6 +7052,7 @@
               statusMeta.push(`失败 ${failedAgents.length}`);
             }
             const statusCombined = statusMeta.length ? `${statusText}（${statusMeta.join(' / ')}）` : statusText;
+
             const badges = agents
               .map((agent) => {
                 const status = normalizeStatus(agent.status || 'pending');
@@ -7048,6 +7065,8 @@
                 return `<span class="badge ${cls}" title="${escapeHtml(status)}">${label}</span>`;
               })
               .join(' ');
+
+            // 1) Summary row
             historyRows.push(`
               <tr>
                 <td>${escapeHtml(createdText)}</td>
@@ -7056,8 +7075,48 @@
                 <td>${escapeHtml(scopeText)}</td>
                 <td>${escapeHtml(statusCombined)}</td>
                 <td>${badges || '—'}</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
               </tr>
             `);
+
+            // 2) Detail rows per VPS (PARA is typically 2 VPS)
+            const sortedAgents = agents
+              .filter((agent) => agent && typeof agent === 'object')
+              .slice()
+              .sort((a, b) => String(a.agent_id || '').localeCompare(String(b.agent_id || '')));
+
+            for (const agent of sortedAgents.slice(0, 2)) {
+              const agentId = safeText(agent.agent_id);
+              const agentStatus = safeText(agent.status);
+              const extra = agent.extra;
+              const orderType = pickExtraField(extra, 'order_type');
+              const avgPrice = pickExtraField(extra, 'avg_price');
+              const filledQty = pickExtraField(extra, 'filled_qty');
+              const orderId = pickExtraField(extra, 'order_id');
+              const note = safeText(agent.note);
+
+              const statusCell = orderId !== '--'
+                ? `${agentStatus}; order_id=${orderId}`
+                : `${agentStatus}`;
+
+              const scopeCell = note !== '--' ? `note: ${note}` : '—';
+
+              historyRows.push(`
+                <tr>
+                  <td>↳</td>
+                  <td>VPS</td>
+                  <td>—</td>
+                  <td>${escapeHtml(scopeCell)}</td>
+                  <td>${escapeHtml(statusCell)}</td>
+                  <td>${escapeHtml(agentId)}</td>
+                  <td>${escapeHtml(orderType)}</td>
+                  <td>${escapeHtml(avgPrice)}</td>
+                  <td>${escapeHtml(filledQty)}</td>
+                </tr>
+              `);
+            }
           }
           paraAdjustHistoryBody.innerHTML = historyRows.join('');
         }

@@ -16,6 +16,7 @@ class AdjustmentAgentState:
     status: AdjustmentAgentStatus = "pending"
     updated_at: float = field(default_factory=time.time)
     note: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     def serialize(self) -> Dict[str, Any]:
         return {
@@ -23,6 +24,7 @@ class AdjustmentAgentState:
             "status": self.status,
             "updated_at": self.updated_at,
             "note": self.note,
+            "extra": dict(self.extra) if self.extra else {},
         }
 
 
@@ -181,6 +183,7 @@ class GrvtAdjustmentManager:
         agent_id: str,
         status: str,
         note: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         normalized = self._normalize_agent_id(agent_id)
         if not normalized:
@@ -197,6 +200,8 @@ class GrvtAdjustmentManager:
             mapped_status = self._normalize_status(status)
             state.status = mapped_status
             state.note = note
+            if isinstance(extra, dict) and extra:
+                state.extra = dict(extra)
             state.updated_at = time.time()
             if mapped_status == "expired":
                 state.note = note or "expired"
