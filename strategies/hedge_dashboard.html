@@ -7111,6 +7111,31 @@
             };
           };
 
+          const normalizeEpochMs = (value) => {
+            if (value === undefined || value === null) {
+              return null;
+            }
+            const n = Number(value);
+            if (!Number.isFinite(n) || n <= 0) {
+              return null;
+            }
+            // Heuristic: seconds vs milliseconds.
+            return n < 10_000_000_000 ? Math.round(n * 1000) : Math.round(n);
+          };
+
+          const formatDuration = (ms) => {
+            if (!Number.isFinite(ms) || ms < 0) {
+              return '--';
+            }
+            const totalSeconds = Math.round(ms / 1000);
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            if (minutes <= 0) {
+              return `${seconds}s`;
+            }
+            return `${minutes}m${String(seconds).padStart(2, '0')}s`;
+          };
+
           for (const request of adjustmentRequests.slice(0, 6)) {
             const statusText = request.overall_status || 'pending';
             const createdText = formatTimestamp(request.created_at) ?? '--';
@@ -7161,6 +7186,34 @@
                 ? orderModes[0]
                 : '市价';
 
+            // Timing derived from TWAP history timestamps (if present in agent.extra)
+            // 时间 = last_updated_at - created_at
+            // 持续时间 = end_at - created_at
+            const findFirstTimestamp = (keys) => {
+              for (const agent of agents) {
+                const extra = agent?.extra;
+                if (!extra || typeof extra !== 'object') {
+                  continue;
+                }
+                for (const key of keys) {
+                  const v = normalizeEpochMs(extra[key]);
+                  if (v) {
+                    return v;
+                  }
+                }
+              }
+              return null;
+            };
+
+            const createdAtMs = findFirstTimestamp(['created_at']);
+            const lastUpdatedAtMs = findFirstTimestamp(['last_updated_at', 'updated_at']);
+            const endAtMs = findFirstTimestamp(['end_at']);
+
+            const deltaUpdated = (createdAtMs && lastUpdatedAtMs) ? (lastUpdatedAtMs - createdAtMs) : null;
+            const deltaEnd = (createdAtMs && endAtMs) ? (endAtMs - createdAtMs) : null;
+            const timeText = deltaUpdated === null ? '--' : formatDuration(deltaUpdated);
+            const durationText = deltaEnd === null ? '--' : formatDuration(deltaEnd);
+
             // Row 1: summary + merged node cell (colspan=4)
             historyRows.push(`
               <tr class="adjust-group-top">
@@ -7171,7 +7224,10 @@
                 <td>${escapeHtml(statusCombined)}</td>
                 <td colspan="4" style="text-align:center;">
                   <span style="color:#8a94a6; margin-right:0.5rem;">${escapeHtml(orderModeText)}</span>
-                  <span>${nodeSummary}</span>
+                  <span style="color:#8a94a6; margin-right:0.5rem;">时间</span>
+                  <span style="margin-right:0.75rem; font-variant-numeric:tabular-nums;">${escapeHtml(timeText)}</span>
+                  <span style="color:#8a94a6; margin-right:0.5rem;">持续时间</span>
+                  <span style="margin-right:0.75rem; font-variant-numeric:tabular-nums;">${escapeHtml(durationText)}</span>
                 </td>
               </tr>
             `);
