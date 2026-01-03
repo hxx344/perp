@@ -37,6 +37,11 @@ except ModuleNotFoundError:  # pragma: no cover
     # Fallback when helpers is not recognized as a package in some environments.
     from paradex_algo_client import ParadexAlgoClient, ParadexAlgoClientConfig  # type: ignore
 
+try:
+    from helpers.paradex_private_client import ParadexPrivateClient, ParadexPrivateClientConfig
+except ModuleNotFoundError:  # pragma: no cover
+    from paradex_private_client import ParadexPrivateClient, ParadexPrivateClientConfig  # type: ignore
+
 try:  # pragma: no cover - optional dependency wiring
     from paradex_py import Paradex  # type: ignore
     from paradex_py.environment import PROD, TESTNET  # type: ignore
@@ -67,6 +72,16 @@ def _is_para_im_debug_enabled() -> bool:
 
 def _is_para_twap_progress_debug_enabled() -> bool:
     return _env_flag("PARA_TWAP_PROGRESS_DEBUG")
+
+
+def _is_para_twap_progress_history_only_enabled() -> bool:
+    """When enabled, use GET /v1/algo/orders-history for the whole TWAP progress loop.
+
+    Default is off because orders-history may be heavier and more ambiguous when multiple
+    similar algos exist; but it is more reliable for capturing the final CLOSED state.
+    """
+
+    return _env_flag("PARA_TWAP_PROGRESS_HISTORY_ONLY")
 DEFAULT_RPC_VERSION = "v0_9"
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -1611,6 +1626,7 @@ class ParadexAccountMonitor:
         """
 
         debug_enabled = _is_para_twap_progress_debug_enabled()
+        history_only = _is_para_twap_progress_history_only_enabled()
 
         record = self._processed_adjustments.get(request_id) or {}
         extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
@@ -1715,12 +1731,22 @@ class ParadexAccountMonitor:
             token = getattr(acct, "jwt_token", None) if acct is not None else None
 
         algo_client: Optional[ParadexAlgoClient] = None
+        private_client: Optional[ParadexPrivateClient] = None
         if isinstance(base_url, str) and base_url and isinstance(token, str) and token:
+            base_url_norm = base_url.rstrip("/")
+            timeout_val = float(getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS)
             algo_client = ParadexAlgoClient(
                 ParadexAlgoClientConfig(
-                    base_url=base_url.rstrip("/"),
+                    base_url=base_url_norm,
                     jwt_token=token,
-                    timeout_seconds=float(getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS),
+                    timeout_seconds=timeout_val,
+                )
+            )
+            private_client = ParadexPrivateClient(
+                ParadexPrivateClientConfig(
+                    base_url=base_url_norm,
+                    jwt_token=token,
+                    timeout_seconds=timeout_val,
                 )
             )
 
@@ -1737,32 +1763,157 @@ class ParadexAccountMonitor:
                 "ok" if algo_client is not None else "missing",
             )
 
+        def _extract_rows(resp_obj: Any) -> List[Dict[str, Any]]:
+            if not isinstance(resp_obj, dict):
+                return []
+            results = resp_obj.get("results")
+            if not isinstance(results, list):
+                return []
+            return [r for r in results if isinstance(r, dict)]
+
+        def _status_is_openish(status_val: Any) -> bool:
+            text = str(status_val or "").strip().upper()
+            return text in {"OPEN", "NEW"}
+
         while time.time() < hard_deadline:
             try:
-                if algo_client is None:
+                if private_client is None:
                     # Older setups may not expose base_url/token; in that case we can't poll.
                     if debug_enabled:
                         LOGGER.info("TWAP progress[%s] stop: missing base_url/token for algo client", request_id)
                     return
-                resp = algo_client.fetch_open_algo_orders()
+                if history_only:
+                    # Use history endpoint for the full lifecycle (OPEN/NEW/CLOSED).
+                    window_start = started_at_ms - 10 * 60_000 if started_at_ms else None
+                    window_end = started_at_ms + 60 * 60_000 if started_at_ms else None
+                    resp = private_client.fetch_algo_orders_history(
+                        status=None,
+                        market=market,
+                        side=side,
+                        algo_type="TWAP",
+                        start=window_start,
+                        end=window_end,
+                        limit=50,
+                    )
+                else:
+                    if algo_client is None:
+                        if debug_enabled:
+                            LOGGER.info("TWAP progress[%s] stop: missing base_url/token for algo client", request_id)
+                        return
+                    resp = algo_client.fetch_open_algo_orders()
             except Exception as exc:  # pragma: no cover
                 LOGGER.debug("TWAP progress algo/orders fetch failed for %s: %s", request_id, exc)
                 time.sleep(poll_interval)
                 continue
 
-            rows: List[Dict[str, Any]] = []
-            results = resp.get("results") if isinstance(resp, dict) else None
-            if isinstance(results, list):
-                rows = [r for r in results if isinstance(r, dict)]
+            rows = _extract_rows(resp)
 
             if debug_enabled:
-                LOGGER.info("TWAP progress[%s] fetched %s open algos", request_id, len(rows))
+                LOGGER.info(
+                    "TWAP progress[%s] fetched %s algos (%s)",
+                    request_id,
+                    len(rows),
+                    "history" if history_only else "open",
+                )
 
             algo = next((row for row in rows if _match_algo(row)), None)
             if not algo:
                 if debug_enabled:
                     LOGGER.info("TWAP progress[%s] stop: no matching TWAP in open orders", request_id)
+                # If the TWAP is already CLOSED, it may disappear from /algo/orders quickly.
+                # Use /algo/orders-history to try to capture the last fill (avg_fill_price / remaining_size).
+                if private_client is not None and not history_only:
+                    try:
+                        # Narrow window around start time to avoid picking wrong algo when multiple exist.
+                        window_start = started_at_ms - 10 * 60_000 if started_at_ms else None
+                        window_end = started_at_ms + 60 * 60_000 if started_at_ms else None
+                        history = private_client.fetch_algo_orders_history(
+                            status="CLOSED",
+                            market=market,
+                            side=side,
+                            algo_type="TWAP",
+                            start=window_start,
+                            end=window_end,
+                            limit=50,
+                        )
+                        hist_rows_raw = history.get("results") if isinstance(history, dict) else None
+                        hist_rows: List[Dict[str, Any]] = []
+                        if isinstance(hist_rows_raw, list):
+                            hist_rows = [r for r in hist_rows_raw if isinstance(r, dict)]
+
+                        # Match by same criteria but loosen created_at window slightly.
+                        def _match_hist(row: Dict[str, Any]) -> bool:
+                            if not isinstance(row, dict):
+                                return False
+                            if str(row.get("algo_type") or "").upper() != "TWAP":
+                                return False
+                            if str(row.get("market") or "").strip().upper() != market.upper():
+                                return False
+                            if str(row.get("side") or "").strip().upper() != side:
+                                return False
+                            if str(row.get("size") or "").strip() != expected_size:
+                                return False
+                            if started_at_ms:
+                                try:
+                                    created_at_ms = int(row.get("created_at") or 0)
+                                except Exception:
+                                    created_at_ms = 0
+                                if created_at_ms and abs(created_at_ms - started_at_ms) > 30 * 60_000:
+                                    return False
+                            return True
+
+                        hist_algo = next((row for row in hist_rows if _match_hist(row)), None)
+                        if hist_algo is not None:
+                            size_val = _to_float(hist_algo.get("size"))
+                            remaining_val = _to_float(hist_algo.get("remaining_size"))
+                            filled_val: Optional[float] = None
+                            if size_val is not None and remaining_val is not None:
+                                filled_val = max(0.0, size_val - remaining_val)
+
+                            progress_extra: Dict[str, Any] = {
+                                "order_type": "TWAP",
+                                "algo_id": hist_algo.get("id"),
+                                "algo_status": hist_algo.get("status"),
+                                "algo_last_updated_at": hist_algo.get("last_updated_at"),
+                                "algo_remaining_size": hist_algo.get("remaining_size"),
+                                "algo_size": hist_algo.get("size"),
+                            }
+                            if hist_algo.get("avg_fill_price") is not None:
+                                progress_extra["avg_price"] = str(hist_algo.get("avg_fill_price"))
+                            if filled_val is not None:
+                                progress_extra["filled_qty"] = str(filled_val)
+
+                            if progress_extra != last_sent:
+                                ok = self._acknowledge_adjustment(
+                                    request_id,
+                                    "pending",
+                                    None,
+                                    {"progress": True, **progress_extra},
+                                )
+                                if debug_enabled:
+                                    LOGGER.info(
+                                        "TWAP progress[%s] history ack progress=%s status=%s avg_price=%s filled_qty=%s",
+                                        request_id,
+                                        "ok" if ok else "fail",
+                                        progress_extra.get("algo_status"),
+                                        progress_extra.get("avg_price"),
+                                        progress_extra.get("filled_qty"),
+                                    )
+                                if ok:
+                                    merged = dict(extra)
+                                    merged.update(progress_extra)
+                                    record["extra"] = merged
+                                    record["timestamp"] = time.time()
+                                    self._processed_adjustments[request_id] = record
+                                    last_sent = dict(progress_extra)
+                    except Exception as exc:  # pragma: no cover
+                        LOGGER.debug("TWAP progress[%s] history fallback failed: %s", request_id, exc)
                 break  # no longer open
+
+            # In history-only mode, stop only after it is no longer OPEN/NEW.
+            if history_only and not _status_is_openish(algo.get("status")):
+                # send one last update below (progress_extra) and then break.
+                pass
 
             size_val = _to_float(algo.get("size"))
             remaining_val = _to_float(algo.get("remaining_size"))
@@ -1807,6 +1958,13 @@ class ParadexAccountMonitor:
                     record["timestamp"] = time.time()
                     self._processed_adjustments[request_id] = record
                     last_sent = dict(progress_extra)
+
+            if history_only and not _status_is_openish(progress_extra.get("algo_status")):
+                if debug_enabled:
+                    LOGGER.info(
+                        "TWAP progress[%s] stop: history status=%s", request_id, progress_extra.get("algo_status")
+                    )
+                break
 
             time.sleep(poll_interval)
 
