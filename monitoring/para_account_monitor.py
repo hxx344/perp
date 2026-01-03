@@ -1679,13 +1679,40 @@ class ParadexAccountMonitor:
         api_client = getattr(self._client, "api_client", None) if self._client is not None else None
         base_url = getattr(api_client, "api_url", None)
         token: Optional[str] = None
+
+        def _extract_bearer(value: Any) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            text = value.strip()
+            if not text.lower().startswith("bearer "):
+                return None
+            out = text.split(" ", 1)[1].strip()
+            return out or None
+
+        # 1) Preferred: read Authorization header from underlying http client.
         try:
             headers = getattr(getattr(api_client, "client", None), "headers", None)
-            auth = headers.get("Authorization") if isinstance(headers, dict) else None
-            if isinstance(auth, str) and auth.lower().startswith("bearer "):
-                token = auth.split(" ", 1)[1].strip()
+            auth_val: Any = None
+
+            # httpx.Client.headers is a `Headers` object (dict-like but not a dict).
+            if headers is not None:
+                getter = getattr(headers, "get", None)
+                if callable(getter):
+                    auth_val = getter("Authorization")
+                if auth_val is None:
+                    # Some stacks normalize to lower-case.
+                    auth_val = getter("authorization") if callable(getter) else None
+
+            token = _extract_bearer(auth_val)
         except Exception:
             token = None
+
+        # 2) Fallbacks: paradex-py may store token separately.
+        if not token and api_client is not None:
+            token = getattr(api_client, "_manual_token", None)
+        if not token and self._client is not None:
+            acct = getattr(self._client, "account", None)
+            token = getattr(acct, "jwt_token", None) if acct is not None else None
 
         algo_client: Optional[ParadexAlgoClient] = None
         if isinstance(base_url, str) and base_url and isinstance(token, str) and token:
