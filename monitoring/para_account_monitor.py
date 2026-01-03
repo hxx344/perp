@@ -1386,17 +1386,22 @@ class ParadexAccountMonitor:
         avg_price: Any = None
         if isinstance(order, dict):
             order_id = order.get("id") or order.get("order_id")
-            # paradex-py schema references:
-            # - FillResult.size (filled size)
-            # - AlgoOrderResp.avg_fill_price (average fill price for TWAP)
-            filled_qty = order.get("filled_size")
-            if filled_qty is None:
-                filled_qty = (
-                    order.get("size")  # FillResult.size
-                    or order.get("filled")
-                    or order.get("filled_qty")
-                    or order.get("filled_quantity")
-                )
+            # Response shape depends on endpoint:
+            # - POST /orders (market) can resemble a fill (size/price)
+            # - POST /algo/orders (TWAP) returns an algo order (size is total size, NOT filled)
+            if order_mode == "twap" or algo_type == "TWAP":
+                # For TWAP we rely on progress polling (GET /algo/orders) to stream filled_qty/avg_price.
+                filled_qty = order.get("filled_size")
+            else:
+                # Market order: best-effort filled size from response.
+                filled_qty = order.get("filled_size")
+                if filled_qty is None:
+                    filled_qty = (
+                        order.get("size")  # FillResult.size
+                        or order.get("filled")
+                        or order.get("filled_qty")
+                        or order.get("filled_quantity")
+                    )
             avg_price = order.get("avg_price")
             if avg_price is None:
                 avg_price = (
@@ -1437,9 +1442,9 @@ class ParadexAccountMonitor:
         if order_id is not None:
             ack_extra["order_id"] = order_id
         if filled_qty is not None:
-            ack_extra["filled_qty"] = filled_qty
+            ack_extra["filled_qty"] = str(filled_qty)
         if avg_price is not None:
-            ack_extra["avg_price"] = avg_price
+            ack_extra["avg_price"] = str(avg_price)
 
         # Carry enough context for streaming TWAP progress updates.
         # This is best-effort and allows the dashboard history to refresh avg_price/filled_qty
@@ -1710,9 +1715,9 @@ class ParadexAccountMonitor:
                 "algo_size": algo.get("size"),
             }
             if algo.get("avg_fill_price") is not None:
-                progress_extra["avg_price"] = algo.get("avg_fill_price")
+                progress_extra["avg_price"] = str(algo.get("avg_fill_price"))
             if filled_val is not None:
-                progress_extra["filled_qty"] = filled_val
+                progress_extra["filled_qty"] = str(filled_val)
 
             if progress_extra != last_sent:
                 ok = self._acknowledge_adjustment(
