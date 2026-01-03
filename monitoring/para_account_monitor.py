@@ -1746,6 +1746,11 @@ class ParadexAccountMonitor:
                     if str(row.get("id") or "").strip() == expected_algo_id:
                         return row
 
+                # If we have an expected algo_id but it is not present yet, avoid
+                # heuristics (which can accidentally pick a previous TWAP). Instead,
+                # give history a short time to catch up and let the caller refetch.
+                return None
+
             def _created_at(row: Dict[str, Any]) -> int:
                 try:
                     return int(row.get("created_at") or 0)
@@ -1945,6 +1950,8 @@ class ParadexAccountMonitor:
 
         # Unit-test friendliness: when timeout is configured extremely small, avoid long sleeps.
         loop_guard = 0
+        expected_algo_id_retry_count = 0
+        expected_algo_id_retry_max = 5
 
         while time.time() < hard_deadline:
             loop_guard += 1
@@ -2008,6 +2015,29 @@ class ParadexAccountMonitor:
             if history_only:
                 candidates = [row for row in rows if _match_algo(row)]
                 algo = _pick_best_history(candidates)
+
+                # If we expect a specific algo_id but can't find it yet, wait a bit
+                # and refetch history instead of picking a heuristic candidate.
+                if expected_algo_id and algo is None and time.time() + 5.0 < hard_deadline:
+                    expected_algo_id_retry_count += 1
+                    if expected_algo_id_retry_count > expected_algo_id_retry_max:
+                        if debug_enabled:
+                            LOGGER.info(
+                                "TWAP progress[%s] history missing expected algo_id=%s after %s retries; giving up to avoid wrong match",
+                                request_id,
+                                expected_algo_id,
+                                expected_algo_id_retry_max,
+                            )
+                        return
+                    if debug_enabled:
+                        LOGGER.info(
+                            "TWAP progress[%s] history missing expected algo_id=%s; retrying after 5s",
+                            request_id,
+                            expected_algo_id,
+                        )
+                    time.sleep(5.0)
+                    continue
+
                 if debug_enabled and algo is not None and started_at_ms:
                     try:
                         created_at_ms = int(algo.get("created_at") or 0)
