@@ -248,6 +248,33 @@ def extract_from_paths(source: Dict[str, Any], *paths: Sequence[str]) -> Optiona
     return None
 
 
+def _format_decimal_places(value: Any, places: int) -> Optional[str]:
+    """Format a decimal with at most `places` decimals.
+
+    - Rounds half-up via Decimal.quantize.
+    - Removes trailing zeros and the dot (e.g. 3000.00 -> "3000", 3000.10 -> "3000.1").
+    - Never uses scientific notation.
+    """
+
+    dec = decimal_from(value)
+    if dec is None:
+        return None
+    try:
+        quant = Decimal("1").scaleb(-places)
+        text = format(dec.quantize(quant), "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text
+    except Exception:
+        try:
+            text = format(dec, "f")
+            if "." in text:
+                text = text.rstrip("0").rstrip(".")
+            return text
+        except Exception:
+            return None
+
+
 def extract_nested_balance(source: Dict[str, Any], paths: Tuple[Tuple[str, ...], ...]) -> Optional[Decimal]:
     if not isinstance(source, dict):
         return None
@@ -2056,10 +2083,12 @@ class ParadexAccountMonitor:
                                 "algo_remaining_size": hist_algo.get("remaining_size"),
                                 "algo_size": hist_algo.get("size"),
                             }
-                            if hist_algo.get("avg_fill_price") is not None:
-                                progress_extra["avg_price"] = str(hist_algo.get("avg_fill_price"))
-                            if filled_val is not None:
-                                progress_extra["filled_qty"] = str(filled_val)
+                            avg_price_fmt = _format_decimal_places(hist_algo.get("avg_fill_price"), 2)
+                            if avg_price_fmt is not None:
+                                progress_extra["avg_price"] = avg_price_fmt
+                            filled_fmt = _format_decimal_places(filled_val, 4)
+                            if filled_fmt is not None:
+                                progress_extra["filled_qty"] = filled_fmt
 
                             if progress_extra != last_sent:
                                 ok = self._acknowledge_adjustment(
@@ -2107,10 +2136,12 @@ class ParadexAccountMonitor:
                 "algo_remaining_size": algo.get("remaining_size"),
                 "algo_size": algo.get("size"),
             }
-            if algo.get("avg_fill_price") is not None:
-                progress_extra["avg_price"] = str(algo.get("avg_fill_price"))
-            if filled_val is not None:
-                progress_extra["filled_qty"] = str(filled_val)
+            avg_price_fmt = _format_decimal_places(algo.get("avg_fill_price"), 2)
+            if avg_price_fmt is not None:
+                progress_extra["avg_price"] = avg_price_fmt
+            filled_fmt = _format_decimal_places(filled_val, 4)
+            if filled_fmt is not None:
+                progress_extra["filled_qty"] = filled_fmt
 
             if progress_extra != last_sent:
                 ok = self._acknowledge_adjustment(
