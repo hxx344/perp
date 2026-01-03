@@ -1392,8 +1392,6 @@ class ParadexAccountMonitor:
         net_size = self._lookup_net_position(symbol)
         if net_size is None:
             net_size = Decimal("0")
-        if net_size == 0:
-            raise ValueError("Current position is flat; cannot determine direction for adjustment")
 
         payload_cfg: Dict[str, Any] = cast(Dict[str, Any], entry.get("payload")) if isinstance(entry.get("payload"), dict) else {}
         order_mode = str(payload_cfg.get("order_mode") or "").strip().lower()
@@ -1410,18 +1408,17 @@ class ParadexAccountMonitor:
         if action == "add":
             side = "buy" if net_size > 0 else "sell"
         else:  # reduce
-            max_reducible = abs(net_size)
-            if max_reducible == 0:
-                raise ValueError("No exposure available to reduce")
-            if magnitude > max_reducible:
-                trade_quantity = max_reducible
-                note_suffix = (
-                    f"requested {decimal_to_str(magnitude) or magnitude} exceeded exposure; "
-                    f"clamped to {decimal_to_str(trade_quantity) or trade_quantity}"
-                )
-            side = "sell" if net_size > 0 else "buy"
-            if trade_quantity <= 0:
-                raise ValueError("Reduce request resolved to zero size")
+            # Do NOT clamp reduce size to current exposure. The caller explicitly requested magnitude.
+            # This can create/flip exposure if magnitude exceeds current position.
+            # Side selection:
+            # - If reduce_side is specified, obey it.
+            # - Otherwise, best-effort infer from current net_size.
+            # - If flat/unknown, default to SELL (reduce long).
+            reduce_side = str(entry.get("reduce_side") or "").strip().lower()
+            if reduce_side in {"buy", "sell"}:
+                side = reduce_side
+            else:
+                side = "sell" if net_size >= 0 else "buy"
 
         twap_duration_seconds: Optional[int] = None
         if order_mode == "twap" or algo_type == "TWAP":
@@ -1431,7 +1428,7 @@ class ParadexAccountMonitor:
                 duration_val = 900
             twap_duration_seconds = duration_val
             order = self._place_twap_order(symbol, side, trade_quantity, duration_val)
-            note_suffix_parts = [note_suffix] if note_suffix else []
+            note_suffix_parts: List[str] = [note_suffix] if note_suffix else []
             note_suffix_parts.append(f"TWAP {duration_val}s")
             note_suffix = "; ".join([part for part in note_suffix_parts if part]) or None
         else:
