@@ -948,6 +948,41 @@
         border-bottom: 1px solid rgba(255, 255, 255, 0.05);
       }
 
+      /* PARA adjustment history: group two rows (summary + VPS detail) with a solid outline. */
+      .adjust-group-top td {
+        border-top: 1px solid rgba(255, 255, 255, 0.22);
+      }
+
+      .adjust-group-bottom td {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.22);
+      }
+
+      .adjust-group-top td:first-child,
+      .adjust-group-bottom td:first-child {
+        border-left: 1px solid rgba(255, 255, 255, 0.22);
+      }
+
+      .adjust-group-top td:last-child,
+      .adjust-group-bottom td:last-child {
+        border-right: 1px solid rgba(255, 255, 255, 0.22);
+      }
+
+      .adjust-group-top td:first-child {
+        border-top-left-radius: 8px;
+      }
+
+      .adjust-group-top td:last-child {
+        border-top-right-radius: 8px;
+      }
+
+      .adjust-group-bottom td:first-child {
+        border-bottom-left-radius: 8px;
+      }
+
+      .adjust-group-bottom td:last-child {
+        border-bottom-right-radius: 8px;
+      }
+
       .adjust-badge {
         display: inline-flex;
         align-items: center;
@@ -7128,7 +7163,7 @@
 
             // Row 1: summary + merged node cell (colspan=4)
             historyRows.push(`
-              <tr>
+              <tr class="adjust-group-top">
                 <td>${escapeHtml(createdText)}</td>
                 <td>${escapeHtml(describeAdjustmentAction(request.action))}</td>
                 <td>${escapeHtml(String(request.magnitude ?? '--'))}</td>
@@ -7179,7 +7214,7 @@
             });
 
             historyRows.push(`
-              <tr>
+              <tr class="adjust-group-bottom">
                 <td>↳</td>
                 <td colspan="4" style="color:#8a94a6;">VPS 详情</td>
                 <td colspan="4">
