@@ -25,6 +25,8 @@ import requests
 from requests.auth import HTTPBasicAuth
 from requests.exceptions import RequestException
 
+from helpers.paradex_algo_client import ParadexAlgoClient, ParadexAlgoClientConfig
+
 try:  # pragma: no cover - optional dependency wiring
     from paradex_py import Paradex  # type: ignore
     from paradex_py.environment import PROD, TESTNET  # type: ignore
@@ -54,6 +56,10 @@ def _is_para_im_debug_enabled() -> bool:
 DEFAULT_RPC_VERSION = "v0_9"
 DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
+
+# TWAP progress polling defaults (used to refresh avg_price/filled_qty while algo is open).
+DEFAULT_TWAP_PROGRESS_POLL_SECONDS = float(os.getenv("PARA_TWAP_PROGRESS_POLL_SECONDS", "2.0") or "2.0")
+DEFAULT_TWAP_PROGRESS_MAX_SECONDS = float(os.getenv("PARA_TWAP_PROGRESS_MAX_SECONDS", "1800") or "1800")
 # 每个账号上报的持仓条数上限。
 # 之前默认 12 会导致 dashboard 看起来“最多只有 12 条持仓”。
 # 设为 None 表示默认不截断（上报全量）。
@@ -1352,11 +1358,13 @@ class ParadexAccountMonitor:
             if trade_quantity <= 0:
                 raise ValueError("Reduce request resolved to zero size")
 
+        twap_duration_seconds: Optional[int] = None
         if order_mode == "twap" or algo_type == "TWAP":
             try:
                 duration_val = int(float(0 if twap_duration is None else twap_duration))
             except (TypeError, ValueError):
                 duration_val = 900
+            twap_duration_seconds = duration_val
             order = self._place_twap_order(symbol, side, trade_quantity, duration_val)
             note_suffix_parts = [note_suffix] if note_suffix else []
             note_suffix_parts.append(f"TWAP {duration_val}s")
@@ -1422,6 +1430,17 @@ class ParadexAccountMonitor:
             ack_extra["filled_qty"] = filled_qty
         if avg_price is not None:
             ack_extra["avg_price"] = avg_price
+
+        # Carry enough context for streaming TWAP progress updates.
+        # This is best-effort and allows the dashboard history to refresh avg_price/filled_qty
+        # while the algo order is still open.
+        if mode_label == "TWAP":
+            ack_extra["algo_market"] = symbol
+            ack_extra["algo_side"] = side.upper()
+            ack_extra["algo_expected_size"] = str(trade_quantity)
+            if twap_duration_seconds is not None:
+                ack_extra["twap_duration_seconds"] = int(twap_duration_seconds)
+            ack_extra["algo_started_at_ms"] = int(time.time() * 1000)
 
         note_out = note_core if order_id is None else f"{note_core}; order_id={order_id}"
         return "succeeded", note_out, ack_extra
@@ -1562,6 +1581,146 @@ class ParadexAccountMonitor:
             return False
         return True
 
+    def _poll_twap_progress(self, request_id: str) -> None:
+        """Poll open algo orders and stream TWAP progress updates.
+
+        Uses Paradex REST GET /v1/algo/orders (via perp-dex-tools helper client)
+        and updates coordinator with progress=true payloads.
+
+        The monitor will stop polling when the matching TWAP is no longer listed as open,
+        or when a time limit is reached.
+        """
+
+        record = self._processed_adjustments.get(request_id) or {}
+        extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
+        if not isinstance(extra, dict):
+            return
+
+        market = str(extra.get("algo_market") or "").strip()
+        side = str(extra.get("algo_side") or "").strip().upper()
+        expected_size = str(extra.get("algo_expected_size") or "").strip()
+        started_at_ms = int(extra.get("algo_started_at_ms") or 0)
+        if not market or side not in {"BUY", "SELL"} or not expected_size:
+            return
+
+        duration_hint = extra.get("twap_duration_seconds")
+        try:
+            duration_hint_val = int(duration_hint) if duration_hint is not None else None
+        except Exception:
+            duration_hint_val = None
+
+        poll_interval = max(0.5, DEFAULT_TWAP_PROGRESS_POLL_SECONDS)
+        hard_deadline = time.time() + max(30.0, DEFAULT_TWAP_PROGRESS_MAX_SECONDS)
+        if duration_hint_val is not None and duration_hint_val > 0:
+            hard_deadline = min(hard_deadline, time.time() + float(duration_hint_val) + 120.0)
+
+        def _to_float(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                return float(str(value))
+            except Exception:
+                return None
+
+        def _match_algo(row: Dict[str, Any]) -> bool:
+            if not isinstance(row, dict):
+                return False
+            if str(row.get("algo_type") or "").upper() != "TWAP":
+                return False
+            if str(row.get("market") or "").strip().upper() != market.upper():
+                return False
+            if str(row.get("side") or "").strip().upper() != side:
+                return False
+            if str(row.get("size") or "").strip() != expected_size:
+                return False
+            if started_at_ms:
+                try:
+                    created_at_ms = int(row.get("created_at") or 0)
+                except Exception:
+                    created_at_ms = 0
+                if created_at_ms and abs(created_at_ms - started_at_ms) > 120_000:
+                    return False
+            return True
+
+        last_sent: Dict[str, Any] = {}
+
+        # Build local algo client config from the existing Paradex client.
+        api_client = getattr(self._client, "api_client", None) if self._client is not None else None
+        base_url = getattr(api_client, "api_url", None)
+        token: Optional[str] = None
+        try:
+            headers = getattr(getattr(api_client, "client", None), "headers", None)
+            auth = headers.get("Authorization") if isinstance(headers, dict) else None
+            if isinstance(auth, str) and auth.lower().startswith("bearer "):
+                token = auth.split(" ", 1)[1].strip()
+        except Exception:
+            token = None
+
+        algo_client: Optional[ParadexAlgoClient] = None
+        if isinstance(base_url, str) and base_url and isinstance(token, str) and token:
+            algo_client = ParadexAlgoClient(
+                ParadexAlgoClientConfig(
+                    base_url=base_url.rstrip("/"),
+                    jwt_token=token,
+                    timeout_seconds=float(getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS) or DEFAULT_TIMEOUT_SECONDS),
+                )
+            )
+        while time.time() < hard_deadline:
+            try:
+                if algo_client is None:
+                    # Older setups may not expose base_url/token; in that case we can't poll.
+                    return
+                resp = algo_client.fetch_open_algo_orders()
+            except Exception as exc:  # pragma: no cover
+                LOGGER.debug("TWAP progress algo/orders fetch failed for %s: %s", request_id, exc)
+                time.sleep(poll_interval)
+                continue
+
+            rows: List[Dict[str, Any]] = []
+            results = resp.get("results") if isinstance(resp, dict) else None
+            if isinstance(results, list):
+                rows = [r for r in results if isinstance(r, dict)]
+
+            algo = next((row for row in rows if _match_algo(row)), None)
+            if not algo:
+                break  # no longer open
+
+            size_val = _to_float(algo.get("size"))
+            remaining_val = _to_float(algo.get("remaining_size"))
+            filled_val: Optional[float] = None
+            if size_val is not None and remaining_val is not None:
+                filled_val = max(0.0, size_val - remaining_val)
+
+            progress_extra: Dict[str, Any] = {
+                "order_type": "TWAP",
+                "algo_id": algo.get("id"),
+                "algo_status": algo.get("status"),
+                "algo_last_updated_at": algo.get("last_updated_at"),
+                "algo_remaining_size": algo.get("remaining_size"),
+                "algo_size": algo.get("size"),
+            }
+            if algo.get("avg_fill_price") is not None:
+                progress_extra["avg_price"] = algo.get("avg_fill_price")
+            if filled_val is not None:
+                progress_extra["filled_qty"] = filled_val
+
+            if progress_extra != last_sent:
+                ok = self._acknowledge_adjustment(
+                    request_id,
+                    "pending",
+                    None,
+                    {"progress": True, **progress_extra},
+                )
+                if ok:
+                    merged = dict(extra)
+                    merged.update(progress_extra)
+                    record["extra"] = merged
+                    record["timestamp"] = time.time()
+                    self._processed_adjustments[request_id] = record
+                    last_sent = dict(progress_extra)
+
+            time.sleep(poll_interval)
+
     def _process_adjustments(self) -> None:
         snapshot = self._fetch_agent_control()
         if not snapshot:
@@ -1588,12 +1747,15 @@ class ParadexAccountMonitor:
                 status = "failed"
                 note: Optional[str] = None
                 extra: Optional[Dict[str, Any]] = None
+                start_progress = False
                 try:
                     action = str(entry_copy.get("action") or "").strip().lower()
                     if action == "transfer":
                         status, note = self._execute_transfer(entry_copy)
                     else:
                         status, note, extra = self._execute_adjustment(entry_copy)
+                        if isinstance(extra, dict) and extra.get("order_type") == "TWAP":
+                            start_progress = True
                 except Exception as exc:  # pragma: no cover - runtime error path
                     status = "failed"
                     note = f"execution error: {exc}"
@@ -1608,12 +1770,23 @@ class ParadexAccountMonitor:
                     "inflight": False,
                 }
 
+                if acked and start_progress:
+                    record = self._processed_adjustments.get(req_id) or {}
+                    if not record.get("progress_polling"):
+                        record["progress_polling"] = True
+                        self._processed_adjustments[req_id] = record
+                        try:
+                            self._adjust_executor.submit(self._poll_twap_progress, req_id)
+                        except Exception as exc:  # pragma: no cover
+                            LOGGER.debug("Failed to start TWAP progress poller for %s: %s", req_id, exc)
+
             self._processed_adjustments[request_id] = {
                 "status": "pending",
                 "note": None,
                 "acked": False,
                 "timestamp": time.time(),
                 "inflight": True,
+                "progress_polling": False,
             }
             try:
                 self._adjust_executor.submit(_worker, dict(entry), request_id)
@@ -1633,7 +1806,11 @@ class ParadexAccountMonitor:
             return
         cutoff = time.time() - max(ttl, 60.0)
         for request_id, record in list(self._processed_adjustments.items()):
-            if record.get("acked") and record.get("timestamp", 0) < cutoff:
+            if (
+                record.get("acked")
+                and not record.get("progress_polling")
+                and record.get("timestamp", 0) < cutoff
+            ):
                 self._processed_adjustments.pop(request_id, None)
 
     def run_once(self) -> None:

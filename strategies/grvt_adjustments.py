@@ -184,6 +184,7 @@ class GrvtAdjustmentManager:
         status: str,
         note: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
+        progress: bool = False,
     ) -> Dict[str, Any]:
         normalized = self._normalize_agent_id(agent_id)
         if not normalized:
@@ -198,10 +199,24 @@ class GrvtAdjustmentManager:
             if state is None:
                 raise KeyError(f"Agent {normalized} not targeted by request {request_id}")
             mapped_status = self._normalize_status(status)
-            state.status = mapped_status
-            state.note = note
+
+            # Progress updates are allowed to stream execution details (extra fields)
+            # without finalizing the acknowledgement state.
+            # This is used for PARA TWAP progress (filled_qty/avg_price) refresh.
+            if not progress:
+                state.status = mapped_status
+            elif state.status == "pending" and mapped_status == "failed":
+                # Allow early failure to propagate even in progress mode.
+                state.status = mapped_status
+
+            # Only overwrite note when explicitly provided.
+            if isinstance(note, str):
+                state.note = note
             if isinstance(extra, dict) and extra:
-                state.extra = dict(extra)
+                # Merge to avoid losing previously reported keys.
+                merged = dict(state.extra) if state.extra else {}
+                merged.update(extra)
+                state.extra = merged
             state.updated_at = time.time()
             if mapped_status == "expired":
                 state.note = note or "expired"

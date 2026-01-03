@@ -4894,9 +4894,23 @@ class CoordinatorApp:
         status = body.get("status") or "acknowledged"
         note = body.get("note")
 
+        progress_flag = body.get("progress")
+        progress = bool(progress_flag) if progress_flag is not None else False
+
         # Optional structured execution fields sent by PARA monitors.
         ack_extra: Dict[str, Any] = {}
-        for key in ("order_type", "avg_price", "filled_qty", "order_id"):
+        for key in (
+            "order_type",
+            "avg_price",
+            "filled_qty",
+            "order_id",
+            # Algo order status fields (Paradex AlgoOrderResp)
+            "algo_id",
+            "algo_status",
+            "algo_last_updated_at",
+            "algo_remaining_size",
+            "algo_size",
+        ):
             if key in body:
                 ack_extra[key] = body.get(key)
 
@@ -4912,6 +4926,7 @@ class CoordinatorApp:
                 status=status,
                 note=(note if isinstance(note, str) else None),
                 extra=ack_extra,
+                progress=progress,
             )
         except KeyError as exc:
             raise web.HTTPNotFound(text=str(exc))
