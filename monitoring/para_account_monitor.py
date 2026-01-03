@@ -2236,7 +2236,8 @@ class ParadexAccountMonitor:
                                 progress_extra["updated_at"] = hist_algo.get("updated_at")
                             if hist_algo.get("end_at") is not None:
                                 progress_extra["end_at"] = hist_algo.get("end_at")
-                            avg_price_fmt = _format_decimal_places(hist_algo.get("avg_fill_price"), 2)
+                            # Keep more precision for avg price; 2dp can round values like 1.9981 -> 2.
+                            avg_price_fmt = _format_decimal_places(hist_algo.get("avg_fill_price"), 4)
                             if avg_price_fmt is not None:
                                 progress_extra["avg_price"] = avg_price_fmt
                             filled_fmt = _format_decimal_places(filled_val, 4)
@@ -2298,7 +2299,8 @@ class ParadexAccountMonitor:
                 progress_extra["updated_at"] = algo.get("updated_at")
             if algo.get("end_at") is not None:
                 progress_extra["end_at"] = algo.get("end_at")
-            avg_price_fmt = _format_decimal_places(algo.get("avg_fill_price"), 2)
+            # Keep more precision for avg price; 2dp can round values like 1.9981 -> 2.
+            avg_price_fmt = _format_decimal_places(algo.get("avg_fill_price"), 4)
             if avg_price_fmt is not None:
                 progress_extra["avg_price"] = avg_price_fmt
             filled_fmt = _format_decimal_places(filled_val, 4)

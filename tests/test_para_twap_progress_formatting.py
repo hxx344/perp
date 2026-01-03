@@ -82,7 +82,7 @@ def test_twap_progress_formats_avg_price_and_filled_qty(monkeypatch):
 
     mon._poll_twap_progress("req")
     payload = captured["extra"]
-    assert payload["avg_price"] == "3097.86"
+    assert payload["avg_price"] == "3097.8599"
     # filled = 2.0 - 0.7654321 = 1.2345679 -> 1.2346
     assert payload["filled_qty"] == "1.2346"
 
