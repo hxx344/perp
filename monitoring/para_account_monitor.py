@@ -25,7 +25,17 @@ import requests
 from requests.auth import HTTPBasicAuth
 from requests.exceptions import RequestException
 
-from helpers.paradex_algo_client import ParadexAlgoClient, ParadexAlgoClientConfig
+# When running this module as a standalone script (e.g. `python monitoring/para_account_monitor.py`)
+# the repository root may not be on sys.path, so `helpers.*` can fail to import.
+_PDT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PDT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PDT_ROOT))
+
+try:
+    from helpers.paradex_algo_client import ParadexAlgoClient, ParadexAlgoClientConfig
+except ModuleNotFoundError:  # pragma: no cover
+    # Fallback when helpers is not recognized as a package in some environments.
+    from paradex_algo_client import ParadexAlgoClient, ParadexAlgoClientConfig  # type: ignore
 
 try:  # pragma: no cover - optional dependency wiring
     from paradex_py import Paradex  # type: ignore
