@@ -1760,7 +1760,7 @@ class ParadexAccountMonitor:
                 poll_interval,
                 hard_deadline - time.time(),
                 str(base_url or "")[:64],
-                "ok" if algo_client is not None else "missing",
+                "ok" if (private_client is not None or algo_client is not None) else "missing",
             )
 
         def _extract_rows(resp_obj: Any) -> List[Dict[str, Any]]:
@@ -1856,6 +1856,9 @@ class ParadexAccountMonitor:
                         return
                     resp = algo_client.fetch_open_algo_orders()
             except Exception as exc:  # pragma: no cover
+                # In production we want this visible when the dedicated progress debug flag is enabled.
+                if debug_enabled:
+                    LOGGER.info("TWAP progress[%s] fetch failed: %s", request_id, exc)
                 LOGGER.debug("TWAP progress algo/orders fetch failed for %s: %s", request_id, exc)
                 time.sleep(poll_interval)
                 continue
