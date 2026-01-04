@@ -1500,7 +1500,7 @@ class ParadexAccountMonitor:
         if filled_qty is not None:
             ack_extra["filled_qty"] = str(filled_qty)
         if avg_price is not None:
-            ack_extra["avg_price"] = str(avg_price)
+            ack_extra["avg_price"] = _format_decimal_places(avg_price, 5) or str(avg_price)
 
         # Carry enough context for streaming TWAP progress updates.
         # This is best-effort and allows the dashboard history to refresh avg_price/filled_qty
@@ -2234,7 +2234,7 @@ class ParadexAccountMonitor:
                             if hist_algo.get("end_at") is not None:
                                 progress_extra["end_at"] = hist_algo.get("end_at")
                             # Keep more precision for avg price; 2dp can round values like 1.9981 -> 2.
-                            avg_price_fmt = _format_decimal_places(hist_algo.get("avg_fill_price"), 4)
+                            avg_price_fmt = _format_decimal_places(hist_algo.get("avg_fill_price"), 5)
                             if avg_price_fmt is not None:
                                 progress_extra["avg_price"] = avg_price_fmt
                             filled_fmt = _format_decimal_places(filled_val, 4)
@@ -2297,7 +2297,7 @@ class ParadexAccountMonitor:
             if algo.get("end_at") is not None:
                 progress_extra["end_at"] = algo.get("end_at")
             # Keep more precision for avg price; 2dp can round values like 1.9981 -> 2.
-            avg_price_fmt = _format_decimal_places(algo.get("avg_fill_price"), 4)
+            avg_price_fmt = _format_decimal_places(algo.get("avg_fill_price"), 5)
             if avg_price_fmt is not None:
                 progress_extra["avg_price"] = avg_price_fmt
             filled_fmt = _format_decimal_places(filled_val, 4)

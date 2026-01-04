@@ -7149,7 +7149,7 @@
             return {
               agentId: safeText(agent.agent_id),
               orderType: pickExtraField(extra, 'order_type'),
-              avgPrice: formatMaybeNumber(extra?.avg_price, 4),
+              avgPrice: formatMaybeNumber(extra?.avg_price, 5),
               filledQty: pickExtraField(extra, 'filled_qty')
             };
           };
