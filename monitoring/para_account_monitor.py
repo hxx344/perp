@@ -91,6 +91,12 @@ DEFAULT_TIMEOUT_SECONDS = 10.0
 # TWAP progress polling defaults (used to refresh avg_price/filled_qty while algo is open).
 DEFAULT_TWAP_PROGRESS_POLL_SECONDS = float(os.getenv("PARA_TWAP_PROGRESS_POLL_SECONDS", "2.0") or "2.0")
 DEFAULT_TWAP_PROGRESS_MAX_SECONDS = float(os.getenv("PARA_TWAP_PROGRESS_MAX_SECONDS", "1800") or "1800")
+
+# Safety cap for polling (seconds). When twap_duration_seconds is long (e.g. 60m), we still want
+# progress to refresh until end_at, but we must avoid infinite loops if the API misbehaves.
+DEFAULT_TWAP_PROGRESS_HARD_CAP_SECONDS = float(
+    os.getenv("PARA_TWAP_PROGRESS_HARD_CAP_SECONDS", "86400") or "86400"
+)  # default 24h
 # History pagination (history-only mode)
 DEFAULT_TWAP_HISTORY_PAGE_LIMIT = int(os.getenv("PARA_TWAP_HISTORY_PAGE_LIMIT", "50") or "50")
 DEFAULT_TWAP_HISTORY_MAX_PAGES = int(os.getenv("PARA_TWAP_HISTORY_MAX_PAGES", "1") or "1")
@@ -1697,9 +1703,18 @@ class ParadexAccountMonitor:
             duration_hint_val = None
 
         poll_interval = max(0.5, DEFAULT_TWAP_PROGRESS_POLL_SECONDS)
-        hard_deadline = time.time() + max(30.0, DEFAULT_TWAP_PROGRESS_MAX_SECONDS)
+        now = time.time()
+
+        # Base deadline: a conservative fallback window for cases where we don't know the TWAP duration.
+        hard_deadline = now + max(30.0, DEFAULT_TWAP_PROGRESS_MAX_SECONDS)
+
         if duration_hint_val is not None and duration_hint_val > 0:
-            hard_deadline = min(hard_deadline, time.time() + float(duration_hint_val) + 120.0)
+            # If we know the expected TWAP duration, keep polling at least until then (plus a grace window).
+            # NOTE: We intentionally do NOT use `min(...)` here. Using `min` truncated long TWAPs (e.g. 60m)
+            # to the default 30m cap, freezing `last_updated_at` and, in turn, the UI timer.
+            expected_deadline = now + float(duration_hint_val) + 120.0
+            capped_expected_deadline = min(expected_deadline, now + DEFAULT_TWAP_PROGRESS_HARD_CAP_SECONDS)
+            hard_deadline = max(hard_deadline, capped_expected_deadline)
 
         def _to_float(value: Any) -> Optional[float]:
             if value is None:
