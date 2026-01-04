@@ -93,6 +93,8 @@ def test_para_adjust_ack_handler_accepts_extra_fields() -> None:
             "avg_price": "123.45",
             "filled_qty": "0.7",
             "order_id": "abc",
+            "algo_size": "1.0",
+            "algo_expected_size": "1.0",
             # raw history timestamps
             "created_at": 1700000000000,
             "last_updated_at": 1700000005000,
@@ -110,6 +112,8 @@ def test_para_adjust_ack_handler_accepts_extra_fields() -> None:
     assert agent_state["extra"]["avg_price"] == "123.45"
     assert agent_state["extra"]["filled_qty"] == "0.7"
     assert agent_state["extra"]["order_id"] == "abc"
+    assert agent_state["extra"]["algo_size"] == "1.0"
+    assert agent_state["extra"]["algo_expected_size"] == "1.0"
     assert agent_state["extra"]["created_at"] == 1700000000000
     assert agent_state["extra"]["last_updated_at"] == 1700000005000
     assert agent_state["extra"]["end_at"] == 1700000009000

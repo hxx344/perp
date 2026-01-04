@@ -7286,6 +7286,30 @@
               return `${f}/${t}`;
             };
 
+            const resolveReportedTotalQty = (agent) => {
+              const extra = agent?.extra;
+              if (!extra || typeof extra !== 'object') {
+                return null;
+              }
+              // Prefer backend-reported total size for TWAP.
+              const explicitSize = extra.algo_size ?? extra.algo_expected_size ?? extra.total_qty ?? extra.target_qty;
+              if (explicitSize !== undefined && explicitSize !== null && String(explicitSize).trim() !== '') {
+                return explicitSize;
+              }
+              // Derive total when remaining + filled are provided.
+              const filledRaw = extra.filled_qty;
+              const remainingRaw = extra.algo_remaining_size;
+              const filledNum = Number(String(filledRaw ?? '').trim());
+              const remainingNum = Number(String(remainingRaw ?? '').trim());
+              if (Number.isFinite(filledNum) && Number.isFinite(remainingNum)) {
+                const totalNum = filledNum + remainingNum;
+                if (Number.isFinite(totalNum)) {
+                  return formatMaybeNumber(totalNum, 6);
+                }
+              }
+              return null;
+            };
+
             const renderDetailCard = (agent) => `
               <div style="padding:0.1rem 0;">
                 <div style="display:flex; justify-content:space-between; gap:0.5rem; align-items:baseline;">
@@ -7302,13 +7326,13 @@
               agentId: left.agentId,
               orderType: left.orderType,
               avgPrice: left.avgPrice,
-              filledText: filledDisplay(left.filledQty, request.magnitude)
+              filledText: filledDisplay(left.filledQty, resolveReportedTotalQty(leftAgent))
             });
             const rightCard = renderDetailCard({
               agentId: right.agentId,
               orderType: right.orderType,
               avgPrice: right.avgPrice,
-              filledText: filledDisplay(right.filledQty, request.magnitude)
+              filledText: filledDisplay(right.filledQty, resolveReportedTotalQty(rightAgent))
             });
 
             historyRows.push(`
