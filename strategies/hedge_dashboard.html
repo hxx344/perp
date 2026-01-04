@@ -7179,7 +7179,7 @@
             return `${minutes}m${String(seconds).padStart(2, '0')}s`;
           };
 
-          for (const request of adjustmentRequests.slice(0, 6)) {
+          for (const request of adjustmentRequests.slice(0, 20)) {
             const statusText = request.overall_status || 'pending';
             const createdText = formatTimestamp(request.created_at) ?? '--';
             const agents = Array.isArray(request.agents) ? request.agents : [];
@@ -7442,7 +7442,7 @@
           grvtAdjustHistoryBody.innerHTML = '<tr><td colspan="6">暂无广播记录</td></tr>';
         } else {
           const historyRows = [];
-          for (const request of adjustmentRequests.slice(0, 6)) {
+          for (const request of adjustmentRequests.slice(0, 20)) {
             const statusText = request.overall_status || 'pending';
             const createdText = formatTimestamp(request.created_at) ?? '--';
             const agents = Array.isArray(request.agents) ? request.agents : [];

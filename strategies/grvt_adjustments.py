@@ -89,9 +89,15 @@ class GrvtAdjustmentManager:
         *,
         history_limit: int = 40,
         expiry_seconds: float = 900.0,
+        retention_seconds: Optional[float] = None,
     ) -> None:
         self._history_limit = max(1, int(history_limit))
         self._expiry_seconds = max(30.0, float(expiry_seconds))
+        self._retention_seconds = (
+            max(60.0, float(retention_seconds))
+            if retention_seconds is not None
+            else (self._expiry_seconds * 4)
+        )
         self._lock = asyncio.Lock()
         self._requests: Dict[str, AdjustmentRequest] = {}
         self._ordered_ids: List[str] = []
@@ -278,7 +284,9 @@ class GrvtAdjustmentManager:
                         state.status = "expired"
                         state.note = state.note or "Expired without ACK"
                         state.updated_at = now
-            if now - request.created_at > (self._expiry_seconds * 4):
+            # Remove requests only after the retention window.
+            # (expiry_seconds controls pending -> expired; retention controls deletion)
+            if now - request.created_at > self._retention_seconds:
                 to_remove.append(request_id)
         if to_remove:
             for request_id in to_remove:

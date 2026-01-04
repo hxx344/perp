@@ -2976,7 +2976,12 @@ class CoordinatorApp:
             "measurement": None,
         }
         self._para_auto_balance_task: Optional[asyncio.Task] = None
-        self._para_adjustments = GrvtAdjustmentManager()
+        # PARA adjustment history should stick around longer than the default
+        # so the dashboard doesn't “forget” after an hour.
+        self._para_adjustments = GrvtAdjustmentManager(
+            history_limit=20,
+            retention_seconds=3 * 24 * 3600,
+        )
 
         # Load persisted PARA auto balance config (if any)
         self._load_persisted_para_auto_balance_config()
