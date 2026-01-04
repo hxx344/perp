@@ -7322,6 +7322,67 @@
               </div>
             `;
 
+            const parseMaybeNumber = (value) => {
+              if (value === undefined || value === null) {
+                return null;
+              }
+              const n = Number(String(value).trim());
+              return Number.isFinite(n) ? n : null;
+            };
+
+            // User-defined wear formula (frontend-only):
+            // - 成交额 = 均价 * 已成交 * 2
+            // - 磨损 = 均价差值(abs) * 成交
+            // - 均价差值 = 两个 VPS 均价之差(abs)
+            const computeFrontendWearSummary = (a, b) => {
+              const aExtra = a?.extra;
+              const bExtra = b?.extra;
+              const aAvg = parseMaybeNumber(aExtra?.avg_price);
+              const bAvg = parseMaybeNumber(bExtra?.avg_price);
+              const aFilled = parseMaybeNumber(aExtra?.filled_qty);
+              const bFilled = parseMaybeNumber(bExtra?.filled_qty);
+
+              // Need both avg prices to compute price diff.
+              if (!Number.isFinite(aAvg) || !Number.isFinite(bAvg)) {
+                return null;
+              }
+              const priceDiff = Math.abs(aAvg - bAvg);
+
+              // For totals, if one side missing filled_qty, treat it as 0.
+              const filledA = Number.isFinite(aFilled) ? aFilled : 0;
+              const filledB = Number.isFinite(bFilled) ? bFilled : 0;
+              const filledTotal = filledA + filledB;
+              if (!Number.isFinite(filledTotal) || filledTotal <= 0) {
+                return null;
+              }
+
+              // 成交额用各自均价计算（合计）：sum(avg_i * filled_i * 2)
+              const notional = (aAvg * filledA * 2) + (bAvg * filledB * 2);
+              if (!Number.isFinite(notional) || notional <= 0) {
+                return null;
+              }
+
+              // 磨损：均价差值 * 成交（这里用合计成交量）
+              const wear = priceDiff * filledTotal;
+              if (!Number.isFinite(wear)) {
+                return null;
+              }
+
+              // 每万成交额磨损
+              const per10k = (wear / notional) * 10000;
+
+              return {
+                priceDiff,
+                filledTotal,
+                notional,
+                wear,
+                per10k,
+              };
+            };
+
+            const wearSummary = computeFrontendWearSummary(leftAgent, rightAgent);
+            const wearText = wearSummary ? `${formatMaybeNumber(wearSummary.per10k, 4)}/万 (合计)` : '--';
+
             const leftCard = renderDetailCard({
               agentId: left.agentId,
               orderType: left.orderType,
@@ -7343,6 +7404,10 @@
                   <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem;">
                     <div style="border-right:1px solid rgba(255,255,255,0.05); padding-right:0.75rem;">${leftCard}</div>
                     <div style="padding-left:0.25rem;">${rightCard}</div>
+                  </div>
+                  <div style="margin-top:0.35rem; color:#8a94a6; font-variant-numeric:tabular-nums;">
+                    <span style="margin-right:0.25rem;">磨损</span>
+                    <span style="color:#c9d1d9;">${escapeHtml(wearText)}</span>
                   </div>
                 </td>
               </tr>
