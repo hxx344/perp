@@ -7399,15 +7399,17 @@
             historyRows.push(`
               <tr class="adjust-group-bottom">
                 <td>↳</td>
-                <td colspan="4" style="color:#8a94a6;">VPS 详情</td>
+                <td colspan="4" style="color:#8a94a6;">
+                  <span>VPS 详情</span>
+                  <span style="margin-left:0.6rem; font-variant-numeric:tabular-nums;">
+                    <span style="margin-right:0.25rem;">磨损</span>
+                    <span style="color:#c9d1d9;">${escapeHtml(wearText)}</span>
+                  </span>
+                </td>
                 <td colspan="4">
                   <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem;">
                     <div style="border-right:1px solid rgba(255,255,255,0.05); padding-right:0.75rem;">${leftCard}</div>
                     <div style="padding-left:0.25rem;">${rightCard}</div>
-                  </div>
-                  <div style="margin-top:0.35rem; color:#8a94a6; font-variant-numeric:tabular-nums;">
-                    <span style="margin-right:0.25rem;">磨损</span>
-                    <span style="color:#c9d1d9;">${escapeHtml(wearText)}</span>
                   </div>
                 </td>
               </tr>
