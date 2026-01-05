@@ -2495,6 +2495,7 @@
         <div style="display:flex; gap:.75rem; align-items:center; margin-top: 1rem; flex-wrap: wrap;">
           <button type="button" class="button-success" id="bp-volume-start">启动</button>
           <button type="button" class="button-danger" id="bp-volume-stop">停止</button>
+          <button type="button" class="button-secondary" id="bp-volume-clear-history">清除当前币种历史</button>
           <p class="summary-sub" id="bp-volume-status" style="margin:0;">等待配置…</p>
         </div>
 
@@ -2708,6 +2709,7 @@
     const bpSpreadInput = document.getElementById('bp-volume-max-spread-bps');
     const bpStartBtn = document.getElementById('bp-volume-start');
     const bpStopBtn = document.getElementById('bp-volume-stop');
+  const bpClearHistoryBtn = document.getElementById('bp-volume-clear-history');
     const bpStatus = document.getElementById('bp-volume-status');
     const bpRunning = document.getElementById('bp-volume-running');
     const bpVolumeBase = document.getElementById('bp-volume-base');
@@ -2737,6 +2739,78 @@
       const num = Number(value);
       if (!Number.isFinite(num)) return '--';
       return num.toFixed(decimals);
+    }
+
+    // ---- Backpack volume local persistence (per symbol) ----
+    const BP_STORAGE_PREFIX = 'hedge:bp_volume:v1';
+    function bpNormalizeSymbol(sym) {
+      return String(sym || '').trim().toUpperCase();
+    }
+    function bpStorageKey(sym) {
+      const symbol = bpNormalizeSymbol(sym);
+      return `${BP_STORAGE_PREFIX}:${symbol || 'UNKNOWN'}`;
+    }
+    function bpNowTs() {
+      return Date.now();
+    }
+    function bpReadCache(sym) {
+      const key = bpStorageKey(sym);
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        return parsed;
+      } catch {
+        return null;
+      }
+    }
+    function bpWriteCache(sym, { summary, recent }) {
+      const symbol = bpNormalizeSymbol(sym);
+      if (!symbol) return;
+      const key = bpStorageKey(symbol);
+      const safeRecent = Array.isArray(recent) ? recent.slice(0, 200) : [];
+      const payload = {
+        symbol,
+        updated_at: bpNowTs(),
+        summary: summary || null,
+        recent: safeRecent,
+      };
+      try {
+        localStorage.setItem(key, JSON.stringify(payload));
+      } catch {
+        // ignore quota
+      }
+    }
+    function bpClearCache(sym) {
+      const symbol = bpNormalizeSymbol(sym);
+      if (!symbol) return;
+      try {
+        localStorage.removeItem(bpStorageKey(symbol));
+      } catch {
+        // ignore
+      }
+    }
+    function bpResetMetricsUI() {
+      bpVolumeBase.textContent = '--';
+      bpVolumeQuote.textContent = '--';
+      bpWearSpread.textContent = '--';
+      bpWearFeeNet.textContent = '--';
+      if (typeof bpWearTotalNet !== 'undefined' && bpWearTotalNet) bpWearTotalNet.textContent = '--';
+      bpWearPer10k.textContent = '--';
+      bpRecentBody.innerHTML = '';
+    }
+    function bpApplyCacheToUI(sym) {
+      const cached = bpReadCache(sym);
+      if (!cached) {
+        bpResetMetricsUI();
+        return false;
+      }
+      bpRenderMetrics(cached.summary, cached.recent);
+      const ts = cached.updated_at ? new Date(cached.updated_at) : null;
+      const timeText = ts ? ts.toLocaleString() : '--';
+      bpStatus.textContent = `显示缓存数据（${bpNormalizeSymbol(sym)}）· ${timeText}`;
+      return true;
     }
 
     async function bpFetchJson(url, options) {
@@ -2877,7 +2951,10 @@
         bpRunning.className = status.running ? 'badge badge-info' : 'badge badge-muted';
         bpStatus.textContent = status.last_error ? `错误：${status.last_error}` : `已执行 ${status.cycles_done}/${status.cycles_target || 0}`;
       } catch (e) {
-        bpStatus.textContent = `状态获取失败：${e.message}`;
+        // If backend is down, keep UI functional by falling back to per-symbol cache.
+        const sym = bpSymbolSelect && bpSymbolSelect.value ? bpSymbolSelect.value : '';
+        const ok = bpApplyCacheToUI(sym);
+        bpStatus.textContent = ok ? bpStatus.textContent : `状态获取失败：${e.message}`;
       }
 
   // Always refresh BBO preview (shows when switching symbol even if not running).
@@ -2886,8 +2963,13 @@
       try {
         const metrics = await bpFetchJson('/api/backpack/volume/metrics');
         bpRenderMetrics(metrics.summary, metrics.recent);
+        // Persist the latest snapshot under the currently selected symbol.
+        const sym = bpSymbolSelect && bpSymbolSelect.value ? bpSymbolSelect.value : '';
+        bpWriteCache(sym, { summary: metrics.summary, recent: metrics.recent });
       } catch (e) {
-        // keep status
+        // Backend metrics unavailable: show cached snapshot for selected symbol (if any).
+        const sym = bpSymbolSelect && bpSymbolSelect.value ? bpSymbolSelect.value : '';
+        bpApplyCacheToUI(sym);
       }
     }
 
@@ -2918,7 +3000,18 @@
     });
 
     bpSymbolSelect && bpSymbolSelect.addEventListener('change', () => {
+      const sym = bpSymbolSelect.value;
+      // Immediately switch cards/table to the selected symbol (cache first).
+      bpApplyCacheToUI(sym);
+      // Always refresh BBO preview for the new symbol.
       bpRefreshBboPreview();
+    });
+
+    bpClearHistoryBtn && bpClearHistoryBtn.addEventListener('click', () => {
+      const sym = bpSymbolSelect && bpSymbolSelect.value ? bpSymbolSelect.value : '';
+      bpClearCache(sym);
+      bpResetMetricsUI();
+      bpStatus.textContent = `已清除 ${bpNormalizeSymbol(sym) || '-'} 历史数据`;
     });
     bpQtyInput && bpQtyInput.addEventListener('change', () => {
       bpRefreshBboPreview();
@@ -2939,7 +3032,12 @@
     });
 
     // Bootstrap
-  bpLoadMarkets().then(() => bpRefresh());
+  bpLoadMarkets().then(() => {
+    // On first load, prefer cached snapshot for the selected symbol (if any).
+    const sym = bpSymbolSelect && bpSymbolSelect.value ? bpSymbolSelect.value : '';
+    bpApplyCacheToUI(sym);
+    return bpRefresh();
+  });
     setInterval(bpRefresh, 1000);
     const pauseAllButton = document.getElementById('pause-all');
     const resumeAllButton = document.getElementById('resume-all');
