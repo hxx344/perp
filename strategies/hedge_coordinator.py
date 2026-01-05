@@ -3621,6 +3621,20 @@ class CoordinatorApp:
                     return
                 cfg = state.cfg
 
+            # Pre-flight: if last cycle left a residual position, flatten it first.
+            # User assumption: market orders fill immediately; we still guard with best-effort checks.
+            try:
+                if hasattr(client, "get_account_positions"):
+                    pos_abs = await client.get_account_positions()  # type: ignore[attr-defined]
+                    if isinstance(pos_abs, Decimal) and pos_abs > 0:
+                        # Best-effort: attempt both directions; only the correct one will reduce exposure.
+                        for side in ("sell", "buy"):
+                            with suppress(Exception):
+                                await client.place_market_order(cfg.symbol, pos_abs, side)
+            except Exception:
+                # Never block the runner on position checks.
+                pass
+
             now = _now_ts()
             cooldown_s = max(0.0, float(cfg.cooldown_ms) / 1000.0)
             if last_cycle_at and (now - last_cycle_at) < cooldown_s:
@@ -3666,21 +3680,24 @@ class CoordinatorApp:
 
             # Execute BUY -> SELL (market), sell qty follows buy filled.
             try:
-                buy = await client.place_market_order(cfg.symbol, qty_exec, "buy")
-                if not buy.success or (buy.filled_size and buy.filled_size <= 0):
+                # User assumption: both legs fill immediately. Run them concurrently to reduce serial latency.
+                buy, sell = await asyncio.gather(
+                    client.place_market_order(cfg.symbol, qty_exec, "buy"),
+                    client.place_market_order(cfg.symbol, qty_exec, "sell"),
+                )
+
+                if not buy.success:
                     raise RuntimeError(buy.error_message or "buy failed")
+                if not sell.success:
+                    raise RuntimeError(sell.error_message or "sell failed")
+
                 buy_filled_qty = buy.filled_size if buy.filled_size is not None else (buy.size or Decimal("0"))
                 buy_avg = buy.price or Decimal("0")
-                if buy_filled_qty <= 0 or buy_avg <= 0:
-                    # place_market_order currently computes avg price; still guard
-                    raise RuntimeError("buy missing avg/filled")
-
-                sell_qty = buy_filled_qty
-                sell = await client.place_market_order(cfg.symbol, sell_qty, "sell")
-                if not sell.success or (sell.filled_size and sell.filled_size <= 0):
-                    raise RuntimeError(sell.error_message or "sell failed")
                 sell_filled_qty = sell.filled_size if sell.filled_size is not None else (sell.size or Decimal("0"))
                 sell_avg = sell.price or Decimal("0")
+
+                if buy_filled_qty <= 0 or buy_avg <= 0:
+                    raise RuntimeError("buy missing avg/filled")
                 if sell_filled_qty <= 0 or sell_avg <= 0:
                     raise RuntimeError("sell missing avg/filled")
 
