@@ -2801,7 +2801,9 @@
       }
       if (bpBboWearMeta) {
         const per10k = (wear.wear_per_10k_est == null) ? '--' : bpFormatNumber(wear.wear_per_10k_est, 2);
-        bpBboWearMeta.textContent = `spread磨损 ${wear.wear_spread_est || '--'} + fee(返佣后) ${wear.fee_net_est || '--'}；每万 ${per10k}`;
+        const qtyExec = bbo.qty_exec || wear.qty || '--';
+        const notional = wear.volume_quote_est || '--';
+        bpBboWearMeta.textContent = `spread磨损 ${wear.wear_spread_est || '--'} + fee磨损(返佣后) ${wear.fee_net_est || '--'} = 合计磨损 ${wear.wear_total_net_est || '--'}；每万 ${per10k}；qty ${qtyExec}；notional ${notional}`;
       }
     }
 
