@@ -62,6 +62,9 @@ elif sys.path and sys.path[0] != _REPO_ROOT:
 
 import uuid
 
+# Persist Backpack volume history on disk so clearing survives page refresh.
+BP_VOLUME_HISTORY_FILE = _THIS_DIR / "bp_volume_history.json"
+
 try:
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover
@@ -3177,6 +3180,11 @@ class CoordinatorApp:
         self._bp_volume = BackpackVolumeState()
         self._bp_volume_lock = asyncio.Lock()
 
+        # Persisted per-symbol history for the Backpack volume panel.
+        # Shape: {"SYMBOL": {"updated_at": ms, "summary": {...}, "recent": [...]}}
+        self._bp_volume_history: Dict[str, Dict[str, Any]] = {}
+        self._load_bp_volume_history()
+
         # Backpack WS L1 cache (best-effort; falls back to HTTP when unavailable).
         self._bp_bbo_ws = None
         if BackpackBookTickerWS is not None:
@@ -3223,6 +3231,8 @@ class CoordinatorApp:
                 web.post("/api/backpack/volume/stop", self.handle_bp_volume_stop),
                 web.get("/api/backpack/volume/status", self.handle_bp_volume_status),
                 web.get("/api/backpack/volume/metrics", self.handle_bp_volume_metrics),
+                web.get("/api/backpack/volume/history/get", self.handle_bp_volume_history_get),
+                web.post("/api/backpack/volume/history/clear", self.handle_bp_volume_history_clear),
 
                 # Backpack BBO preview (L1 bid/ask + capacity + estimated wear)
                 web.get("/api/backpack/bbo", self.handle_bp_bbo_preview),
@@ -3309,6 +3319,53 @@ class CoordinatorApp:
             with suppress(Exception):
                 await task
 
+        # Best-effort persist.
+        with suppress(Exception):
+            self._save_bp_volume_history()
+
+    def _load_bp_volume_history(self) -> None:
+        try:
+            if not BP_VOLUME_HISTORY_FILE.exists():
+                self._bp_volume_history = {}
+                return
+            raw = BP_VOLUME_HISTORY_FILE.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+            if isinstance(payload, dict):
+                self._bp_volume_history = {str(k).upper(): v for k, v in payload.items() if isinstance(v, dict)}
+            else:
+                self._bp_volume_history = {}
+        except Exception:
+            self._bp_volume_history = {}
+
+    def _save_bp_volume_history(self) -> None:
+        try:
+            BP_VOLUME_HISTORY_FILE.write_text(
+                json.dumps(self._bp_volume_history, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _persist_bp_volume_snapshot(self, symbol: str, summary: Dict[str, Any], recent: List[Dict[str, Any]]) -> None:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return
+        self._bp_volume_history[sym] = {
+            "symbol": sym,
+            "updated_at": int(time.time() * 1000),
+            "summary": summary,
+            "recent": (recent or [])[:200],
+        }
+        with suppress(Exception):
+            self._save_bp_volume_history()
+
+    def _get_bp_volume_history_snapshot(self, symbol: str) -> Optional[Dict[str, Any]]:
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return None
+        snap = self._bp_volume_history.get(sym)
+        return snap if isinstance(snap, dict) else None
+
     async def handle_bp_volume_markets(self, request: web.Request) -> web.Response:
         """List available Backpack PERP markets (e.g. ETH-PERP)."""
         if _coord_debug_enabled():
@@ -3373,16 +3430,77 @@ class CoordinatorApp:
             )
 
     async def handle_bp_volume_metrics(self, request: web.Request) -> web.Response:
-        del request
+        # Note: this endpoint historically returned the *in-memory* state.
+        # To make "clear" survive refresh (and keep showing the cleared state),
+        # when the runner is NOT active we prefer returning the persisted snapshot.
+        symbol_q = str(request.query.get("symbol") or "").strip().upper()
         async with self._bp_volume_lock:
             state = self._bp_volume
-            return web.json_response(
-                {
-                    "ok": True,
-                    "summary": state.summary.to_dict(state.cfg),
-                    "recent": [rec.to_dict() for rec in list(state.recent)],
-                }
-            )
+            summary = state.summary.to_dict(state.cfg)
+            recent = [rec.to_dict() for rec in list(state.recent)]
+
+            running = bool(state.running)
+            live_symbol = str(getattr(state.cfg, "symbol", "") or "").strip().upper()
+
+        # If the runner is active, always persist under the live symbol.
+        if running and live_symbol:
+            self._persist_bp_volume_snapshot(live_symbol, summary, recent)
+            return web.json_response({"ok": True, "summary": summary, "recent": recent, "symbol": live_symbol, "source": "memory"})
+
+        # Runner not active: try persisted snapshot first (preferred).
+        pick_symbol = symbol_q or live_symbol
+        if pick_symbol:
+            snap = self._get_bp_volume_history_snapshot(pick_symbol)
+            if snap:
+                return web.json_response(
+                    {
+                        "ok": True,
+                        "summary": snap.get("summary") or {},
+                        "recent": snap.get("recent") or [],
+                        "symbol": pick_symbol,
+                        "source": "disk",
+                        "updated_at": snap.get("updated_at"),
+                    }
+                )
+
+        # Fallback: return in-memory (mostly for first load / legacy behavior).
+        if live_symbol:
+            self._persist_bp_volume_snapshot(live_symbol, summary, recent)
+        return web.json_response({"ok": True, "summary": summary, "recent": recent, "symbol": live_symbol or None, "source": "memory"})
+
+    async def handle_bp_volume_history_get(self, request: web.Request) -> web.Response:
+        symbol = str(request.query.get("symbol") or "").strip().upper()
+        if not symbol:
+            return web.json_response({"ok": False, "error": "symbol required"}, status=400)
+        snap = self._get_bp_volume_history_snapshot(symbol)
+        if not snap:
+            return web.json_response({"ok": True, "symbol": symbol, "summary": {}, "recent": [], "source": "disk", "updated_at": None})
+        return web.json_response(
+            {
+                "ok": True,
+                "symbol": symbol,
+                "summary": snap.get("summary") or {},
+                "recent": snap.get("recent") or [],
+                "source": "disk",
+                "updated_at": snap.get("updated_at"),
+            }
+        )
+
+    async def handle_bp_volume_history_clear(self, request: web.Request) -> web.Response:
+        """Clear persisted history for a given symbol (survives refresh)."""
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        symbol = str(payload.get("symbol") or "").strip().upper()
+        if not symbol:
+            return web.json_response({"ok": False, "error": "symbol required"}, status=400)
+        with suppress(Exception):
+            self._bp_volume_history.pop(symbol, None)
+            self._save_bp_volume_history()
+        return web.json_response({"ok": True, "symbol": symbol})
 
     async def handle_bp_volume_start(self, request: web.Request) -> web.Response:
         if BackpackClient is None or TradingConfig is None:

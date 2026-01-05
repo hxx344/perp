@@ -2766,21 +2766,11 @@
       }
     }
     function bpWriteCache(sym, { summary, recent }) {
-      const symbol = bpNormalizeSymbol(sym);
-      if (!symbol) return;
-      const key = bpStorageKey(symbol);
-      const safeRecent = Array.isArray(recent) ? recent.slice(0, 200) : [];
-      const payload = {
-        symbol,
-        updated_at: bpNowTs(),
-        summary: summary || null,
-        recent: safeRecent,
-      };
-      try {
-        localStorage.setItem(key, JSON.stringify(payload));
-      } catch {
-        // ignore quota
-      }
+      // Backend now persists per-symbol history on disk.
+      // Keep localStorage read/clear for offline fallback only, but don't write new snapshots.
+      void sym;
+      void summary;
+      void recent;
     }
     function bpClearCache(sym) {
       const symbol = bpNormalizeSymbol(sym);
@@ -2998,11 +2988,11 @@
   await bpRefreshBboPreview();
 
       try {
-        const metrics = await bpFetchJson('/api/backpack/volume/metrics');
+  const metrics = await bpFetchJson(`/api/backpack/volume/metrics?symbol=${encodeURIComponent(viewingSymbol || '')}`);
         const liveSym = bpPickLiveSymbol(statusPayload, metrics);
 
-        // Always persist under the *live* symbol (the one actually running on backend).
-        if (liveSym) bpWriteCache(liveSym, { summary: metrics.summary, recent: metrics.recent });
+  // Backend now persists per-symbol history to disk; avoid localStorage writes to prevent
+  // "clear then refresh" from immediately repopulating client cache.
 
         // Only update the visible cards/table if the user is viewing the same symbol as live.
         if (!viewingSymbol || (liveSym && liveSym === viewingSymbol)) {
@@ -3059,12 +3049,21 @@
       bpRefreshBboPreview();
     });
 
-    bpClearHistoryBtn && bpClearHistoryBtn.addEventListener('click', () => {
-      const sym = bpSymbolSelect && bpSymbolSelect.value ? bpSymbolSelect.value : '';
-      bpClearCache(sym);
+    bpClearHistoryBtn && bpClearHistoryBtn.addEventListener('click', async () => {
+      const sym = bpSymbolSelect && bpSymbolSelect.value ? bpNormalizeSymbol(bpSymbolSelect.value) : '';
       bpShowNoCache(sym);
-      bpStatus.textContent = `已清除 ${bpNormalizeSymbol(sym) || '-'} 历史数据`;
-      // Re-render status line on next tick without waiting for the 1s interval.
+      bpStatus.textContent = `清除中：${sym || '-'}`;
+      try {
+        await bpFetchJson('/api/backpack/volume/history/clear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: sym })
+        });
+        bpStatus.textContent = `已清除 ${sym || '-'} 历史数据`;
+      } catch (e) {
+        bpStatus.textContent = `清除失败：${e.message}`;
+      }
+      // Refresh soon to pick up the cleared persisted state.
       setTimeout(() => { bpRefresh(); }, 0);
     });
     bpQtyInput && bpQtyInput.addEventListener('change', () => {
