@@ -2807,9 +2807,6 @@
         return false;
       }
       bpRenderMetrics(cached.summary, cached.recent);
-      const ts = cached.updated_at ? new Date(cached.updated_at) : null;
-      const timeText = ts ? ts.toLocaleString() : '--';
-      bpStatus.textContent = `显示缓存数据（view ${bpNormalizeSymbol(sym)}）· ${timeText}`;
       return true;
     }
 
@@ -2819,6 +2816,22 @@
       const recent = metricsPayload && Array.isArray(metricsPayload.recent) ? metricsPayload.recent : null;
       const recSym = recent && recent.length && recent[0] && recent[0].symbol ? bpNormalizeSymbol(recent[0].symbol) : '';
       return recSym;
+    }
+
+    function bpFormatCacheHint(sym) {
+      const cached = bpReadCache(sym);
+      if (!cached) return `cache ${bpNormalizeSymbol(sym) || '-'}: none`;
+      const ts = cached.updated_at ? new Date(cached.updated_at) : null;
+      const timeText = ts ? ts.toLocaleString() : '--';
+      return `cache ${bpNormalizeSymbol(sym) || '-'}: ${timeText}`;
+    }
+
+    function bpSetStatusLine({ baseText, liveSym, viewingSym, cacheHint }) {
+      const parts = [baseText];
+      parts.push(`live ${liveSym || '-'}`);
+      parts.push(`view ${viewingSym || '-'}`);
+      if (cacheHint) parts.push(cacheHint);
+      bpStatus.textContent = parts.join(' · ');
     }
 
     async function bpFetchJson(url, options) {
@@ -2961,12 +2974,14 @@
         bpRunning.className = statusPayload.running ? 'badge badge-info' : 'badge badge-muted';
         const liveSym = bpPickLiveSymbol(statusPayload, null);
         const baseText = statusPayload.last_error ? `错误：${statusPayload.last_error}` : `已执行 ${statusPayload.cycles_done}/${statusPayload.cycles_target || 0}`;
-        bpStatus.textContent = `${baseText} · live ${liveSym || '-'} · view ${viewingSymbol || '-'}`;
+        const cacheHint = (viewingSymbol && liveSym && viewingSymbol !== liveSym) ? bpFormatCacheHint(viewingSymbol) : '';
+        bpSetStatusLine({ baseText, liveSym, viewingSym: viewingSymbol, cacheHint });
       } catch (e) {
         // If backend is down, keep UI functional by falling back to per-symbol cache.
         const sym = viewingSymbol;
         const ok = bpApplyCacheToUI(sym);
-        bpStatus.textContent = ok ? bpStatus.textContent : `状态获取失败：${e.message}`;
+        const baseText = ok ? '离线：显示缓存' : `状态获取失败：${e.message}`;
+        bpSetStatusLine({ baseText, liveSym: '', viewingSym: viewingSymbol, cacheHint: ok ? bpFormatCacheHint(viewingSymbol) : '' });
       }
 
   // Always refresh BBO preview (shows when switching symbol even if not running).
@@ -3022,7 +3037,7 @@
     bpSymbolSelect && bpSymbolSelect.addEventListener('change', () => {
       const sym = bpSymbolSelect.value;
       // Immediately switch cards/table to the selected symbol (cache first).
-      bpApplyCacheToUI(sym);
+      if (sym) bpApplyCacheToUI(sym);
       // Always refresh BBO preview for the new symbol.
       bpRefreshBboPreview();
     });
