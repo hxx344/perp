@@ -301,6 +301,11 @@ class BackpackClient(BaseExchangeClient):
 
     @query_retry(default_return=(0, 0))
     async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:
+        best_bid, _, best_ask, _ = await self.fetch_bbo_with_qty(contract_id)
+        return best_bid, best_ask
+
+    @query_retry(default_return=(Decimal(0), Decimal(0), Decimal(0), Decimal(0)))
+    async def fetch_bbo_with_qty(self, contract_id: str) -> Tuple[Decimal, Decimal, Decimal, Decimal]:
         # Get order book depth from Backpack
         order_book = self.public_client.get_depth(contract_id)
 
@@ -312,12 +317,15 @@ class BackpackClient(BaseExchangeClient):
         bids = sorted(bids, key=lambda x: Decimal(x[0]), reverse=True)  # (highest price first)
         asks = sorted(asks, key=lambda x: Decimal(x[0]))                # (lowest price first)
 
-        # Best bid is the highest price someone is willing to buy at
-        best_bid = Decimal(bids[0][0]) if bids and len(bids) > 0 else 0
-        # Best ask is the lowest price someone is willing to sell at
-        best_ask = Decimal(asks[0][0]) if asks and len(asks) > 0 else 0
+        # Backpack returns [price, quantity] entries.
+        # Best bid is the highest price someone is willing to buy at.
+        best_bid = Decimal(bids[0][0]) if bids else Decimal(0)
+        best_bid_qty = Decimal(bids[0][1]) if bids and len(bids[0]) > 1 else Decimal(0)
+        # Best ask is the lowest price someone is willing to sell at.
+        best_ask = Decimal(asks[0][0]) if asks else Decimal(0)
+        best_ask_qty = Decimal(asks[0][1]) if asks and len(asks[0]) > 1 else Decimal(0)
 
-        return best_bid, best_ask
+        return best_bid, best_bid_qty, best_ask, best_ask_qty
 
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
         """Place an open order with Backpack using official SDK with retry logic for POST_ONLY rejections."""
@@ -557,7 +565,7 @@ class BackpackClient(BaseExchangeClient):
     async def get_account_positions(self) -> Decimal:
         """Get account positions using official SDK."""
         positions_data = self.account_client.get_open_positions()
-        position_amt = 0
+        position_amt = Decimal("0")
         for position in positions_data:
             if position.get('symbol', '') == self.config.contract_id:
                 position_amt = abs(Decimal(position.get('netQuantity', 0)))

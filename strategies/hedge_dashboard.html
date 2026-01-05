@@ -2463,6 +2463,104 @@
       </article>
     </section>
 
+    <section class="grid">
+      <article class="card" style="grid-column: 1 / -1;">
+        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 1rem; flex-wrap: wrap;">
+          <div>
+            <h2 style="margin:0;">Backpack 刷量</h2>
+            <p class="summary-sub" style="margin: .35rem 0 0;">市价买 → 市价卖（按差价阈值触发），统计成交量与磨损（含返佣后手续费）</p>
+          </div>
+          <span class="badge badge-muted" id="bp-volume-running">stopped</span>
+        </div>
+
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; margin-top: 1rem;">
+          <label>
+            交易对
+            <select id="bp-volume-symbol"></select>
+          </label>
+          <label>
+            单次刷量（base qty）
+            <input type="number" id="bp-volume-qty" min="0" step="0.001" value="0.2" />
+          </label>
+          <label>
+            次数（0=无限）
+            <input type="number" id="bp-volume-cycles" min="0" step="1" value="0" />
+          </label>
+          <label>
+            差价阈值（bps）
+            <input type="number" id="bp-volume-max-spread-bps" min="0" step="0.1" value="2" />
+          </label>
+        </div>
+
+        <div style="display:flex; gap:.75rem; align-items:center; margin-top: 1rem; flex-wrap: wrap;">
+          <button type="button" class="button-success" id="bp-volume-start">启动</button>
+          <button type="button" class="button-danger" id="bp-volume-stop">停止</button>
+          <p class="summary-sub" id="bp-volume-status" style="margin:0;">等待配置…</p>
+        </div>
+
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin-top: 1rem;">
+          <article class="card" style="background: rgba(79,156,255,.06); border: 1px solid rgba(79,156,255,.14);">
+            <h2>买一 / 卖一</h2>
+            <div class="value" id="bp-bbo-price">--</div>
+            <p class="summary-sub" id="bp-bbo-meta" style="margin-top:.35rem;">--</p>
+          </article>
+          <article class="card" style="background: rgba(79,156,255,.06); border: 1px solid rgba(79,156,255,.14);">
+            <h2>盘口容量（cap）</h2>
+            <div class="value" id="bp-bbo-cap">--</div>
+            <p class="summary-sub" id="bp-bbo-qty" style="margin-top:.35rem;">--</p>
+          </article>
+          <article class="card" style="background: rgba(79,156,255,.06); border: 1px solid rgba(79,156,255,.14);">
+            <h2>预计磨损（按当前数量）</h2>
+            <div class="value" id="bp-bbo-wear">--</div>
+            <p class="summary-sub" id="bp-bbo-wear-meta" style="margin-top:.35rem;">--</p>
+          </article>
+        </div>
+
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin-top: 1rem;">
+          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+            <h2>成交量（base）</h2>
+            <div class="value" id="bp-volume-base">--</div>
+          </article>
+          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+            <h2>成交额（quote）</h2>
+            <div class="value" id="bp-volume-quote">--</div>
+          </article>
+          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+            <h2>价差磨损</h2>
+            <div class="value" id="bp-wear-spread">--</div>
+          </article>
+          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+            <h2>手续费磨损（返佣后）</h2>
+            <div class="value" id="bp-wear-fee-net">--</div>
+            <p class="summary-sub" id="bp-fee-meta">taker 0.026% × 55%</p>
+          </article>
+          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+            <h2>每万磨损</h2>
+            <div class="value" id="bp-wear-per10k">--</div>
+          </article>
+        </div>
+
+        <div class="spread-table-wrapper" style="margin-top: 1rem;">
+          <table class="spread-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>交易对</th>
+                <th>价差(bps)</th>
+                <th>数量</th>
+                <th>BuyAvg</th>
+                <th>SellAvg</th>
+                <th>Spread磨损</th>
+                <th>Fee(返佣后)</th>
+                <th>总磨损(返佣后)</th>
+              </tr>
+            </thead>
+            <tbody id="bp-volume-recent"></tbody>
+          </table>
+        </div>
+      </article>
+    </section>
+
     <section class="agent-section">
       <div class="section-header">
         <div class="section-header-info">
@@ -2598,6 +2696,235 @@
     const agentCount = document.getElementById('agent-count');
     const updatedElement = document.getElementById('updated');
     const defaultPauseIndicator = document.getElementById('default-pause-indicator');
+
+    // Backpack volume booster controls
+    const bpSymbolSelect = document.getElementById('bp-volume-symbol');
+    const bpQtyInput = document.getElementById('bp-volume-qty');
+    const bpCyclesInput = document.getElementById('bp-volume-cycles');
+    const bpSpreadInput = document.getElementById('bp-volume-max-spread-bps');
+    const bpStartBtn = document.getElementById('bp-volume-start');
+    const bpStopBtn = document.getElementById('bp-volume-stop');
+    const bpStatus = document.getElementById('bp-volume-status');
+    const bpRunning = document.getElementById('bp-volume-running');
+    const bpVolumeBase = document.getElementById('bp-volume-base');
+    const bpVolumeQuote = document.getElementById('bp-volume-quote');
+    const bpWearSpread = document.getElementById('bp-wear-spread');
+    const bpWearFeeNet = document.getElementById('bp-wear-fee-net');
+    const bpWearPer10k = document.getElementById('bp-wear-per10k');
+    const bpFeeMeta = document.getElementById('bp-fee-meta');
+    const bpRecentBody = document.getElementById('bp-volume-recent');
+
+  // Backpack BBO preview
+  const bpBboPrice = document.getElementById('bp-bbo-price');
+  const bpBboMeta = document.getElementById('bp-bbo-meta');
+  const bpBboCap = document.getElementById('bp-bbo-cap');
+  const bpBboQty = document.getElementById('bp-bbo-qty');
+  const bpBboWear = document.getElementById('bp-bbo-wear');
+  const bpBboWearMeta = document.getElementById('bp-bbo-wear-meta');
+
+    function bpFormatNumber(value, decimals = 2) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return '--';
+      return num.toFixed(decimals);
+    }
+
+    function bpFormatMaybe(value, decimals = 6) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return '--';
+      return num.toFixed(decimals);
+    }
+
+    async function bpFetchJson(url, options) {
+      const resp = await fetch(url, options);
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data || data.ok === false) {
+        const err = (data && data.error) ? String(data.error) : `HTTP ${resp.status}`;
+        throw new Error(err);
+      }
+      return data;
+    }
+
+    async function bpLoadMarkets() {
+      try {
+        const data = await bpFetchJson('/api/backpack/volume/markets');
+        const markets = Array.isArray(data.markets) ? data.markets : [];
+        bpSymbolSelect.innerHTML = '';
+        for (const sym of markets) {
+          const opt = document.createElement('option');
+          opt.value = sym;
+          opt.textContent = sym;
+          bpSymbolSelect.appendChild(opt);
+        }
+        if (markets.length === 0) {
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'No PERP markets';
+          bpSymbolSelect.appendChild(opt);
+        }
+      } catch (e) {
+        bpStatus.textContent = `市场加载失败：${e.message}`;
+      }
+    }
+
+    function bpRenderBboPreview(bbo) {
+      if (!bbo) return;
+      const bid1 = bbo.bid1;
+      const ask1 = bbo.ask1;
+      const bidQty = bbo.bid1_qty;
+      const askQty = bbo.ask1_qty;
+      const spreadBps = bbo.spread_bps;
+
+      if (bpBboPrice) {
+        bpBboPrice.textContent = `bid ${bid1 || '--'} / ask ${ask1 || '--'}`;
+      }
+      if (bpBboMeta) {
+        bpBboMeta.textContent = `spread ${bpFormatNumber(spreadBps, 2)} bps；bidQty ${bidQty || '--'} / askQty ${askQty || '--'}`;
+      }
+      if (bpBboCap) {
+        bpBboCap.textContent = `${bbo.cap_qty || '--'} (safe ${bbo.safe_cap_qty || '--'})`;
+      }
+      if (bpBboQty) {
+        bpBboQty.textContent = `qty 输入 ${bbo.qty_input || '--'} → 执行估算 ${bbo.qty_exec || '--'}；safety ${bpFormatNumber(bbo.depth_safety_factor, 2)}`;
+      }
+
+      const wear = bbo.wear_est || {};
+      if (bpBboWear) {
+        bpBboWear.textContent = wear.wear_total_net_est || '--';
+      }
+      if (bpBboWearMeta) {
+        const per10k = (wear.wear_per_10k_est == null) ? '--' : bpFormatNumber(wear.wear_per_10k_est, 2);
+        bpBboWearMeta.textContent = `spread磨损 ${wear.wear_spread_est || '--'} + fee(返佣后) ${wear.fee_net_est || '--'}；每万 ${per10k}`;
+      }
+    }
+
+    async function bpRefreshBboPreview() {
+      const symbol = (bpSymbolSelect && bpSymbolSelect.value) ? bpSymbolSelect.value : '';
+      if (!symbol) return;
+      const qty = String(bpQtyInput && bpQtyInput.value ? bpQtyInput.value : '0');
+
+      // Keep these defaults consistent with start payload.
+      const params = new URLSearchParams({
+        symbol,
+        qty,
+        depth_safety_factor: '0.7',
+        fee_rate: '0.00026',
+        rebate_rate: '0.45'
+      });
+
+      try {
+        const data = await bpFetchJson(`/api/backpack/bbo?${params.toString()}`);
+        bpRenderBboPreview(data);
+      } catch (e) {
+        if (bpBboMeta) bpBboMeta.textContent = `BBO 获取失败：${e.message}`;
+      }
+    }
+
+    function bpRenderMetrics(summary, recent) {
+      if (!summary) return;
+      bpVolumeBase.textContent = summary.volume_base_total || '--';
+      bpVolumeQuote.textContent = summary.volume_quote_total || '--';
+      bpWearSpread.textContent = summary.wear_spread_total || '--';
+      bpWearFeeNet.textContent = summary.fee_total_net || '--';
+      bpWearPer10k.textContent = (summary.wear_per10k_net == null) ? '--' : bpFormatNumber(summary.wear_per10k_net, 2);
+      const feeRate = summary.fee_rate;
+      const rebateRate = summary.rebate_rate;
+      if (typeof feeRate === 'number' && typeof rebateRate === 'number') {
+        const netPct = feeRate * (1 - rebateRate) * 100;
+        bpFeeMeta.textContent = `taker ${(feeRate * 100).toFixed(3)}% × ${(1 - rebateRate) * 100}% = ${netPct.toFixed(4)}%`;
+      }
+
+      const rows = Array.isArray(recent) ? recent : [];
+      bpRecentBody.innerHTML = '';
+      for (const r of rows.slice(0, 50)) {
+        const tr = document.createElement('tr');
+        const ts = r.ts ? new Date(r.ts * 1000) : null;
+        const timeText = ts ? ts.toLocaleTimeString() : '--';
+        tr.innerHTML = `
+          <td>${timeText}</td>
+          <td>${r.symbol || '--'}</td>
+          <td>${bpFormatNumber(r.spread_bps, 2)}</td>
+          <td>${r.qty_exec || '--'}</td>
+          <td>${r.buy_avg || '--'}</td>
+          <td>${r.sell_avg || '--'}</td>
+          <td>${r.wear_spread || '--'}</td>
+          <td>${r.fee_net || '--'}</td>
+          <td>${r.wear_total_net || '--'}</td>
+        `;
+        bpRecentBody.appendChild(tr);
+      }
+    }
+
+    async function bpRefresh() {
+      try {
+        const status = await bpFetchJson('/api/backpack/volume/status');
+        bpRunning.textContent = status.running ? 'running' : 'stopped';
+        bpRunning.className = status.running ? 'badge badge-info' : 'badge badge-muted';
+        bpStatus.textContent = status.last_error ? `错误：${status.last_error}` : `已执行 ${status.cycles_done}/${status.cycles_target || 0}`;
+      } catch (e) {
+        bpStatus.textContent = `状态获取失败：${e.message}`;
+      }
+
+  // Always refresh BBO preview (shows when switching symbol even if not running).
+  await bpRefreshBboPreview();
+
+      try {
+        const metrics = await bpFetchJson('/api/backpack/volume/metrics');
+        bpRenderMetrics(metrics.summary, metrics.recent);
+      } catch (e) {
+        // keep status
+      }
+    }
+
+    bpStartBtn && bpStartBtn.addEventListener('click', async () => {
+      bpStatus.textContent = '启动中…';
+      try {
+        const body = {
+          symbol: bpSymbolSelect.value,
+          qty_per_cycle: String(bpQtyInput.value || '0'),
+          cycles: Number(bpCyclesInput.value || '0'),
+          max_spread_bps: Number(bpSpreadInput.value || '0'),
+          cooldown_ms: 1500,
+          depth_safety_factor: 0.7,
+          min_cap_qty: String(bpQtyInput.value || '0'),
+          fee_rate: 0.00026,
+          rebate_rate: 0.45
+        };
+        await bpFetchJson('/api/backpack/volume/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        bpStatus.textContent = '已启动';
+        await bpRefresh();
+      } catch (e) {
+        bpStatus.textContent = `启动失败：${e.message}`;
+      }
+    });
+
+    bpSymbolSelect && bpSymbolSelect.addEventListener('change', () => {
+      bpRefreshBboPreview();
+    });
+    bpQtyInput && bpQtyInput.addEventListener('change', () => {
+      bpRefreshBboPreview();
+    });
+    bpQtyInput && bpQtyInput.addEventListener('input', () => {
+      // Debounce-ish via timer tick; cheap enough to just rely on the 1s poll.
+    });
+
+    bpStopBtn && bpStopBtn.addEventListener('click', async () => {
+      bpStatus.textContent = '停止中…';
+      try {
+        await bpFetchJson('/api/backpack/volume/stop', { method: 'POST' });
+        bpStatus.textContent = '已停止';
+        await bpRefresh();
+      } catch (e) {
+        bpStatus.textContent = `停止失败：${e.message}`;
+      }
+    });
+
+    // Bootstrap
+  bpLoadMarkets().then(() => bpRefresh());
+    setInterval(bpRefresh, 1000);
     const pauseAllButton = document.getElementById('pause-all');
     const resumeAllButton = document.getElementById('resume-all');
     const runtimeElement = document.getElementById('runtime');

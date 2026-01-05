@@ -57,6 +57,46 @@ except Exception:  # pragma: no cover
 from aiohttp import ClientSession, ClientTimeout, web
 
 try:
+    from exchanges.backpack import BackpackClient
+    from trading_bot import TradingConfig
+except Exception:  # pragma: no cover
+    BackpackClient = None  # type: ignore[assignment]
+    TradingConfig = None  # type: ignore[assignment]
+
+
+def _make_backpack_client(symbol_hint: str = "ETH-PERP") -> Any:
+    """Create a minimal BackpackClient instance for public/account calls.
+
+    Note: BackpackClient is typed as accepting Dict[str, Any] (BaseExchangeClient), but
+    in this repo it's instantiated with TradingConfig throughout. We follow that convention.
+    """
+
+    assert BackpackClient is not None and TradingConfig is not None
+    base = "ETH"
+    try:
+        if isinstance(symbol_hint, str) and symbol_hint:
+            base = symbol_hint.split("-")[0].strip().upper() or base
+    except Exception:
+        pass
+
+    cfg = TradingConfig(
+        ticker=base,
+        contract_id="",
+        quantity=Decimal("0.01"),
+        take_profit=Decimal("0"),
+        tick_size=Decimal("0"),
+        direction="buy",
+        max_orders=1,
+        wait_time=1,
+        exchange="backpack",
+        grid_step=Decimal("-100"),
+        stop_price=Decimal("-1"),
+        pause_price=Decimal("-1"),
+        boost_mode=True,
+    )
+    return BackpackClient(cfg)  # type: ignore[arg-type]
+
+try:
     from .adjustments import AdjustmentAction, GrvtAdjustmentManager
 except ImportError:  # pragma: no cover - script execution path
     from adjustments import AdjustmentAction, GrvtAdjustmentManager
@@ -176,6 +216,121 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
 """
 
 LOGGER = logging.getLogger("hedge.coordinator")
+
+
+def _decimal(value: Any, default: str = "0") -> Decimal:
+    try:
+        if isinstance(value, Decimal):
+            return value
+        text = str(value).strip()
+        if not text:
+            return Decimal(default)
+        return Decimal(text)
+    except Exception:
+        return Decimal(default)
+
+
+def _now_ts() -> float:
+    return time.time()
+
+
+@dataclass
+class BackpackVolumeConfig:
+    symbol: str = ""
+    qty_per_cycle: Decimal = Decimal("0")
+    cycles: int = 0  # 0 = run until stopped
+    max_spread_bps: float = 0.0
+    cooldown_ms: int = 1500
+    depth_safety_factor: float = 0.7
+    min_cap_qty: Decimal = Decimal("0")
+    fee_rate: float = 0.00026
+    rebate_rate: float = 0.45
+    net_fee_rate: float = 0.000143  # fee_rate * (1 - rebate_rate)
+
+
+@dataclass
+class BackpackVolumeCycleRecord:
+    ts: float
+    symbol: str
+    bid1: Decimal
+    ask1: Decimal
+    bid1_qty: Decimal
+    ask1_qty: Decimal
+    spread_bps: float
+    qty_exec: Decimal
+    buy_avg: Decimal
+    sell_avg: Decimal
+    paired_qty: Decimal
+    wear_spread: Decimal
+    fee_gross: Decimal
+    fee_net: Decimal
+    wear_total_net: Decimal
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "ts": self.ts,
+            "symbol": self.symbol,
+            "bid1": str(self.bid1),
+            "ask1": str(self.ask1),
+            "bid1_qty": str(self.bid1_qty),
+            "ask1_qty": str(self.ask1_qty),
+            "spread_bps": self.spread_bps,
+            "qty_exec": str(self.qty_exec),
+            "buy_avg": str(self.buy_avg),
+            "sell_avg": str(self.sell_avg),
+            "paired_qty": str(self.paired_qty),
+            "wear_spread": str(self.wear_spread),
+            "fee_gross": str(self.fee_gross),
+            "fee_net": str(self.fee_net),
+            "wear_total_net": str(self.wear_total_net),
+        }
+
+
+@dataclass
+class BackpackVolumeSummary:
+    cycles_done: int = 0
+    volume_base_total: Decimal = Decimal("0")
+    volume_quote_total: Decimal = Decimal("0")
+    wear_spread_total: Decimal = Decimal("0")
+    fee_total_gross: Decimal = Decimal("0")
+    fee_total_net: Decimal = Decimal("0")
+    rebate_total: Decimal = Decimal("0")
+
+    def to_dict(self, cfg: BackpackVolumeConfig) -> Dict[str, Any]:
+        wear_total_net = self.wear_spread_total + self.fee_total_net
+        wear_per10k_net = None
+        try:
+            if self.volume_quote_total > 0:
+                wear_per10k_net = float((wear_total_net / self.volume_quote_total) * Decimal("10000"))
+        except Exception:
+            wear_per10k_net = None
+
+        return {
+            "cycles_done": self.cycles_done,
+            "volume_base_total": str(self.volume_base_total),
+            "volume_quote_total": str(self.volume_quote_total),
+            "wear_spread_total": str(self.wear_spread_total),
+            "fee_rate": cfg.fee_rate,
+            "rebate_rate": cfg.rebate_rate,
+            "fee_total_gross": str(self.fee_total_gross),
+            "fee_total_net": str(self.fee_total_net),
+            "rebate_total": str(self.rebate_total),
+            "wear_total_net": str(wear_total_net),
+            "wear_per10k_net": wear_per10k_net,
+        }
+
+
+@dataclass
+class BackpackVolumeState:
+    running: bool = False
+    run_id: str = ""
+    started_at: Optional[float] = None
+    last_error: str = ""
+    cfg: BackpackVolumeConfig = field(default_factory=BackpackVolumeConfig)
+    summary: BackpackVolumeSummary = field(default_factory=BackpackVolumeSummary)
+    recent: Deque[BackpackVolumeCycleRecord] = field(default_factory=lambda: deque(maxlen=200))
+    task: Optional[asyncio.Task] = None
+
 
 
 def _env_debug(name: str, default: bool = False) -> bool:
@@ -2983,6 +3138,10 @@ class CoordinatorApp:
             retention_seconds=3 * 24 * 3600,
         )
 
+        # Backpack volume booster state (single-runner).
+        self._bp_volume = BackpackVolumeState()
+        self._bp_volume_lock = asyncio.Lock()
+
         # Load persisted PARA auto balance config (if any)
         self._load_persisted_para_auto_balance_config()
         self._app = web.Application()
@@ -3016,6 +3175,16 @@ class CoordinatorApp:
                 web.post("/para/transfer", self.handle_para_transfer),
                 web.post("/para/adjust/ack", self.handle_para_adjust_ack),
                 web.get("/simulation/pnl", self.handle_simulation_pnl),
+
+                # Backpack volume booster
+                web.get("/api/backpack/volume/markets", self.handle_bp_volume_markets),
+                web.post("/api/backpack/volume/start", self.handle_bp_volume_start),
+                web.post("/api/backpack/volume/stop", self.handle_bp_volume_stop),
+                web.get("/api/backpack/volume/status", self.handle_bp_volume_status),
+                web.get("/api/backpack/volume/metrics", self.handle_bp_volume_metrics),
+
+                # Backpack BBO preview (L1 bid/ask + capacity + estimated wear)
+                web.get("/api/backpack/bbo", self.handle_bp_bbo_preview),
             ]
         )
         if self._vol_monitor:
@@ -3081,6 +3250,410 @@ class CoordinatorApp:
         if self._price_service:
             await self._price_service.close()
         await self._coordinator.stop_background_tasks()
+
+        # Stop backpack volume task if running.
+        async with self._bp_volume_lock:
+            task = self._bp_volume.task
+            self._bp_volume.running = False
+            self._bp_volume.task = None
+        if task:
+            task.cancel()
+            with suppress(Exception):
+                await task
+
+    async def handle_bp_volume_markets(self, request: web.Request) -> web.Response:
+        """List available Backpack PERP markets (e.g. ETH-PERP)."""
+        del request
+        if BackpackClient is None or TradingConfig is None:
+            return web.json_response({"ok": False, "error": "Backpack dependencies not available"}, status=500)
+
+        try:
+            client = _make_backpack_client("ETH-PERP")
+            markets = client.public_client.get_markets()  # type: ignore[union-attr]
+            out: List[str] = []
+            if isinstance(markets, list):
+                for market in markets:
+                    if not isinstance(market, dict):
+                        continue
+                    if str(market.get("marketType") or "").upper() != "PERP":
+                        continue
+                    symbol = str(market.get("symbol") or "").strip()
+                    if symbol:
+                        out.append(symbol)
+            out = sorted(set(out))
+            return web.json_response({"ok": True, "markets": out})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    async def handle_bp_volume_status(self, request: web.Request) -> web.Response:
+        del request
+        async with self._bp_volume_lock:
+            state = self._bp_volume
+            return web.json_response(
+                {
+                    "ok": True,
+                    "running": state.running,
+                    "run_id": state.run_id,
+                    "symbol": state.cfg.symbol,
+                    "started_at": state.started_at,
+                    "cycles_done": state.summary.cycles_done,
+                    "cycles_target": state.cfg.cycles,
+                    "last_error": state.last_error,
+                }
+            )
+
+    async def handle_bp_volume_metrics(self, request: web.Request) -> web.Response:
+        del request
+        async with self._bp_volume_lock:
+            state = self._bp_volume
+            return web.json_response(
+                {
+                    "ok": True,
+                    "summary": state.summary.to_dict(state.cfg),
+                    "recent": [rec.to_dict() for rec in list(state.recent)],
+                }
+            )
+
+    async def handle_bp_volume_start(self, request: web.Request) -> web.Response:
+        if BackpackClient is None or TradingConfig is None:
+            return web.json_response({"ok": False, "error": "Backpack dependencies not available"}, status=500)
+
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        symbol = str(payload.get("symbol") or "").strip()
+        if not symbol:
+            return web.json_response({"ok": False, "error": "symbol required"}, status=400)
+
+        cfg = BackpackVolumeConfig(
+            symbol=symbol,
+            qty_per_cycle=_decimal(payload.get("qty_per_cycle"), "0"),
+            cycles=int(payload.get("cycles") or 0),
+            max_spread_bps=float(payload.get("max_spread_bps") or 0.0),
+            cooldown_ms=int(payload.get("cooldown_ms") or 1500),
+            depth_safety_factor=float(payload.get("depth_safety_factor") or 0.7),
+            min_cap_qty=_decimal(payload.get("min_cap_qty"), "0"),
+            fee_rate=float(payload.get("fee_rate") or 0.00026),
+            rebate_rate=float(payload.get("rebate_rate") or 0.45),
+        )
+        cfg.net_fee_rate = cfg.fee_rate * max(0.0, 1.0 - cfg.rebate_rate)
+
+        if cfg.qty_per_cycle <= 0:
+            return web.json_response({"ok": False, "error": "qty_per_cycle must be > 0"}, status=400)
+        if cfg.max_spread_bps <= 0:
+            return web.json_response({"ok": False, "error": "max_spread_bps must be > 0"}, status=400)
+
+        async with self._bp_volume_lock:
+            if self._bp_volume.running and self._bp_volume.task:
+                return web.json_response({"ok": True, "running": True, "run_id": self._bp_volume.run_id})
+
+            self._bp_volume = BackpackVolumeState(
+                running=True,
+                run_id=uuid.uuid4().hex,
+                started_at=_now_ts(),
+                last_error="",
+                cfg=cfg,
+                summary=BackpackVolumeSummary(),
+                recent=deque(maxlen=200),
+            )
+            self._bp_volume.task = asyncio.create_task(self._bp_volume_runner(self._bp_volume.run_id))
+            return web.json_response({"ok": True, "running": True, "run_id": self._bp_volume.run_id})
+
+    async def handle_bp_volume_stop(self, request: web.Request) -> web.Response:
+        del request
+        async with self._bp_volume_lock:
+            self._bp_volume.running = False
+            task = self._bp_volume.task
+            self._bp_volume.task = None
+        if task:
+            task.cancel()
+        return web.json_response({"ok": True, "running": False})
+
+    @staticmethod
+    def _estimate_backpack_wear(
+        *,
+        bid1: Decimal,
+        ask1: Decimal,
+        qty: Decimal,
+        fee_rate: float,
+        net_fee_rate: float,
+    ) -> Dict[str, Any]:
+        """Estimate wear for a BUY->SELL market cycle using only L1.
+
+        We don't know the actual fill prices yet, so we approximate:
+        - buy_avg ~= ask1
+        - sell_avg ~= bid1
+
+        Returns quote-denominated amounts.
+        """
+        if qty <= 0 or bid1 <= 0 or ask1 <= 0:
+            return {
+                "qty": str(qty),
+                "buy_avg_est": str(Decimal("0")),
+                "sell_avg_est": str(Decimal("0")),
+                "volume_quote_est": str(Decimal("0")),
+                "wear_spread_est": str(Decimal("0")),
+                "fee_gross_est": str(Decimal("0")),
+                "fee_net_est": str(Decimal("0")),
+                "rebate_est": str(Decimal("0")),
+                "wear_total_net_est": str(Decimal("0")),
+                "wear_per_10k_est": None,
+            }
+
+        buy_avg = ask1
+        sell_avg = bid1
+        volume_quote = (buy_avg + sell_avg) * qty
+        wear_spread = (buy_avg - sell_avg) * qty
+        if wear_spread < 0:
+            wear_spread = abs(wear_spread)
+
+        fee_gross = volume_quote * Decimal(str(fee_rate))
+        fee_net = volume_quote * Decimal(str(net_fee_rate))
+        rebate = fee_gross - fee_net
+        wear_total_net = wear_spread + fee_net
+
+        wear_per_10k: Optional[float] = None
+        try:
+            if volume_quote > 0:
+                wear_per_10k = float((wear_total_net / volume_quote) * Decimal("10000"))
+        except Exception:
+            wear_per_10k = None
+
+        return {
+            "qty": str(qty),
+            "buy_avg_est": str(buy_avg),
+            "sell_avg_est": str(sell_avg),
+            "volume_quote_est": str(volume_quote),
+            "wear_spread_est": str(wear_spread),
+            "fee_gross_est": str(fee_gross),
+            "fee_net_est": str(fee_net),
+            "rebate_est": str(rebate),
+            "wear_total_net_est": str(wear_total_net),
+            "wear_per_10k_est": wear_per_10k,
+        }
+
+    async def handle_bp_bbo_preview(self, request: web.Request) -> web.Response:
+        """Preview Backpack L1 (bid/ask + qty), spread, and estimated wear for a given symbol.
+
+        Query params:
+        - symbol: e.g. ETH-PERP (required)
+        - qty: base qty to estimate wear for (optional; defaults to current cfg.qty_per_cycle)
+        - depth_safety_factor: optional; defaults to current cfg.depth_safety_factor
+        - fee_rate / rebate_rate: optional; defaults to current cfg values
+        """
+        if BackpackClient is None or TradingConfig is None:
+            return web.json_response({"ok": False, "error": "Backpack dependencies not available"}, status=500)
+
+        params = request.rel_url.query
+        symbol = str(params.get("symbol") or "").strip()
+        if not symbol:
+            return web.json_response({"ok": False, "error": "symbol required"}, status=400)
+
+        async with self._bp_volume_lock:
+            cfg = copy.deepcopy(self._bp_volume.cfg)
+
+        qty = _decimal(params.get("qty"), str(cfg.qty_per_cycle or "0"))
+        fee_rate = float(params.get("fee_rate") or cfg.fee_rate)
+        rebate_rate = float(params.get("rebate_rate") or cfg.rebate_rate)
+        net_fee_rate = fee_rate * max(0.0, 1.0 - rebate_rate)
+        depth_safety_factor = float(params.get("depth_safety_factor") or cfg.depth_safety_factor)
+
+        try:
+            client = _make_backpack_client(symbol)
+            bid1, bid1_qty, ask1, ask1_qty = await client.fetch_bbo_with_qty(symbol)
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": f"bbo_fetch_failed: {exc}"}, status=502)
+
+        mid = (bid1 + ask1) / Decimal("2") if (bid1 > 0 and ask1 > 0) else Decimal("0")
+        spread_abs = ask1 - bid1
+        spread_bps = 0.0
+        try:
+            if mid > 0:
+                spread_bps = float((spread_abs / mid) * Decimal("10000"))
+        except Exception:
+            spread_bps = 0.0
+
+        cap_qty = min(bid1_qty, ask1_qty)
+        safe_cap_qty = cap_qty * Decimal(str(max(0.0, min(depth_safety_factor, 1.0))))
+        qty_exec = min(qty, safe_cap_qty)
+
+        wear = self._estimate_backpack_wear(
+            bid1=bid1,
+            ask1=ask1,
+            qty=qty_exec,
+            fee_rate=fee_rate,
+            net_fee_rate=net_fee_rate,
+        )
+
+        return web.json_response(
+            {
+                "ok": True,
+                "symbol": symbol,
+                "bid1": str(bid1),
+                "bid1_qty": str(bid1_qty),
+                "ask1": str(ask1),
+                "ask1_qty": str(ask1_qty),
+                "spread_abs": str(spread_abs),
+                "spread_bps": spread_bps,
+                "cap_qty": str(cap_qty),
+                "depth_safety_factor": depth_safety_factor,
+                "safe_cap_qty": str(safe_cap_qty),
+                "qty_input": str(qty),
+                "qty_exec": str(qty_exec),
+                "fee_rate": fee_rate,
+                "rebate_rate": rebate_rate,
+                "net_fee_rate": net_fee_rate,
+                "wear_est": wear,
+                "ts": _now_ts(),
+            }
+        )
+
+    async def _bp_volume_runner(self, run_id: str) -> None:
+        """Background task for Backpack volume boosting (BUY market -> SELL market)."""
+        # One runner at a time; stop when state.running flips or run_id changes.
+        client = _make_backpack_client()
+
+        consecutive_failures = 0
+        last_cycle_at: float = 0.0
+
+        while True:
+            async with self._bp_volume_lock:
+                state = self._bp_volume
+                if (not state.running) or state.run_id != run_id:
+                    return
+                cfg = state.cfg
+
+            now = _now_ts()
+            cooldown_s = max(0.0, float(cfg.cooldown_ms) / 1000.0)
+            if last_cycle_at and (now - last_cycle_at) < cooldown_s:
+                await asyncio.sleep(min(0.25, cooldown_s))
+                continue
+
+            # Fetch L1.
+            try:
+                bid1, bid1_qty, ask1, ask1_qty = await client.fetch_bbo_with_qty(cfg.symbol)
+            except Exception as exc:
+                async with self._bp_volume_lock:
+                    if self._bp_volume.run_id == run_id:
+                        self._bp_volume.last_error = f"bbo_fetch_failed: {exc}"
+                await asyncio.sleep(0.5)
+                continue
+
+            if bid1 <= 0 or ask1 <= 0:
+                await asyncio.sleep(0.5)
+                continue
+
+            mid = (bid1 + ask1) / Decimal("2")
+            spread_abs = ask1 - bid1
+            spread_bps = 0.0
+            try:
+                if mid > 0:
+                    spread_bps = float((spread_abs / mid) * Decimal("10000"))
+            except Exception:
+                spread_bps = 0.0
+
+            cap_qty = min(bid1_qty, ask1_qty)
+            safe_qty = cap_qty * Decimal(str(max(0.0, min(cfg.depth_safety_factor, 1.0))))
+            qty_exec = min(cfg.qty_per_cycle, safe_qty)
+
+            if cfg.min_cap_qty > 0 and cap_qty < cfg.min_cap_qty:
+                await asyncio.sleep(0.25)
+                continue
+            if spread_bps <= 0 or spread_bps > cfg.max_spread_bps:
+                await asyncio.sleep(0.25)
+                continue
+            if qty_exec <= 0:
+                await asyncio.sleep(0.25)
+                continue
+
+            # Execute BUY -> SELL (market), sell qty follows buy filled.
+            try:
+                buy = await client.place_market_order(cfg.symbol, qty_exec, "buy")
+                if not buy.success or (buy.filled_size and buy.filled_size <= 0):
+                    raise RuntimeError(buy.error_message or "buy failed")
+                buy_filled_qty = buy.filled_size if buy.filled_size is not None else (buy.size or Decimal("0"))
+                buy_avg = buy.price or Decimal("0")
+                if buy_filled_qty <= 0 or buy_avg <= 0:
+                    # place_market_order currently computes avg price; still guard
+                    raise RuntimeError("buy missing avg/filled")
+
+                sell_qty = buy_filled_qty
+                sell = await client.place_market_order(cfg.symbol, sell_qty, "sell")
+                if not sell.success or (sell.filled_size and sell.filled_size <= 0):
+                    raise RuntimeError(sell.error_message or "sell failed")
+                sell_filled_qty = sell.filled_size if sell.filled_size is not None else (sell.size or Decimal("0"))
+                sell_avg = sell.price or Decimal("0")
+                if sell_filled_qty <= 0 or sell_avg <= 0:
+                    raise RuntimeError("sell missing avg/filled")
+
+            except Exception as exc:
+                consecutive_failures += 1
+                async with self._bp_volume_lock:
+                    if self._bp_volume.run_id == run_id:
+                        self._bp_volume.last_error = f"cycle_failed: {exc}"
+                        if consecutive_failures >= 3:
+                            self._bp_volume.running = False
+                await asyncio.sleep(0.5)
+                continue
+
+            consecutive_failures = 0
+            last_cycle_at = _now_ts()
+
+            paired_qty = min(buy_filled_qty, sell_filled_qty)
+            buy_notional = buy_avg * buy_filled_qty
+            sell_notional = sell_avg * sell_filled_qty
+            volume_quote = buy_notional + sell_notional
+            volume_base = buy_filled_qty + sell_filled_qty
+
+            wear_spread = (buy_avg - sell_avg) * paired_qty
+            if wear_spread < 0:
+                wear_spread = abs(wear_spread)
+
+            fee_gross = volume_quote * Decimal(str(cfg.fee_rate))
+            fee_net = volume_quote * Decimal(str(cfg.net_fee_rate))
+            wear_total_net = wear_spread + fee_net
+
+            rec = BackpackVolumeCycleRecord(
+                ts=_now_ts(),
+                symbol=cfg.symbol,
+                bid1=bid1,
+                ask1=ask1,
+                bid1_qty=bid1_qty,
+                ask1_qty=ask1_qty,
+                spread_bps=spread_bps,
+                qty_exec=qty_exec,
+                buy_avg=buy_avg,
+                sell_avg=sell_avg,
+                paired_qty=paired_qty,
+                wear_spread=wear_spread,
+                fee_gross=fee_gross,
+                fee_net=fee_net,
+                wear_total_net=wear_total_net,
+            )
+
+            async with self._bp_volume_lock:
+                if self._bp_volume.run_id != run_id:
+                    return
+                self._bp_volume.recent.appendleft(rec)
+                self._bp_volume.summary.cycles_done += 1
+                self._bp_volume.summary.volume_base_total += volume_base
+                self._bp_volume.summary.volume_quote_total += volume_quote
+                self._bp_volume.summary.wear_spread_total += wear_spread
+                self._bp_volume.summary.fee_total_gross += fee_gross
+                self._bp_volume.summary.fee_total_net += fee_net
+                self._bp_volume.summary.rebate_total += (fee_gross - fee_net)
+
+                # Stop if reached target cycles (non-zero).
+                if self._bp_volume.cfg.cycles > 0 and self._bp_volume.summary.cycles_done >= self._bp_volume.cfg.cycles:
+                    self._bp_volume.running = False
+                    return
+
+            # Small yield.
+            await asyncio.sleep(0)
 
     async def handle_dashboard_redirect(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request, redirect_on_fail=True)
