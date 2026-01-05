@@ -32,6 +32,7 @@ import logging
 import math
 import os
 import json
+import sys
 import secrets
 import signal
 import statistics
@@ -60,6 +61,14 @@ try:
     from exchanges.backpack import BackpackClient
     from trading_bot import TradingConfig
 except Exception:  # pragma: no cover
+    # Keep imports soft so the coordinator can still boot for non-Backpack use,
+    # but provide high-signal diagnostics when explicitly enabled.
+    if os.getenv("HEDGE_COORD_DEBUG") in {"1", "true", "True", "yes", "on"}:
+        logging.getLogger("hedge.coordinator").exception(
+            "[debug] Failed to import Backpack deps (BackpackClient/TradingConfig). cwd=%s sys.path[0:5]=%s",
+            os.getcwd(),
+            sys.path[:5],
+        )
     BackpackClient = None  # type: ignore[assignment]
     TradingConfig = None  # type: ignore[assignment]
 
