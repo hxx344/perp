@@ -3231,7 +3231,6 @@ class CoordinatorApp:
                 web.post("/api/backpack/volume/stop", self.handle_bp_volume_stop),
                 web.get("/api/backpack/volume/status", self.handle_bp_volume_status),
                 web.get("/api/backpack/volume/metrics", self.handle_bp_volume_metrics),
-                web.get("/api/backpack/volume/history/get", self.handle_bp_volume_history_get),
                 web.post("/api/backpack/volume/history/clear", self.handle_bp_volume_history_clear),
 
                 # Backpack BBO preview (L1 bid/ask + capacity + estimated wear)
@@ -3447,40 +3446,20 @@ class CoordinatorApp:
             self._persist_bp_volume_snapshot(live_symbol, summary, recent)
             return web.json_response({"ok": True, "summary": summary, "recent": recent, "symbol": live_symbol, "source": "memory"})
 
-        # Runner not active: try persisted snapshot first (preferred).
+        # Runner not active: STRICTLY return persisted snapshot (or empty) to avoid confusing
+        # "memory vs disk" mixes. This keeps "clear" behavior stable across refresh.
         pick_symbol = symbol_q or live_symbol
-        if pick_symbol:
-            snap = self._get_bp_volume_history_snapshot(pick_symbol)
-            if snap:
-                return web.json_response(
-                    {
-                        "ok": True,
-                        "summary": snap.get("summary") or {},
-                        "recent": snap.get("recent") or [],
-                        "symbol": pick_symbol,
-                        "source": "disk",
-                        "updated_at": snap.get("updated_at"),
-                    }
-                )
-
-        # Fallback: return in-memory (mostly for first load / legacy behavior).
-        if live_symbol:
-            self._persist_bp_volume_snapshot(live_symbol, summary, recent)
-        return web.json_response({"ok": True, "summary": summary, "recent": recent, "symbol": live_symbol or None, "source": "memory"})
-
-    async def handle_bp_volume_history_get(self, request: web.Request) -> web.Response:
-        symbol = str(request.query.get("symbol") or "").strip().upper()
-        if not symbol:
-            return web.json_response({"ok": False, "error": "symbol required"}, status=400)
-        snap = self._get_bp_volume_history_snapshot(symbol)
+        if not pick_symbol:
+            return web.json_response({"ok": True, "summary": {}, "recent": [], "symbol": None, "source": "disk", "updated_at": None})
+        snap = self._get_bp_volume_history_snapshot(pick_symbol)
         if not snap:
-            return web.json_response({"ok": True, "symbol": symbol, "summary": {}, "recent": [], "source": "disk", "updated_at": None})
+            return web.json_response({"ok": True, "summary": {}, "recent": [], "symbol": pick_symbol, "source": "disk", "updated_at": None})
         return web.json_response(
             {
                 "ok": True,
-                "symbol": symbol,
                 "summary": snap.get("summary") or {},
                 "recent": snap.get("recent") or [],
+                "symbol": pick_symbol,
                 "source": "disk",
                 "updated_at": snap.get("updated_at"),
             }
