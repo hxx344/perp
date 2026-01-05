@@ -2809,8 +2809,16 @@
       bpRenderMetrics(cached.summary, cached.recent);
       const ts = cached.updated_at ? new Date(cached.updated_at) : null;
       const timeText = ts ? ts.toLocaleString() : '--';
-      bpStatus.textContent = `显示缓存数据（${bpNormalizeSymbol(sym)}）· ${timeText}`;
+      bpStatus.textContent = `显示缓存数据（view ${bpNormalizeSymbol(sym)}）· ${timeText}`;
       return true;
+    }
+
+    function bpPickLiveSymbol(statusPayload, metricsPayload) {
+      const statusSym = statusPayload && statusPayload.symbol ? bpNormalizeSymbol(statusPayload.symbol) : '';
+      if (statusSym) return statusSym;
+      const recent = metricsPayload && Array.isArray(metricsPayload.recent) ? metricsPayload.recent : null;
+      const recSym = recent && recent.length && recent[0] && recent[0].symbol ? bpNormalizeSymbol(recent[0].symbol) : '';
+      return recSym;
     }
 
     async function bpFetchJson(url, options) {
@@ -2945,14 +2953,18 @@
     }
 
     async function bpRefresh() {
+      const viewingSymbol = bpSymbolSelect && bpSymbolSelect.value ? bpNormalizeSymbol(bpSymbolSelect.value) : '';
+      let statusPayload = null;
       try {
-        const status = await bpFetchJson('/api/backpack/volume/status');
-        bpRunning.textContent = status.running ? 'running' : 'stopped';
-        bpRunning.className = status.running ? 'badge badge-info' : 'badge badge-muted';
-        bpStatus.textContent = status.last_error ? `错误：${status.last_error}` : `已执行 ${status.cycles_done}/${status.cycles_target || 0}`;
+        statusPayload = await bpFetchJson('/api/backpack/volume/status');
+        bpRunning.textContent = statusPayload.running ? 'running' : 'stopped';
+        bpRunning.className = statusPayload.running ? 'badge badge-info' : 'badge badge-muted';
+        const liveSym = bpPickLiveSymbol(statusPayload, null);
+        const baseText = statusPayload.last_error ? `错误：${statusPayload.last_error}` : `已执行 ${statusPayload.cycles_done}/${statusPayload.cycles_target || 0}`;
+        bpStatus.textContent = `${baseText} · live ${liveSym || '-'} · view ${viewingSymbol || '-'}`;
       } catch (e) {
         // If backend is down, keep UI functional by falling back to per-symbol cache.
-        const sym = bpSymbolSelect && bpSymbolSelect.value ? bpSymbolSelect.value : '';
+        const sym = viewingSymbol;
         const ok = bpApplyCacheToUI(sym);
         bpStatus.textContent = ok ? bpStatus.textContent : `状态获取失败：${e.message}`;
       }
@@ -2962,13 +2974,21 @@
 
       try {
         const metrics = await bpFetchJson('/api/backpack/volume/metrics');
-        bpRenderMetrics(metrics.summary, metrics.recent);
-        // Persist the latest snapshot under the currently selected symbol.
-        const sym = bpSymbolSelect && bpSymbolSelect.value ? bpSymbolSelect.value : '';
-        bpWriteCache(sym, { summary: metrics.summary, recent: metrics.recent });
+        const liveSym = bpPickLiveSymbol(statusPayload, metrics);
+
+        // Always persist under the *live* symbol (the one actually running on backend).
+        if (liveSym) bpWriteCache(liveSym, { summary: metrics.summary, recent: metrics.recent });
+
+        // Only update the visible cards/table if the user is viewing the same symbol as live.
+        if (!viewingSymbol || (liveSym && liveSym === viewingSymbol)) {
+          bpRenderMetrics(metrics.summary, metrics.recent);
+        } else {
+          // User is viewing another symbol; keep showing its cached snapshot.
+          bpApplyCacheToUI(viewingSymbol);
+        }
       } catch (e) {
         // Backend metrics unavailable: show cached snapshot for selected symbol (if any).
-        const sym = bpSymbolSelect && bpSymbolSelect.value ? bpSymbolSelect.value : '';
+        const sym = viewingSymbol;
         bpApplyCacheToUI(sym);
       }
     }
