@@ -2810,6 +2810,11 @@
       return true;
     }
 
+    function bpShowNoCache(sym) {
+      bpResetMetricsUI();
+      return false;
+    }
+
     function bpPickLiveSymbol(statusPayload, metricsPayload) {
       const statusSym = statusPayload && statusPayload.symbol ? bpNormalizeSymbol(statusPayload.symbol) : '';
       if (statusSym) return statusSym;
@@ -2998,13 +3003,17 @@
         if (!viewingSymbol || (liveSym && liveSym === viewingSymbol)) {
           bpRenderMetrics(metrics.summary, metrics.recent);
         } else {
-          // User is viewing another symbol; keep showing its cached snapshot.
-          bpApplyCacheToUI(viewingSymbol);
+          // User is viewing another symbol.
+          // - If it has cache, show it.
+          // - If not, show explicit empty state (do NOT leave live metrics on screen).
+          const ok = bpApplyCacheToUI(viewingSymbol);
+          if (!ok) bpShowNoCache(viewingSymbol);
         }
       } catch (e) {
         // Backend metrics unavailable: show cached snapshot for selected symbol (if any).
         const sym = viewingSymbol;
-        bpApplyCacheToUI(sym);
+        const ok = bpApplyCacheToUI(sym);
+        if (!ok) bpShowNoCache(sym);
       }
     }
 
@@ -3037,7 +3046,10 @@
     bpSymbolSelect && bpSymbolSelect.addEventListener('change', () => {
       const sym = bpSymbolSelect.value;
       // Immediately switch cards/table to the selected symbol (cache first).
-      if (sym) bpApplyCacheToUI(sym);
+      if (sym) {
+        const ok = bpApplyCacheToUI(sym);
+        if (!ok) bpShowNoCache(sym);
+      }
       // Always refresh BBO preview for the new symbol.
       bpRefreshBboPreview();
     });
@@ -3045,8 +3057,10 @@
     bpClearHistoryBtn && bpClearHistoryBtn.addEventListener('click', () => {
       const sym = bpSymbolSelect && bpSymbolSelect.value ? bpSymbolSelect.value : '';
       bpClearCache(sym);
-      bpResetMetricsUI();
+      bpShowNoCache(sym);
       bpStatus.textContent = `已清除 ${bpNormalizeSymbol(sym) || '-'} 历史数据`;
+      // Re-render status line on next tick without waiting for the 1s interval.
+      setTimeout(() => { bpRefresh(); }, 0);
     });
     bpQtyInput && bpQtyInput.addEventListener('change', () => {
       bpRefreshBboPreview();
