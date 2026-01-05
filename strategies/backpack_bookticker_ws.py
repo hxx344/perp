@@ -60,11 +60,8 @@ class BackpackBookTickerWS:
 
     async def stop(self) -> None:
         self._stop.set()
-        task = self._task
-        if task:
-            task.cancel()
-            with suppress(Exception):
-                await task
+
+        # Close the websocket first to unblock `recv()` in the background task.
         async with self._lock:
             ws = self._ws
             self._ws = None
@@ -72,6 +69,21 @@ class BackpackBookTickerWS:
         if ws:
             with suppress(Exception):
                 await ws.close()
+
+        task = self._task
+        if not task:
+            return
+
+        # Give the task a chance to exit cleanly after the close.
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except asyncio.TimeoutError:
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+        except asyncio.CancelledError:
+            # Treat as expected during application shutdown.
+            return
 
     def last_update_ts(self, symbol: str) -> Optional[float]:
         q = self._quotes.get(symbol)
