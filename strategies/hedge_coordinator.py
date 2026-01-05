@@ -218,6 +218,11 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
 LOGGER = logging.getLogger("hedge.coordinator")
 
 
+def _coord_debug_enabled() -> bool:
+    # Coordinator-wide debug switch (safe to enable in production temporarily).
+    return _env_debug("HEDGE_COORD_DEBUG", False)
+
+
 def _decimal(value: Any, default: str = "0") -> Decimal:
     try:
         if isinstance(value, Decimal):
@@ -3263,13 +3268,34 @@ class CoordinatorApp:
 
     async def handle_bp_volume_markets(self, request: web.Request) -> web.Response:
         """List available Backpack PERP markets (e.g. ETH-PERP)."""
-        del request
+        if _coord_debug_enabled():
+            LOGGER.info(
+                "[debug] bp_volume_markets request: remote=%s method=%s path=%s query=%s",
+                request.remote,
+                request.method,
+                request.path,
+                dict(request.query),
+            )
         if BackpackClient is None or TradingConfig is None:
+            if _coord_debug_enabled():
+                LOGGER.warning(
+                    "[debug] Backpack dependencies missing: BackpackClient=%s TradingConfig=%s",
+                    "ok" if BackpackClient is not None else "None",
+                    "ok" if TradingConfig is not None else "None",
+                )
             return web.json_response({"ok": False, "error": "Backpack dependencies not available"}, status=500)
 
         try:
             client = _make_backpack_client("ETH-PERP")
+            if _coord_debug_enabled():
+                LOGGER.info("[debug] created Backpack client: %s", type(client).__name__)
             markets = client.public_client.get_markets()  # type: ignore[union-attr]
+            if _coord_debug_enabled():
+                LOGGER.info(
+                    "[debug] markets payload type=%s len=%s",
+                    type(markets).__name__,
+                    (len(markets) if isinstance(markets, list) else "-"),
+                )
             out: List[str] = []
             if isinstance(markets, list):
                 for market in markets:
@@ -3283,6 +3309,7 @@ class CoordinatorApp:
             out = sorted(set(out))
             return web.json_response({"ok": True, "markets": out})
         except Exception as exc:
+            LOGGER.exception("bp_volume_markets failed: %s: %s", type(exc).__name__, exc)
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
     async def handle_bp_volume_status(self, request: web.Request) -> web.Response:
@@ -5740,7 +5767,13 @@ async def _run_app(args: argparse.Namespace) -> None:
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _shutdown_handler)
+        try:
+            loop.add_signal_handler(sig, _shutdown_handler)
+        except (NotImplementedError, RuntimeError):
+            # Windows (ProactorEventLoop) doesn't support add_signal_handler.
+            # Fallback: rely on Ctrl+C / process termination; we also keep the server
+            # alive instead of crashing at startup.
+            LOGGER.warning("Signal handlers not supported on this event loop (%s); graceful shutdown via signals disabled", type(loop).__name__)
 
     await stop_event.wait()
 

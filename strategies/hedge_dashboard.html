@@ -2736,10 +2736,18 @@
 
     async function bpFetchJson(url, options) {
       const resp = await fetch(url, options);
-      const data = await resp.json().catch(() => ({}));
+      const text = await resp.text();
+      const data = (() => {
+        try { return JSON.parse(text || '{}'); } catch { return {}; }
+      })();
       if (!resp.ok || !data || data.ok === false) {
-        const err = (data && data.error) ? String(data.error) : `HTTP ${resp.status}`;
-        throw new Error(err);
+        const bodyPreview = (text || '').slice(0, 200).replace(/\s+/g, ' ').trim();
+        const err = (data && data.error)
+          ? String(data.error)
+          : `HTTP ${resp.status}`;
+
+        // Help debug common issues: auth redirect/html error pages, proxy blocks, etc.
+        throw new Error(`${err}${bodyPreview ? ` | body: ${bodyPreview}` : ''}`);
       }
       return data;
     }
