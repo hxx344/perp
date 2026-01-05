@@ -2887,11 +2887,16 @@
       const askQty = bbo.ask1_qty;
       const spreadBps = bbo.spread_bps;
 
+      const source = (bbo.source || '').toString();
+      const ageMs = (bbo.age_ms == null) ? null : Number(bbo.age_ms);
+      const sourceText = source ? source.toUpperCase() : '--';
+      const ageText = (ageMs == null || !Number.isFinite(ageMs)) ? '--' : `${bpFormatNumber(ageMs, 0)}ms`;
+
       if (bpBboPrice) {
         bpBboPrice.textContent = `bid ${bid1 || '--'} / ask ${ask1 || '--'}`;
       }
       if (bpBboMeta) {
-        bpBboMeta.textContent = `spread ${bpFormatNumber(spreadBps, 2)} bps；bidQty ${bidQty || '--'} / askQty ${askQty || '--'}`;
+        bpBboMeta.textContent = `spread ${bpFormatNumber(spreadBps, 2)} bps；bidQty ${bidQty || '--'} / askQty ${askQty || '--'}；source ${sourceText}；age ${ageText}`;
       }
       if (bpBboCap) {
         bpBboCap.textContent = `${bbo.cap_qty || '--'} (safe ${bbo.safe_cap_qty || '--'})`;

@@ -71,6 +71,13 @@ except Exception:  # pragma: no cover
 
 from aiohttp import ClientSession, ClientTimeout, web
 
+# Optional: Backpack public `bookTicker.<symbol>` WS cache for faster L1.
+# Kept in a standalone module to avoid inflating this (very large) file.
+try:
+    from strategies.backpack_bookticker_ws import BackpackBookTickerWS
+except Exception:  # pragma: no cover
+    BackpackBookTickerWS = None  # type: ignore[assignment]
+
 try:
     from exchanges.backpack import BackpackClient
     from trading_bot import TradingConfig
@@ -3170,6 +3177,12 @@ class CoordinatorApp:
         self._bp_volume = BackpackVolumeState()
         self._bp_volume_lock = asyncio.Lock()
 
+        # Backpack WS L1 cache (best-effort; falls back to HTTP when unavailable).
+        self._bp_bbo_ws = None
+        if BackpackBookTickerWS is not None:
+            with suppress(Exception):
+                self._bp_bbo_ws = BackpackBookTickerWS()
+
         # Load persisted PARA auto balance config (if any)
         self._load_persisted_para_auto_balance_config()
         self._app = web.Application()
@@ -3269,6 +3282,9 @@ class CoordinatorApp:
         del app  # unused
         if self._vol_monitor:
             await self._vol_monitor.start()
+        if self._bp_bbo_ws is not None:
+            with suppress(Exception):
+                await self._bp_bbo_ws.start()
         await self._coordinator.start_background_tasks()
 
     async def _on_cleanup(self, app: web.Application) -> None:
@@ -3278,6 +3294,10 @@ class CoordinatorApp:
         if self._price_service:
             await self._price_service.close()
         await self._coordinator.stop_background_tasks()
+
+        if self._bp_bbo_ws is not None:
+            with suppress(Exception):
+                await self._bp_bbo_ws.stop()
 
         # Stop backpack volume task if running.
         async with self._bp_volume_lock:
@@ -3512,11 +3532,33 @@ class CoordinatorApp:
         net_fee_rate = fee_rate * max(0.0, 1.0 - rebate_rate)
         depth_safety_factor = float(params.get("depth_safety_factor") or cfg.depth_safety_factor)
 
-        try:
-            client = _make_backpack_client(symbol)
-            bid1, bid1_qty, ask1, ask1_qty = await client.fetch_bbo_with_qty(symbol)
-        except Exception as exc:
-            return web.json_response({"ok": False, "error": f"bbo_fetch_failed: {exc}"}, status=502)
+        source = "http"
+        age_ms: Optional[float] = None
+
+        bid1: Decimal = Decimal("0")
+        bid1_qty: Decimal = Decimal("0")
+        ask1: Decimal = Decimal("0")
+        ask1_qty: Decimal = Decimal("0")
+
+        quote: Optional[Tuple[Decimal, Decimal, Decimal, Decimal]] = None
+        if getattr(self, "_bp_bbo_ws", None) is not None:
+            with suppress(Exception):
+                quote = await self._bp_bbo_ws.get_quote(symbol)  # type: ignore[union-attr]
+            if quote:
+                last_ts = None
+                with suppress(Exception):
+                    last_ts = self._bp_bbo_ws.last_update_ts(symbol)  # type: ignore[union-attr]
+                if last_ts:
+                    age_ms = max(0.0, (time.time() - float(last_ts)) * 1000.0)
+                source = "ws"
+                bid1, bid1_qty, ask1, ask1_qty = quote
+            
+        if not quote:
+            try:
+                client = _make_backpack_client(symbol)
+                bid1, bid1_qty, ask1, ask1_qty = await client.fetch_bbo_with_qty(symbol)
+            except Exception as exc:
+                return web.json_response({"ok": False, "error": f"bbo_fetch_failed: {exc}"}, status=502)
 
         mid = (bid1 + ask1) / Decimal("2") if (bid1 > 0 and ask1 > 0) else Decimal("0")
         spread_abs = ask1 - bid1
@@ -3543,6 +3585,8 @@ class CoordinatorApp:
             {
                 "ok": True,
                 "symbol": symbol,
+                "source": source,
+                "age_ms": age_ms,
                 "bid1": str(bid1),
                 "bid1_qty": str(bid1_qty),
                 "ask1": str(ask1),
