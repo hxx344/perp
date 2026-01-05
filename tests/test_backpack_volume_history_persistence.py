@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import asyncio
 
 
 def test_bp_volume_history_clear_persists(monkeypatch, tmp_path):
@@ -10,6 +11,10 @@ def test_bp_volume_history_clear_persists(monkeypatch, tmp_path):
 
     history_path = tmp_path / "bp_volume_history.json"
     monkeypatch.setattr(hc, "BP_VOLUME_HISTORY_FILE", history_path)
+
+    # Windows + Python 3.9: asyncio.Lock() requires an event loop to be set.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     # No auto-load on purpose; we want deterministic snapshot.
     app = hc.CoordinatorApp(enable_volatility_monitor=False)
@@ -35,6 +40,8 @@ def test_bp_volume_history_clear_persists(monkeypatch, tmp_path):
 
     app3 = hc.CoordinatorApp(enable_volatility_monitor=False)
     assert app3._get_bp_volume_history_snapshot("ETH-PERP") is None
+
+    loop.close()
 
     # File should be valid JSON dict.
     payload = json.loads(history_path.read_text(encoding="utf-8"))

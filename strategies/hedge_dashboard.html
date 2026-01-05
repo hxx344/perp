@@ -2737,6 +2737,14 @@
       return num.toFixed(decimals);
     }
 
+    // For numeric strings coming from backend, keep at most 4 decimals for readability.
+    function bpFormatAtMost4(value) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return '--';
+      // Strip trailing zeros so we keep "at most" 4 decimals.
+      return num.toFixed(4).replace(/\.?(0+)$/, (m) => (m.startsWith('.') ? '' : m));
+    }
+
     function bpFormatMaybe(value, decimals = 6) {
       const num = Number(value);
       if (!Number.isFinite(num)) return '--';
@@ -2787,7 +2795,7 @@
       });
       bpWearPer10kEst.textContent = (est == null || !Number.isFinite(est))
         ? '预估：--'
-        : `预估：${bpFormatNumber(est, 2)}/万`;
+        : `预估：${bpFormatAtMost4(est)}/万`;
     }
     function bpShowNoCache(sym) {
       bpResetMetricsUI();
@@ -2878,13 +2886,16 @@
 
       const wear = bbo.wear_est || {};
       if (bpBboWear) {
-        bpBboWear.textContent = wear.wear_total_net_est || '--';
+        bpBboWear.textContent = (wear.wear_total_net_est == null) ? '--' : bpFormatAtMost4(wear.wear_total_net_est);
       }
       if (bpBboWearMeta) {
-        const per10k = (wear.wear_per_10k_est == null) ? '--' : bpFormatNumber(wear.wear_per_10k_est, 2);
+        const per10k = (wear.wear_per_10k_est == null) ? '--' : bpFormatAtMost4(wear.wear_per_10k_est);
         const qtyExec = bbo.qty_exec || wear.qty || '--';
         const notional = wear.volume_quote_est || '--';
-        bpBboWearMeta.textContent = `spread磨损 ${wear.wear_spread_est || '--'} + fee磨损(返佣后) ${wear.fee_net_est || '--'} = 合计磨损 ${wear.wear_total_net_est || '--'}；每万 ${per10k}；qty ${qtyExec}；notional ${notional}`;
+        const wearSpread = (wear.wear_spread_est == null) ? '--' : bpFormatAtMost4(wear.wear_spread_est);
+        const feeNet = (wear.fee_net_est == null) ? '--' : bpFormatAtMost4(wear.fee_net_est);
+        const wearTotal = (wear.wear_total_net_est == null) ? '--' : bpFormatAtMost4(wear.wear_total_net_est);
+        bpBboWearMeta.textContent = `spread磨损 ${wearSpread} + fee磨损(返佣后) ${feeNet} = 合计磨损 ${wearTotal}；每万 ${per10k}；qty ${qtyExec}；notional ${notional}`;
       }
 
       // Update per-10k estimate card from current L1 BBO + fees.
