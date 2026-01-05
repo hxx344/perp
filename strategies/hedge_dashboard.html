@@ -2542,6 +2542,7 @@
           <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
             <h2>每万磨损</h2>
             <div class="value" id="bp-wear-per10k">--</div>
+            <p class="summary-sub" id="bp-wear-per10k-est">预估：--</p>
           </article>
         </div>
 
@@ -2718,6 +2719,7 @@
     const bpWearFeeNet = document.getElementById('bp-wear-fee-net');
   const bpWearTotalNet = document.getElementById('bp-wear-total-net');
     const bpWearPer10k = document.getElementById('bp-wear-per10k');
+    const bpWearPer10kEst = document.getElementById('bp-wear-per10k-est');
     const bpFeeMeta = document.getElementById('bp-fee-meta');
     const bpRecentBody = document.getElementById('bp-volume-recent');
 
@@ -2751,7 +2753,41 @@
       bpWearFeeNet.textContent = '--';
       if (typeof bpWearTotalNet !== 'undefined' && bpWearTotalNet) bpWearTotalNet.textContent = '--';
       bpWearPer10k.textContent = '--';
+      if (bpWearPer10kEst) bpWearPer10kEst.textContent = '预估：--';
       bpRecentBody.innerHTML = '';
+    }
+
+    function bpEstimatePer10kFromBbo({ bid1, ask1, feeRate, rebateRate }) {
+      const bid = Number(bid1);
+      const ask = Number(ask1);
+      if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0 || ask < bid) return null;
+      const mid = (bid + ask) / 2;
+      if (!(mid > 0)) return null;
+      const spreadW = (ask - bid) / 2; // price-space wear per side; round-trip wear is half-spread
+
+      const fr = Number(feeRate);
+      const rr = Number(rebateRate);
+      const feeNetRate = (Number.isFinite(fr) ? fr : 0) * (1 - (Number.isFinite(rr) ? rr : 0));
+
+      // Per 10k notional: per10k = ( (spreadW/mid) + feeNetRate ) * 10000
+      return (spreadW / mid + feeNetRate) * 10000;
+    }
+
+    function bpUpdatePer10kEstimateFromBbo(bbo) {
+      if (!bpWearPer10kEst) return;
+      if (!bbo) {
+        bpWearPer10kEst.textContent = '预估：--';
+        return;
+      }
+      const est = bpEstimatePer10kFromBbo({
+        bid1: bbo.bid1,
+        ask1: bbo.ask1,
+        feeRate: (bbo.fee_rate != null) ? bbo.fee_rate : 0.00026,
+        rebateRate: (bbo.rebate_rate != null) ? bbo.rebate_rate : 0.45,
+      });
+      bpWearPer10kEst.textContent = (est == null || !Number.isFinite(est))
+        ? '预估：--'
+        : `预估：${bpFormatNumber(est, 2)}/万`;
     }
     function bpShowNoCache(sym) {
       bpResetMetricsUI();
@@ -2850,6 +2886,9 @@
         const notional = wear.volume_quote_est || '--';
         bpBboWearMeta.textContent = `spread磨损 ${wear.wear_spread_est || '--'} + fee磨损(返佣后) ${wear.fee_net_est || '--'} = 合计磨损 ${wear.wear_total_net_est || '--'}；每万 ${per10k}；qty ${qtyExec}；notional ${notional}`;
       }
+
+      // Update per-10k estimate card from current L1 BBO + fees.
+      bpUpdatePer10kEstimateFromBbo(bbo);
     }
 
     async function bpRefreshBboPreview() {
@@ -2882,6 +2921,7 @@
       bpWearFeeNet.textContent = summary.fee_total_net || '--';
       if (bpWearTotalNet) bpWearTotalNet.textContent = summary.wear_total_net || '--';
       bpWearPer10k.textContent = (summary.wear_per10k_net == null) ? '--' : bpFormatNumber(summary.wear_per10k_net, 2);
+      // Keep estimate visible even when summary exists; it is updated via BBO refresh.
       const feeRate = summary.fee_rate;
       const rebateRate = summary.rebate_rate;
       if (typeof feeRate === 'number' && typeof rebateRate === 'number') {
