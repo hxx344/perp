@@ -46,6 +46,20 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import quote_plus
 
+# Ensure imports work regardless of the current working directory or service wrapper.
+# Some deployments end up with sys.path[0] == ".../strategies", which breaks
+# imports like `from exchanges...`. We pin the repository root (parent of this
+# file's directory) to the front of sys.path.
+_THIS_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = str(_THIS_DIR.parent)
+if _REPO_ROOT and _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+elif sys.path and sys.path[0] != _REPO_ROOT:
+    # If it's already present but not at the front, prefer it.
+    with suppress(Exception):
+        sys.path.remove(_REPO_ROOT)
+        sys.path.insert(0, _REPO_ROOT)
+
 import uuid
 
 try:
