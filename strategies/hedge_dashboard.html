@@ -2535,6 +2535,10 @@
             <p class="summary-sub" id="bp-fee-meta">taker 0.026% × 55%</p>
           </article>
           <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+            <h2>总磨损（返佣后）</h2>
+            <div class="value" id="bp-wear-total-net">--</div>
+          </article>
+          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
             <h2>每万磨损</h2>
             <div class="value" id="bp-wear-per10k">--</div>
           </article>
@@ -2710,6 +2714,7 @@
     const bpVolumeQuote = document.getElementById('bp-volume-quote');
     const bpWearSpread = document.getElementById('bp-wear-spread');
     const bpWearFeeNet = document.getElementById('bp-wear-fee-net');
+  const bpWearTotalNet = document.getElementById('bp-wear-total-net');
     const bpWearPer10k = document.getElementById('bp-wear-per10k');
     const bpFeeMeta = document.getElementById('bp-fee-meta');
     const bpRecentBody = document.getElementById('bp-volume-recent');
@@ -2835,6 +2840,7 @@
       bpVolumeQuote.textContent = summary.volume_quote_total || '--';
       bpWearSpread.textContent = summary.wear_spread_total || '--';
       bpWearFeeNet.textContent = summary.fee_total_net || '--';
+      if (bpWearTotalNet) bpWearTotalNet.textContent = summary.wear_total_net || '--';
       bpWearPer10k.textContent = (summary.wear_per10k_net == null) ? '--' : bpFormatNumber(summary.wear_per10k_net, 2);
       const feeRate = summary.fee_rate;
       const rebateRate = summary.rebate_rate;
