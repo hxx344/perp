@@ -284,6 +284,7 @@ class BackpackVolumeConfig:
     fee_rate: float = 0.00026
     rebate_rate: float = 0.45
     net_fee_rate: float = 0.000143  # fee_rate * (1 - rebate_rate)
+    qty_scale: int = 0
 
 
 @dataclass
@@ -3509,6 +3510,12 @@ class CoordinatorApp:
         )
         cfg.net_fee_rate = cfg.fee_rate * max(0.0, 1.0 - cfg.rebate_rate)
 
+        # Quantity precision: follow user's input decimals for qty_per_cycle.
+        # e.g. 100 -> 0 decimals, 0.1 -> 1 decimal.
+        with suppress(Exception):
+            exp = cfg.qty_per_cycle.normalize().as_tuple().exponent
+            cfg.qty_scale = max(0, -int(exp))
+
         if cfg.qty_per_cycle <= 0:
             return web.json_response({"ok": False, "error": "qty_per_cycle must be > 0"}, status=400)
         if cfg.max_spread_bps <= 0:
@@ -3785,6 +3792,17 @@ class CoordinatorApp:
             cap_qty = min(bid1_qty, ask1_qty)
             safe_qty = cap_qty * Decimal(str(max(0.0, min(cfg.depth_safety_factor, 1.0))))
             qty_exec = min(cfg.qty_per_cycle, safe_qty)
+
+            # Constrain quantity decimals to match user's input (avoid BP: Quantity decimal too long).
+            # Example: qty_per_cycle=100 -> scale 0, qty_per_cycle=0.1 -> scale 1.
+            try:
+                scale = int(getattr(cfg, "qty_scale", 0) or 0)
+                if scale <= 0:
+                    qty_exec = qty_exec.quantize(Decimal("1"))
+                else:
+                    qty_exec = qty_exec.quantize(Decimal("1").scaleb(-scale))
+            except Exception:
+                pass
 
             if cfg.min_cap_qty > 0 and cap_qty < cfg.min_cap_qty:
                 await asyncio.sleep(0.25)
