@@ -429,21 +429,37 @@ class BackpackClient(BaseExchangeClient):
                 "INFO",
                 )
 
-        # Keep original behavior, but don't crash if payload is missing/None/non-dict
-        try:
-            order_id = result.get('id')
-            order_status = result.get('status').upper()
-        except Exception as e:
+        # Parse response safely (do not crash the whole runner on unexpected payloads)
+        if not isinstance(result, dict):
+            return OrderResult(success=False, error_message=f"market_order_invalid_response type={type(result).__name__}")
+
+        order_id = result.get('id')
+        raw_status = result.get('status')
+        order_status = raw_status.upper() if isinstance(raw_status, str) else None
+
+        if order_status is None:
             if logger:
-                logger.log(f"[MARKET] Failed to parse market order response: {e} resp={preview}", "ERROR")
-            raise
+                logger.log(
+                    f"[MARKET] Missing/invalid status in response: status={raw_status!r} resp={preview}",
+                    "ERROR",
+                )
+            return OrderResult(
+                success=False,
+                order_id=order_id,
+                side=direction.lower(),
+                size=quantity,
+                status='UNKNOWN',
+                error_message=f"market_order_missing_status status={raw_status!r}"
+            )
 
         if order_status != 'FILLED':
             self.logger.log(f"Market order failed with status: {order_status}", "ERROR")
             sys.exit(1)
         # For market orders, we expect them to be filled immediately
         else:
-            price = Decimal(result.get('executedQuoteQuantity', '0'))/Decimal(result.get('executedQuantity'))
+            executed_quote = Decimal(str(result.get('executedQuoteQuantity') or '0'))
+            executed_qty = Decimal(str(result.get('executedQuantity') or '0'))
+            price = executed_quote / executed_qty if executed_qty != 0 else Decimal('0')
             return OrderResult(
                 success=True,
                 order_id=order_id,
