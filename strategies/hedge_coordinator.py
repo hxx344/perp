@@ -335,6 +335,31 @@ class BackpackVolumeSummary:
     fee_total_net: Decimal = Decimal("0")
     rebate_total: Decimal = Decimal("0")
 
+    @staticmethod
+    def from_snapshot(payload: Any) -> "BackpackVolumeSummary":
+        """Best-effort load persisted summary dict (strings) into a BackpackVolumeSummary."""
+        if not isinstance(payload, dict):
+            return BackpackVolumeSummary()
+
+        def _d(key: str) -> Decimal:
+            try:
+                return Decimal(str(payload.get(key) or "0"))
+            except Exception:
+                return Decimal("0")
+
+        out = BackpackVolumeSummary()
+        try:
+            out.cycles_done = int(payload.get("cycles_done") or 0)
+        except Exception:
+            out.cycles_done = 0
+        out.volume_base_total = _d("volume_base_total")
+        out.volume_quote_total = _d("volume_quote_total")
+        out.wear_spread_total = _d("wear_spread_total")
+        out.fee_total_gross = _d("fee_total_gross")
+        out.fee_total_net = _d("fee_total_net")
+        out.rebate_total = _d("rebate_total")
+        return out
+
     def to_dict(self, cfg: BackpackVolumeConfig) -> Dict[str, Any]:
         wear_total_net = self.wear_spread_total + self.fee_total_net
         wear_per10k_net = None
@@ -3525,13 +3550,21 @@ class CoordinatorApp:
             if self._bp_volume.running and self._bp_volume.task:
                 return web.json_response({"ok": True, "running": True, "run_id": self._bp_volume.run_id})
 
+            # Continue totals from persisted snapshot (if any) so stop/start does not reset totals.
+            snap_summary: Dict[str, Any] = {}
+            with suppress(Exception):
+                snap = self._get_bp_volume_history_snapshot(symbol)
+                if isinstance(snap, dict):
+                    snap_summary = snap.get("summary") or {}
+            base_summary = BackpackVolumeSummary.from_snapshot(snap_summary)
+
             self._bp_volume = BackpackVolumeState(
                 running=True,
                 run_id=uuid.uuid4().hex,
                 started_at=_now_ts(),
                 last_error="",
                 cfg=cfg,
-                summary=BackpackVolumeSummary(),
+                summary=base_summary,
                 recent=deque(maxlen=200),
             )
             self._bp_volume.task = asyncio.create_task(self._bp_volume_runner(self._bp_volume.run_id))
