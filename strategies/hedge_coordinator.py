@@ -3793,6 +3793,20 @@ class CoordinatorApp:
             safe_qty = cap_qty * Decimal(str(max(0.0, min(cfg.depth_safety_factor, 1.0))))
             qty_exec = min(cfg.qty_per_cycle, safe_qty)
 
+            # Depth gate: only execute when current L1 capacity can cover BOTH legs comfortably.
+            # Requirement: cap_qty must be >= 2 * qty_per_cycle, otherwise wait.
+            if cap_qty < (cfg.qty_per_cycle * Decimal("2")):
+                async with self._bp_volume_lock:
+                    if self._bp_volume.run_id == run_id:
+                        # throttle updates: only update message occasionally
+                        if not self._bp_volume.last_error.startswith("waiting_depth") or (now % 5) < 1:
+                            self._bp_volume.last_error = (
+                                f"waiting_depth: cap_qty={cap_qty} < 2*qty_per_cycle={cfg.qty_per_cycle * Decimal('2')} "
+                                f"| symbol={symbol}"
+                            )
+                await asyncio.sleep(0.25)
+                continue
+
             # Constrain quantity decimals to match user's input (avoid BP: Quantity decimal too long).
             # Example: qty_per_cycle=100 -> scale 0, qty_per_cycle=0.1 -> scale 1.
             try:
