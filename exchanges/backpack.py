@@ -403,8 +403,35 @@ class BackpackClient(BaseExchangeClient):
             quantity=str(quantity)
         )
 
-        order_id = result.get('id')
-        order_status = result.get('status').upper()
+        # Debug: log a short preview for rare/invalid payloads (avoid huge logs)
+        try:
+            preview = str(result)
+        except Exception:
+            preview = '<unprintable>'
+        if preview and len(preview) > 500:
+            preview = preview[:500] + '...'
+
+        if isinstance(result, dict):
+            self.logger.log(
+                f"[MARKET][RAW] symbol={contract_id} side={side} qty={quantity} "
+                f"id={result.get('id')!r} status={result.get('status')!r} code={result.get('code')!r} "
+                f"message={result.get('message')!r} error={result.get('error')!r} resp={preview}",
+                "INFO",
+            )
+        else:
+            self.logger.log(
+                f"[MARKET][RAW] symbol={contract_id} side={side} qty={quantity} "
+                f"type={type(result).__name__} resp={preview}",
+                "INFO",
+            )
+
+        # Keep original behavior, but don't crash if payload is missing/None/non-dict
+        try:
+            order_id = result.get('id')
+            order_status = result.get('status').upper()
+        except Exception as e:
+            self.logger.log(f"[MARKET] Failed to parse market order response: {e} resp={preview}", "ERROR")
+            raise
 
         if order_status != 'FILLED':
             self.logger.log(f"Market order failed with status: {order_status}", "ERROR")
