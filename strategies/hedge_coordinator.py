@@ -3718,6 +3718,16 @@ class CoordinatorApp:
                     return
                 cfg = state.cfg
 
+            # Defensive: symbol must be a non-empty string. If it's None/empty,
+            # fail fast so we don't raise confusing AttributeError deep in client code (e.g. `.upper()`).
+            symbol = str(getattr(cfg, "symbol", "") or "").strip()
+            if not symbol:
+                async with self._bp_volume_lock:
+                    if self._bp_volume.run_id == run_id:
+                        self._bp_volume.last_error = "cycle_failed: invalid symbol"
+                        self._bp_volume.running = False
+                return
+
             # Pre-flight: if last cycle left a residual position, flatten it first.
             # User assumption: market orders fill immediately; we still guard with best-effort checks.
             try:
@@ -3727,7 +3737,7 @@ class CoordinatorApp:
                         # Best-effort: attempt both directions; only the correct one will reduce exposure.
                         for side in ("sell", "buy"):
                             with suppress(Exception):
-                                await client.place_market_order(cfg.symbol, pos_abs, side)
+                                await client.place_market_order(symbol, pos_abs, side)
             except Exception:
                 # Never block the runner on position checks.
                 pass
@@ -3740,7 +3750,7 @@ class CoordinatorApp:
 
             # Fetch L1.
             try:
-                bid1, bid1_qty, ask1, ask1_qty = await client.fetch_bbo_with_qty(cfg.symbol)
+                bid1, bid1_qty, ask1, ask1_qty = await client.fetch_bbo_with_qty(symbol)
             except Exception as exc:
                 async with self._bp_volume_lock:
                     if self._bp_volume.run_id == run_id:
@@ -3779,8 +3789,8 @@ class CoordinatorApp:
             try:
                 # User assumption: both legs fill immediately. Run them concurrently to reduce serial latency.
                 buy, sell = await asyncio.gather(
-                    client.place_market_order(cfg.symbol, qty_exec, "buy"),
-                    client.place_market_order(cfg.symbol, qty_exec, "sell"),
+                    client.place_market_order(symbol, qty_exec, "buy"),
+                    client.place_market_order(symbol, qty_exec, "sell"),
                 )
 
                 if not buy.success:
@@ -3827,7 +3837,7 @@ class CoordinatorApp:
 
             rec = BackpackVolumeCycleRecord(
                 ts=_now_ts(),
-                symbol=cfg.symbol,
+                symbol=symbol,
                 bid1=bid1,
                 ask1=ask1,
                 bid1_qty=bid1_qty,
