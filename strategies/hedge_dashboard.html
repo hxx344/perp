@@ -10457,13 +10457,6 @@
 
       function renderSpread(data) {
 
-            if (Number.isFinite(limit) && positions.length > trimmed.length) {
-              const hint = document.createElement('p');
-              hint.className = 'summary-sub';
-              hint.style.marginTop = '0.6rem';
-              hint.textContent = `仅展示前 ${trimmed.length} 条持仓（共 ${positions.length} 条）。`;
-              card.appendChild(hint);
-            }
         if (!spreadAgentCount || !spreadEmpty || !spreadCard) {
           return;
         }

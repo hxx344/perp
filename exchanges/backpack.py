@@ -438,6 +438,9 @@ class BackpackClient(BaseExchangeClient):
         order_status = raw_status.upper() if isinstance(raw_status, str) else None
 
         if order_status is None:
+            code = result.get('code')
+            msg = result.get('message')
+            err = result.get('error')
             if logger:
                 logger.log(
                     f"[MARKET] Missing/invalid status in response: status={raw_status!r} resp={preview}",
@@ -449,12 +452,23 @@ class BackpackClient(BaseExchangeClient):
                 side=direction.lower(),
                 size=quantity,
                 status='UNKNOWN',
-                error_message=f"market_order_missing_status status={raw_status!r}"
+                error_message=(
+                    f"market_order_missing_status status={raw_status!r} "
+                    f"code={code!r} msg={msg!r} err={err!r} resp={preview}"
+                )
             )
 
         if order_status != 'FILLED':
-            self.logger.log(f"Market order failed with status: {order_status}", "ERROR")
-            sys.exit(1)
+            if logger:
+                logger.log(f"[MARKET] Market order failed with status: {order_status} resp={preview}", "ERROR")
+            return OrderResult(
+                success=False,
+                order_id=order_id,
+                side=direction.lower(),
+                size=quantity,
+                status=order_status,
+                error_message=f"market_order_not_filled status={order_status} resp={preview}",
+            )
         # For market orders, we expect them to be filled immediately
         else:
             executed_quote = Decimal(str(result.get('executedQuoteQuantity') or '0'))
