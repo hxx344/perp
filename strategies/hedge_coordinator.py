@@ -3706,6 +3706,16 @@ class CoordinatorApp:
     async def _bp_volume_runner(self, run_id: str) -> None:
         """Background task for Backpack volume boosting (BUY market -> SELL market)."""
         # One runner at a time; stop when state.running flips or run_id changes.
+        # Defensive: if Backpack deps are missing, don't crash the task with AssertionError.
+        if BackpackClient is None or TradingConfig is None:
+            async with self._bp_volume_lock:
+                state = self._bp_volume
+                if state.run_id == run_id:
+                    state.last_error = "cycle_failed: Backpack dependencies not available"
+                    state.running = False
+            return
+
+        client = _make_backpack_client()
         client = _make_backpack_client()
 
         consecutive_failures = 0
@@ -3716,16 +3726,17 @@ class CoordinatorApp:
                 state = self._bp_volume
                 if (not state.running) or state.run_id != run_id:
                     return
-                cfg = state.cfg
+                cfg = copy.deepcopy(state.cfg)
 
             # Defensive: symbol must be a non-empty string. If it's None/empty,
             # fail fast so we don't raise confusing AttributeError deep in client code (e.g. `.upper()`).
             symbol = str(getattr(cfg, "symbol", "") or "").strip()
             if not symbol:
                 async with self._bp_volume_lock:
-                    if self._bp_volume.run_id == run_id:
-                        self._bp_volume.last_error = "cycle_failed: invalid symbol"
-                        self._bp_volume.running = False
+                    state = self._bp_volume
+                    if state.run_id == run_id:
+                        state.last_error = "cycle_failed: invalid symbol"
+                        state.running = False
                 return
 
             # Pre-flight: if last cycle left a residual position, flatten it first.
@@ -3754,7 +3765,7 @@ class CoordinatorApp:
             except Exception as exc:
                 async with self._bp_volume_lock:
                     if self._bp_volume.run_id == run_id:
-                        self._bp_volume.last_error = f"bbo_fetch_failed: {exc}"
+                        self._bp_volume.last_error = f"bbo_fetch_failed: {exc} | symbol={symbol}"
                 await asyncio.sleep(0.5)
                 continue
 
@@ -3810,9 +3821,19 @@ class CoordinatorApp:
 
             except Exception as exc:
                 consecutive_failures += 1
+                tb = ""
+                try:
+                    import traceback
+
+                    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+                    # avoid giant payloads in UI
+                    tb = tb[-2000:]
+                except Exception:
+                    tb = ""
                 async with self._bp_volume_lock:
                     if self._bp_volume.run_id == run_id:
-                        self._bp_volume.last_error = f"cycle_failed: {exc}"
+                        ctx = f"symbol={symbol} qty_exec={qty_exec} spread_bps={spread_bps:.2f}"
+                        self._bp_volume.last_error = f"cycle_failed: {exc} | {ctx}{(' | tb=' + tb) if tb else ''}"
                         if consecutive_failures >= 3:
                             self._bp_volume.running = False
                 await asyncio.sleep(0.5)
