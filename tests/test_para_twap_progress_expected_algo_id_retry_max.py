@@ -98,7 +98,7 @@ def test_expected_algo_id_retry_max_gives_up(monkeypatch):
     # Call the real implementation as an unbound method with our dummy instance.
     mod.ParadexAccountMonitor._poll_twap_progress(monitor, req_id)
 
-    assert sleeps["count"] == 5
-    assert sleeps["seconds"] == [5.0] * 5
+    assert sleeps["count"] == 20
+    assert sleeps["seconds"] == [5.0] * 20
     # Since we never matched, we should have sent no progress acks.
     assert monitor.acks == []

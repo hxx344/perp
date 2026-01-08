@@ -100,6 +100,13 @@ DEFAULT_TWAP_PROGRESS_HARD_CAP_SECONDS = float(
 # History pagination (history-only mode)
 DEFAULT_TWAP_HISTORY_PAGE_LIMIT = int(os.getenv("PARA_TWAP_HISTORY_PAGE_LIMIT", "50") or "50")
 DEFAULT_TWAP_HISTORY_MAX_PAGES = int(os.getenv("PARA_TWAP_HISTORY_MAX_PAGES", "1") or "1")
+
+# When we place a TWAP we may already know the expected algo_id, but the history endpoint can lag.
+# To avoid accidentally matching an older TWAP, we retry a limited number of times waiting for the
+# expected algo_id to appear.
+DEFAULT_TWAP_HISTORY_EXPECTED_ALGO_ID_RETRY_MAX = int(
+    os.getenv("PARA_TWAP_HISTORY_EXPECTED_ALGO_ID_RETRY_MAX", "20") or "20"
+)
 # 每个账号上报的持仓条数上限。
 # 之前默认 12 会导致 dashboard 看起来“最多只有 12 条持仓”。
 # 设为 None 表示默认不截断（上报全量）。
@@ -2043,7 +2050,7 @@ class ParadexAccountMonitor:
         # Unit-test friendliness: when timeout is configured extremely small, avoid long sleeps.
         loop_guard = 0
         expected_algo_id_retry_count = 0
-        expected_algo_id_retry_max = 5
+        expected_algo_id_retry_max = max(0, int(DEFAULT_TWAP_HISTORY_EXPECTED_ALGO_ID_RETRY_MAX))
 
         while time.time() < hard_deadline:
             loop_guard += 1
