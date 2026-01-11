@@ -420,6 +420,50 @@
         min-width: 6rem;
       }
 
+      /* Backpack multi-run cards */
+      .bp-run-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 0.75rem;
+        margin-top: 1rem;
+      }
+      .bp-run-card {
+        background: rgba(255,255,255,.03);
+        border: 1px solid rgba(255,255,255,.06);
+        border-radius: 12px;
+        padding: 0.9rem 1rem;
+      }
+      .bp-run-card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.6rem;
+      }
+      .bp-run-card-title {
+        margin: 0;
+        font-size: 0.9rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #7f8fa9;
+      }
+      .bp-run-meta {
+        color: #8a94a6;
+        font-size: 0.85rem;
+        line-height: 1.35;
+      }
+      .bp-run-actions {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 0.75rem;
+        flex-wrap: wrap;
+      }
+      .bp-run-actions button {
+        padding: 0.35rem 0.6rem;
+        border-radius: 10px;
+        font-size: 0.82rem;
+      }
+
       .risk-pill-inline {
         font-size: 0.85rem;
         padding: 0.15rem 0.6rem;
@@ -2473,6 +2517,8 @@
           <span class="badge badge-muted" id="bp-volume-running">stopped</span>
         </div>
 
+        <div class="bp-run-grid" id="bp-run-grid" style="display:none;"></div>
+
         <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; margin-top: 1rem;">
           <label>
             交易对
@@ -2713,6 +2759,7 @@
   const bpClearHistoryBtn = document.getElementById('bp-volume-clear-history');
     const bpStatus = document.getElementById('bp-volume-status');
     const bpRunning = document.getElementById('bp-volume-running');
+  const bpRunGrid = document.getElementById('bp-run-grid');
     const bpVolumeBase = document.getElementById('bp-volume-base');
     const bpVolumeQuote = document.getElementById('bp-volume-quote');
     const bpWearSpread = document.getElementById('bp-wear-spread');
@@ -2803,11 +2850,97 @@
     }
 
     function bpPickLiveSymbol(statusPayload, metricsPayload) {
-      const statusSym = statusPayload && statusPayload.symbol ? bpNormalizeSymbol(statusPayload.symbol) : '';
-      if (statusSym) return statusSym;
+      // New backend returns an array of runs.
+      const runs = statusPayload && Array.isArray(statusPayload.runs) ? statusPayload.runs : null;
+      if (runs && runs.length) {
+        const firstRunning = runs.find(r => r && r.running);
+        const sym = bpNormalizeSymbol((firstRunning && firstRunning.symbol) || runs[0].symbol);
+        if (sym) return sym;
+      }
       const recent = metricsPayload && Array.isArray(metricsPayload.recent) ? metricsPayload.recent : null;
       const recSym = recent && recent.length && recent[0] && recent[0].symbol ? bpNormalizeSymbol(recent[0].symbol) : '';
       return recSym;
+    }
+
+    function bpStopSymbol(sym) {
+      const symbol = bpNormalizeSymbol(sym);
+      if (!symbol) return Promise.resolve();
+      return bpFetchJson('/api/backpack/volume/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol })
+      });
+    }
+
+    function bpRenderRuns(statusPayload, viewingSymbol) {
+      const grid = bpRunGrid;
+      if (!grid) return;
+      const runs = statusPayload && Array.isArray(statusPayload.runs) ? statusPayload.runs : [];
+      if (!runs.length) {
+        grid.style.display = 'none';
+        grid.innerHTML = '';
+        return;
+      }
+      grid.style.display = 'grid';
+      grid.innerHTML = '';
+
+      for (const run of runs) {
+        const sym = bpNormalizeSymbol(run && run.symbol);
+        const running = !!(run && run.running);
+        const cyclesDone = run && (run.cycles_done != null) ? run.cycles_done : '--';
+        const cyclesTarget = run && (run.cycles_target != null) ? run.cycles_target : 0;
+        const err = run && run.last_error ? String(run.last_error) : '';
+        const startedAt = run && run.started_at ? Number(run.started_at) : null;
+        const startedText = (startedAt && Number.isFinite(startedAt)) ? new Date(startedAt * 1000).toLocaleTimeString() : '--';
+
+        const card = document.createElement('div');
+        card.className = 'bp-run-card';
+        const badgeClass = running ? 'badge badge-info' : 'badge badge-muted';
+        const badgeText = running ? 'running' : 'stopped';
+        const selected = viewingSymbol && sym && viewingSymbol === sym;
+
+        const metaLine = err
+          ? `错误：${err}`
+          : `cycles ${cyclesDone}/${cyclesTarget || 0}`;
+
+        card.innerHTML = `
+          <div class="bp-run-card-header">
+            <h3 class="bp-run-card-title">${sym || '--'}</h3>
+            <span class="${badgeClass}">${badgeText}</span>
+          </div>
+          <div class="bp-run-meta">${metaLine}</div>
+          <div class="bp-run-meta">started ${startedText} · view ${selected ? 'yes' : 'no'}</div>
+          <div class="bp-run-actions">
+            <button type="button" class="button-secondary" data-action="view" data-symbol="${sym}">查看</button>
+            <button type="button" class="button-danger" data-action="stop" data-symbol="${sym}" ${running ? '' : 'disabled'}>停止</button>
+          </div>
+        `;
+        grid.appendChild(card);
+      }
+
+      // Delegate button events.
+      grid.querySelectorAll('button[data-action="view"]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const sym = bpNormalizeSymbol(btn.getAttribute('data-symbol'));
+          if (!sym) return;
+          if (bpSymbolSelect) bpSymbolSelect.value = sym;
+          bpRefresh();
+        });
+      });
+      grid.querySelectorAll('button[data-action="stop"]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const sym = bpNormalizeSymbol(btn.getAttribute('data-symbol'));
+          if (!sym) return;
+          bpStatus.textContent = `停止中：${sym}`;
+          try {
+            await bpStopSymbol(sym);
+            bpStatus.textContent = `已停止：${sym}`;
+            await bpRefresh();
+          } catch (e) {
+            bpStatus.textContent = `停止失败：${e.message}`;
+          }
+        });
+      });
     }
 
     function bpSetStatusLine({ baseText, liveSym, viewingSym, cacheHint }) {
@@ -2966,11 +3099,21 @@
       let statusPayload = null;
       try {
         statusPayload = await bpFetchJson('/api/backpack/volume/status');
-        bpRunning.textContent = statusPayload.running ? 'running' : 'stopped';
-        bpRunning.className = statusPayload.running ? 'badge badge-info' : 'badge badge-muted';
+        const runs = statusPayload && Array.isArray(statusPayload.runs) ? statusPayload.runs : [];
+        const anyRunning = runs.some(r => r && r.running);
+        const runCountText = runs.length ? `${runs.length} run${runs.length > 1 ? 's' : ''}` : 'stopped';
+        bpRunning.textContent = anyRunning ? `running · ${runCountText}` : runCountText;
+        bpRunning.className = anyRunning ? 'badge badge-info' : 'badge badge-muted';
+
+        // Render per-symbol run cards.
+        bpRenderRuns(statusPayload, viewingSymbol);
+
         const liveSym = bpPickLiveSymbol(statusPayload, null);
-        const baseText = statusPayload.last_error ? `错误：${statusPayload.last_error}` : `已执行 ${statusPayload.cycles_done}/${statusPayload.cycles_target || 0}`;
-  bpSetStatusLine({ baseText, liveSym, viewingSym: viewingSymbol, cacheHint: '' });
+        const runningRun = runs.find(r => r && r.running && bpNormalizeSymbol(r.symbol) === liveSym) || runs.find(r => r && r.running) || null;
+        const baseText = (runningRun && runningRun.last_error)
+          ? `错误：${runningRun.last_error}`
+          : (runningRun ? `已执行 ${runningRun.cycles_done}/${runningRun.cycles_target || 0}` : '未运行');
+        bpSetStatusLine({ baseText, liveSym, viewingSym: viewingSymbol, cacheHint: '' });
       } catch (e) {
         // Backend unavailable: show explicit empty state.
         bpShowNoCache(viewingSymbol);
@@ -3063,8 +3206,15 @@
     bpStopBtn && bpStopBtn.addEventListener('click', async () => {
       bpStatus.textContent = '停止中…';
       try {
-        await bpFetchJson('/api/backpack/volume/stop', { method: 'POST' });
-        bpStatus.textContent = '已停止';
+        const sym = bpSymbolSelect && bpSymbolSelect.value ? bpNormalizeSymbol(bpSymbolSelect.value) : '';
+        if (sym) {
+          await bpStopSymbol(sym);
+          bpStatus.textContent = `已停止：${sym}`;
+        } else {
+          // Back-compat: stop all
+          await bpFetchJson('/api/backpack/volume/stop', { method: 'POST' });
+          bpStatus.textContent = '已停止（全部）';
+        }
         await bpRefresh();
       } catch (e) {
         bpStatus.textContent = `停止失败：${e.message}`;

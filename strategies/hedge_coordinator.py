@@ -396,6 +396,14 @@ class BackpackVolumeState:
     task: Optional[asyncio.Task] = None
 
 
+@dataclass
+class BackpackVolumeMultiState:
+    """Manage multiple concurrent Backpack volume runners keyed by symbol."""
+
+    states: Dict[str, BackpackVolumeState] = field(default_factory=dict)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
 
 def _env_debug(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -3202,9 +3210,8 @@ class CoordinatorApp:
             retention_seconds=3 * 24 * 3600,
         )
 
-        # Backpack volume booster state (single-runner).
-        self._bp_volume = BackpackVolumeState()
-        self._bp_volume_lock = asyncio.Lock()
+        # Backpack volume booster state (multi-runner, keyed by symbol).
+        self._bp_volume = BackpackVolumeMultiState()
 
         # Persisted per-symbol history for the Backpack volume panel.
         # Shape: {"SYMBOL": {"updated_at": ms, "summary": {...}, "recent": [...]}}
@@ -3335,12 +3342,16 @@ class CoordinatorApp:
                 await self._bp_bbo_ws.stop()
 
         # Stop backpack volume task if running.
-        async with self._bp_volume_lock:
-            task = self._bp_volume.task
-            self._bp_volume.running = False
-            self._bp_volume.task = None
-        if task:
+        tasks: List[asyncio.Task] = []
+        async with self._bp_volume.lock:
+            for sym, st in list(self._bp_volume.states.items()):
+                st.running = False
+                if st.task:
+                    tasks.append(st.task)
+                    st.task = None
+        for task in tasks:
             task.cancel()
+        for task in tasks:
             with suppress(Exception):
                 await task
 
@@ -3439,41 +3450,55 @@ class CoordinatorApp:
 
     async def handle_bp_volume_status(self, request: web.Request) -> web.Response:
         del request
-        async with self._bp_volume_lock:
-            state = self._bp_volume
-            return web.json_response(
-                {
-                    "ok": True,
-                    "running": state.running,
-                    "run_id": state.run_id,
-                    "symbol": state.cfg.symbol,
-                    "started_at": state.started_at,
-                    "cycles_done": state.summary.cycles_done,
-                    "cycles_target": state.cfg.cycles,
-                    "last_error": state.last_error,
-                }
-            )
+        async with self._bp_volume.lock:
+            runs = []
+            for sym, state in sorted(self._bp_volume.states.items()):
+                runs.append(
+                    {
+                        "symbol": sym,
+                        "running": bool(state.running),
+                        "run_id": state.run_id,
+                        "started_at": state.started_at,
+                        "cycles_done": state.summary.cycles_done,
+                        "cycles_target": state.cfg.cycles,
+                        "last_error": state.last_error,
+                    }
+                )
+            return web.json_response({"ok": True, "runs": runs})
 
     async def handle_bp_volume_metrics(self, request: web.Request) -> web.Response:
         # Note: this endpoint historically returned the *in-memory* state.
         # To make "clear" survive refresh (and keep showing the cleared state),
         # when the runner is NOT active we prefer returning the persisted snapshot.
         symbol_q = str(request.query.get("symbol") or "").strip().upper()
-        async with self._bp_volume_lock:
-            state = self._bp_volume
-            summary = state.summary.to_dict(state.cfg)
-            recent = [rec.to_dict() for rec in list(state.recent)]
+        live_state: Optional[BackpackVolumeState] = None
+        live_symbol: str = ""
+        async with self._bp_volume.lock:
+            if symbol_q:
+                live_state = self._bp_volume.states.get(symbol_q)
+                live_symbol = symbol_q
+            elif self._bp_volume.states:
+                # Back-compat: if no symbol given, pick the first running one.
+                for sym, st in self._bp_volume.states.items():
+                    if st.running:
+                        live_state = st
+                        live_symbol = sym
+                        break
+                if live_state is None:
+                    # otherwise just pick any
+                    sym, st = next(iter(self._bp_volume.states.items()))
+                    live_state = st
+                    live_symbol = sym
 
-            running = bool(state.running)
-            live_symbol = str(getattr(state.cfg, "symbol", "") or "").strip().upper()
+        if live_state is not None and live_symbol:
+            summary = live_state.summary.to_dict(live_state.cfg)
+            recent = [rec.to_dict() for rec in list(live_state.recent)]
+            running = bool(live_state.running)
+            if running:
+                self._persist_bp_volume_snapshot(live_symbol, summary, recent)
+                return web.json_response({"ok": True, "summary": summary, "recent": recent, "symbol": live_symbol, "source": "memory"})
 
-        # If the runner is active, always persist under the live symbol.
-        if running and live_symbol:
-            self._persist_bp_volume_snapshot(live_symbol, summary, recent)
-            return web.json_response({"ok": True, "summary": summary, "recent": recent, "symbol": live_symbol, "source": "memory"})
-
-        # Runner not active: STRICTLY return persisted snapshot (or empty) to avoid confusing
-        # "memory vs disk" mixes. This keeps "clear" behavior stable across refresh.
+        # Runner not active (or no live state): STRICTLY return persisted snapshot (or empty).
         pick_symbol = symbol_q or live_symbol
         if not pick_symbol:
             return web.json_response({"ok": True, "summary": {}, "recent": [], "symbol": None, "source": "disk", "updated_at": None})
@@ -3522,6 +3547,8 @@ class CoordinatorApp:
         if not symbol:
             return web.json_response({"ok": False, "error": "symbol required"}, status=400)
 
+        symbol_u = symbol.strip().upper()
+
         cfg = BackpackVolumeConfig(
             symbol=symbol,
             qty_per_cycle=_decimal(payload.get("qty_per_cycle"), "0"),
@@ -3546,19 +3573,20 @@ class CoordinatorApp:
         if cfg.max_spread_bps <= 0:
             return web.json_response({"ok": False, "error": "max_spread_bps must be > 0"}, status=400)
 
-        async with self._bp_volume_lock:
-            if self._bp_volume.running and self._bp_volume.task:
-                return web.json_response({"ok": True, "running": True, "run_id": self._bp_volume.run_id})
+        async with self._bp_volume.lock:
+            existing = self._bp_volume.states.get(symbol_u)
+            if existing and existing.running and existing.task:
+                return web.json_response({"ok": True, "running": True, "run_id": existing.run_id, "symbol": symbol_u})
 
             # Continue totals from persisted snapshot (if any) so stop/start does not reset totals.
             snap_summary: Dict[str, Any] = {}
             with suppress(Exception):
-                snap = self._get_bp_volume_history_snapshot(symbol)
+                snap = self._get_bp_volume_history_snapshot(symbol_u)
                 if isinstance(snap, dict):
                     snap_summary = snap.get("summary") or {}
             base_summary = BackpackVolumeSummary.from_snapshot(snap_summary)
 
-            self._bp_volume = BackpackVolumeState(
+            state = BackpackVolumeState(
                 running=True,
                 run_id=uuid.uuid4().hex,
                 started_at=_now_ts(),
@@ -3567,18 +3595,52 @@ class CoordinatorApp:
                 summary=base_summary,
                 recent=deque(maxlen=200),
             )
-            self._bp_volume.task = asyncio.create_task(self._bp_volume_runner(self._bp_volume.run_id))
-            return web.json_response({"ok": True, "running": True, "run_id": self._bp_volume.run_id})
+
+            state.task = asyncio.create_task(self._bp_volume_runner(symbol_u, state.run_id))
+            self._bp_volume.states[symbol_u] = state
+            return web.json_response({"ok": True, "running": True, "run_id": state.run_id, "symbol": symbol_u})
 
     async def handle_bp_volume_stop(self, request: web.Request) -> web.Response:
-        del request
-        async with self._bp_volume_lock:
-            self._bp_volume.running = False
-            task = self._bp_volume.task
-            self._bp_volume.task = None
-        if task:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        symbol = str(payload.get("symbol") or "").strip().upper()
+
+        task: Optional[asyncio.Task] = None
+        async with self._bp_volume.lock:
+            if symbol:
+                st = self._bp_volume.states.get(symbol)
+                if st is not None:
+                    st.running = False
+                    task = st.task
+                    st.task = None
+            else:
+                # Back-compat: stop all
+                tasks: List[asyncio.Task] = []
+                for sym, st in list(self._bp_volume.states.items()):
+                    st.running = False
+                    if st.task:
+                        tasks.append(st.task)
+                        st.task = None
+                if tasks:
+                    # cancel outside lock
+                    task = None
+        if symbol and task:
             task.cancel()
-        return web.json_response({"ok": True, "running": False})
+        if not symbol:
+            # stop all (best-effort)
+            tasks2: List[asyncio.Task] = []
+            async with self._bp_volume.lock:
+                for sym, st in list(self._bp_volume.states.items()):
+                    if st.task:
+                        tasks2.append(st.task)
+                        st.task = None
+            for t in tasks2:
+                t.cancel()
+        return web.json_response({"ok": True, "running": False, "symbol": symbol or None})
 
     @staticmethod
     def _estimate_backpack_wear(
@@ -3660,8 +3722,14 @@ class CoordinatorApp:
         if not symbol:
             return web.json_response({"ok": False, "error": "symbol required"}, status=400)
 
-        async with self._bp_volume_lock:
-            cfg = copy.deepcopy(self._bp_volume.cfg)
+        symbol_u = symbol.strip().upper()
+        async with self._bp_volume.lock:
+            st = self._bp_volume.states.get(symbol_u)
+            if st is not None:
+                cfg = copy.deepcopy(st.cfg)
+            else:
+                # Not running: build a minimal default config for estimation.
+                cfg = BackpackVolumeConfig(symbol=symbol_u)
 
         qty = _decimal(params.get("qty"), str(cfg.qty_per_cycle or "0"))
         fee_rate = float(params.get("fee_rate") or cfg.fee_rate)
@@ -3743,14 +3811,14 @@ class CoordinatorApp:
             }
         )
 
-    async def _bp_volume_runner(self, run_id: str) -> None:
+    async def _bp_volume_runner(self, symbol_u: str, run_id: str) -> None:
         """Background task for Backpack volume boosting (BUY market -> SELL market)."""
-        # One runner at a time; stop when state.running flips or run_id changes.
+        # Per-symbol runner; stop when state.running flips or run_id changes.
         # Defensive: if Backpack deps are missing, don't crash the task with AssertionError.
         if BackpackClient is None or TradingConfig is None:
-            async with self._bp_volume_lock:
-                state = self._bp_volume
-                if state.run_id == run_id:
+            async with self._bp_volume.lock:
+                state = self._bp_volume.states.get(symbol_u)
+                if state is not None and state.run_id == run_id:
                     state.last_error = "cycle_failed: Backpack dependencies not available"
                     state.running = False
             return
@@ -3762,8 +3830,10 @@ class CoordinatorApp:
         last_cycle_at: float = 0.0
 
         while True:
-            async with self._bp_volume_lock:
-                state = self._bp_volume
+            async with self._bp_volume.lock:
+                state = self._bp_volume.states.get(symbol_u)
+                if state is None:
+                    return
                 if (not state.running) or state.run_id != run_id:
                     return
                 cfg = copy.deepcopy(state.cfg)
@@ -3772,9 +3842,9 @@ class CoordinatorApp:
             # fail fast so we don't raise confusing AttributeError deep in client code (e.g. `.upper()`).
             symbol = str(getattr(cfg, "symbol", "") or "").strip()
             if not symbol:
-                async with self._bp_volume_lock:
-                    state = self._bp_volume
-                    if state.run_id == run_id:
+                async with self._bp_volume.lock:
+                    state = self._bp_volume.states.get(symbol_u)
+                    if state is not None and state.run_id == run_id:
                         state.last_error = "cycle_failed: invalid symbol"
                         state.running = False
                 return
@@ -3803,9 +3873,10 @@ class CoordinatorApp:
             try:
                 bid1, bid1_qty, ask1, ask1_qty = await client.fetch_bbo_with_qty(symbol)
             except Exception as exc:
-                async with self._bp_volume_lock:
-                    if self._bp_volume.run_id == run_id:
-                        self._bp_volume.last_error = f"bbo_fetch_failed: {exc} | symbol={symbol}"
+                async with self._bp_volume.lock:
+                    st = self._bp_volume.states.get(symbol_u)
+                    if st is not None and st.run_id == run_id:
+                        st.last_error = f"bbo_fetch_failed: {exc} | symbol={symbol}"
                 await asyncio.sleep(0.5)
                 continue
 
@@ -3829,11 +3900,12 @@ class CoordinatorApp:
             # Depth gate: only execute when current L1 capacity can cover BOTH legs comfortably.
             # Requirement: cap_qty must be >= 2 * qty_per_cycle, otherwise wait.
             if cap_qty < (cfg.qty_per_cycle * Decimal("2")):
-                async with self._bp_volume_lock:
-                    if self._bp_volume.run_id == run_id:
+                async with self._bp_volume.lock:
+                    st = self._bp_volume.states.get(symbol_u)
+                    if st is not None and st.run_id == run_id:
                         # throttle updates: only update message occasionally
-                        if not self._bp_volume.last_error.startswith("waiting_depth") or (now % 5) < 1:
-                            self._bp_volume.last_error = (
+                        if not st.last_error.startswith("waiting_depth") or (now % 5) < 1:
+                            st.last_error = (
                                 f"waiting_depth: cap_qty={cap_qty} < 2*qty_per_cycle={cfg.qty_per_cycle * Decimal('2')} "
                                 f"| symbol={symbol}"
                             )
@@ -3895,12 +3967,13 @@ class CoordinatorApp:
                     tb = tb[-2000:]
                 except Exception:
                     tb = ""
-                async with self._bp_volume_lock:
-                    if self._bp_volume.run_id == run_id:
+                async with self._bp_volume.lock:
+                    st = self._bp_volume.states.get(symbol_u)
+                    if st is not None and st.run_id == run_id:
                         ctx = f"symbol={symbol} qty_exec={qty_exec} spread_bps={spread_bps:.2f}"
-                        self._bp_volume.last_error = f"cycle_failed: {exc} | {ctx}{(' | tb=' + tb) if tb else ''}"
+                        st.last_error = f"cycle_failed: {exc} | {ctx}{(' | tb=' + tb) if tb else ''}"
                         if consecutive_failures >= 3:
-                            self._bp_volume.running = False
+                            st.running = False
                 await asyncio.sleep(0.5)
                 continue
 
@@ -3939,21 +4012,22 @@ class CoordinatorApp:
                 wear_total_net=wear_total_net,
             )
 
-            async with self._bp_volume_lock:
-                if self._bp_volume.run_id != run_id:
+            async with self._bp_volume.lock:
+                st = self._bp_volume.states.get(symbol_u)
+                if st is None or st.run_id != run_id:
                     return
-                self._bp_volume.recent.appendleft(rec)
-                self._bp_volume.summary.cycles_done += 1
-                self._bp_volume.summary.volume_base_total += volume_base
-                self._bp_volume.summary.volume_quote_total += volume_quote
-                self._bp_volume.summary.wear_spread_total += wear_spread
-                self._bp_volume.summary.fee_total_gross += fee_gross
-                self._bp_volume.summary.fee_total_net += fee_net
-                self._bp_volume.summary.rebate_total += (fee_gross - fee_net)
+                st.recent.appendleft(rec)
+                st.summary.cycles_done += 1
+                st.summary.volume_base_total += volume_base
+                st.summary.volume_quote_total += volume_quote
+                st.summary.wear_spread_total += wear_spread
+                st.summary.fee_total_gross += fee_gross
+                st.summary.fee_total_net += fee_net
+                st.summary.rebate_total += (fee_gross - fee_net)
 
                 # Stop if reached target cycles (non-zero).
-                if self._bp_volume.cfg.cycles > 0 and self._bp_volume.summary.cycles_done >= self._bp_volume.cfg.cycles:
-                    self._bp_volume.running = False
+                if st.cfg.cycles > 0 and st.summary.cycles_done >= st.cfg.cycles:
+                    st.running = False
                     return
 
             # Small yield.
