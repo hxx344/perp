@@ -393,6 +393,8 @@ class BackpackVolumeState:
     run_id: str = ""
     started_at: Optional[float] = None
     last_error: str = ""
+    # Non-error informational message shown in status (e.g. waiting for depth)
+    last_note: str = ""
     cfg: BackpackVolumeConfig = field(default_factory=BackpackVolumeConfig)
     summary: BackpackVolumeSummary = field(default_factory=BackpackVolumeSummary)
     recent: Deque[BackpackVolumeCycleRecord] = field(default_factory=lambda: deque(maxlen=200))
@@ -3456,6 +3458,12 @@ class CoordinatorApp:
         async with self._bp_volume.lock:
             runs = []
             for sym, state in sorted(self._bp_volume.states.items()):
+                summary_dict: Dict[str, Any] = {}
+                with suppress(Exception):
+                    summary_dict = state.summary.to_dict(state.cfg) or {}
+                quote = summary_dict.get("volume_quote")
+                wear_total_net = summary_dict.get("wear_total_net")
+                wear_per_10k = summary_dict.get("wear_total_net_per_10k")
                 runs.append(
                     {
                         "symbol": sym,
@@ -3465,6 +3473,10 @@ class CoordinatorApp:
                         "cycles_done": state.summary.cycles_done,
                         "cycles_target": state.cfg.cycles,
                         "last_error": state.last_error,
+                        "last_note": getattr(state, "last_note", ""),
+                        "volume_quote": quote,
+                        "wear_total_net": wear_total_net,
+                        "wear_total_net_per_10k": wear_per_10k,
                     }
                 )
             return web.json_response({"ok": True, "runs": runs})
@@ -3596,6 +3608,7 @@ class CoordinatorApp:
                 run_id=uuid.uuid4().hex,
                 started_at=_now_ts(),
                 last_error="",
+                last_note="",
                 cfg=cfg,
                 summary=base_summary,
                 recent=deque(maxlen=200),
@@ -3927,8 +3940,8 @@ class CoordinatorApp:
                     st = self._bp_volume.states.get(symbol_u)
                     if st is not None and st.run_id == run_id:
                         # throttle updates: only update message occasionally
-                        if not st.last_error.startswith("waiting_depth") or (now % 5) < 1:
-                            st.last_error = (
+                        if not st.last_note.startswith("waiting_depth") or (now % 5) < 1:
+                            st.last_note = (
                                 f"waiting_depth: cap_qty={cap_qty} < 2*qty_per_cycle={cfg.qty_per_cycle * Decimal('2')} "
                                 f"| symbol={symbol}"
                             )

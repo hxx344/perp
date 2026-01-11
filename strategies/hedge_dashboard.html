@@ -458,6 +458,33 @@
         margin-top: 0.75rem;
         flex-wrap: wrap;
       }
+
+      .bp-run-kv-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: .5rem .9rem;
+        margin-top: .65rem;
+        padding-top: .65rem;
+        border-top: 1px solid rgba(255,255,255,.06);
+      }
+
+      .bp-run-kv {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: .75rem;
+        font-size: .85rem;
+      }
+
+      .bp-run-k {
+        color: #8a94a6;
+        letter-spacing: 0.02em;
+      }
+
+      .bp-run-v {
+        color: #f2f4f8;
+        font-variant-numeric: tabular-nums;
+      }
       .bp-run-actions button {
         padding: 0.35rem 0.6rem;
         border-radius: 10px;
@@ -2900,8 +2927,13 @@
         const cyclesDone = run && (run.cycles_done != null) ? run.cycles_done : '--';
         const cyclesTarget = run && (run.cycles_target != null) ? run.cycles_target : 0;
         const err = run && run.last_error ? String(run.last_error) : '';
+        const note = run && run.last_note ? String(run.last_note) : '';
         const startedAt = run && run.started_at ? Number(run.started_at) : null;
         const startedText = (startedAt && Number.isFinite(startedAt)) ? new Date(startedAt * 1000).toLocaleTimeString() : '--';
+
+        const volQuote = run && (run.volume_quote != null) ? run.volume_quote : null;
+        const wearTotalNet = run && (run.wear_total_net != null) ? run.wear_total_net : null;
+        const wearPer10k = run && (run.wear_total_net_per_10k != null) ? run.wear_total_net_per_10k : null;
 
         const card = document.createElement('div');
         card.className = 'bp-run-card';
@@ -2911,7 +2943,19 @@
 
         const metaLine = err
           ? `错误：${err}`
-          : `cycles ${cyclesDone}/${cyclesTarget || 0}`;
+          : (note ? `提示：${note}` : `cycles ${cyclesDone}/${cyclesTarget || 0}`);
+
+        const fmtMaybe = (val, digits = 4) => {
+          if (val == null || val === '') return '--';
+          const n = Number(val);
+          if (!Number.isFinite(n)) return String(val);
+          return bpFormatNumber(n, digits);
+        };
+
+        const moneyLine = (label, val, digits = 4) => {
+          const text = fmtMaybe(val, digits);
+          return `<div class="bp-run-kv"><span class="bp-run-k">${label}</span><span class="bp-run-v">${text}</span></div>`;
+        };
 
         card.innerHTML = `
           <div class="bp-run-card-header">
@@ -2920,6 +2964,11 @@
           </div>
           <div class="bp-run-meta">${metaLine}</div>
           <div class="bp-run-meta">started ${startedText} · view ${selected ? 'yes' : 'no'}</div>
+          <div class="bp-run-kv-grid">
+            ${moneyLine('成交额(quote)', volQuote, 4)}
+            ${moneyLine('总磨损(返佣后)', wearTotalNet, 6)}
+            ${moneyLine('每万磨损', wearPer10k, 2)}
+          </div>
           <div class="bp-run-actions">
             <button type="button" class="button-secondary" data-action="view" data-symbol="${sym}">查看</button>
             <button type="button" class="button-danger" data-action="stop" data-symbol="${sym}" ${running ? '' : 'disabled'}>停止</button>
@@ -3120,9 +3169,13 @@
 
         const liveSym = bpPickLiveSymbol(statusPayload, null);
         const runningRun = runs.find(r => r && r.running && bpNormalizeSymbol(r.symbol) === liveSym) || runs.find(r => r && r.running) || null;
-        const baseText = (runningRun && runningRun.last_error)
-          ? `错误：${runningRun.last_error}`
-          : (runningRun ? `已执行 ${runningRun.cycles_done}/${runningRun.cycles_target || 0}` : '未运行');
+        const noteText = (runningRun && runningRun.last_note) ? String(runningRun.last_note) : '';
+        const errText = (runningRun && runningRun.last_error) ? String(runningRun.last_error) : '';
+        const baseText = errText
+          ? `错误：${errText}`
+          : (noteText
+              ? `提示：${noteText}`
+              : (runningRun ? `已执行 ${runningRun.cycles_done}/${runningRun.cycles_target || 0}` : '未运行'));
         bpSetStatusLine({ baseText, liveSym, viewingSym: viewingSymbol, cacheHint: '' });
       } catch (e) {
         // Backend unavailable: show explicit empty state.
