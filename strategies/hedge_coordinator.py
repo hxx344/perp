@@ -30,6 +30,7 @@ import binascii
 import copy
 import logging
 import math
+import random
 import os
 import json
 import sys
@@ -279,6 +280,8 @@ class BackpackVolumeConfig:
     cycles: int = 0  # 0 = run until stopped
     max_spread_bps: float = 0.0
     cooldown_ms: int = 1500
+    cooldown_ms_min: int = 0
+    cooldown_ms_max: int = 0
     depth_safety_factor: float = 0.7
     min_cap_qty: Decimal = Decimal("0")
     fee_rate: float = 0.00026
@@ -3555,6 +3558,8 @@ class CoordinatorApp:
             cycles=int(payload.get("cycles") or 0),
             max_spread_bps=float(payload.get("max_spread_bps") or 0.0),
             cooldown_ms=int(payload.get("cooldown_ms") or 1500),
+            cooldown_ms_min=int(payload.get("cooldown_ms_min") or 0),
+            cooldown_ms_max=int(payload.get("cooldown_ms_max") or 0),
             depth_safety_factor=float(payload.get("depth_safety_factor") or 0.7),
             min_cap_qty=_decimal(payload.get("min_cap_qty"), "0"),
             fee_rate=float(payload.get("fee_rate") or 0.00026),
@@ -3864,7 +3869,25 @@ class CoordinatorApp:
                 pass
 
             now = _now_ts()
-            cooldown_s = max(0.0, float(cfg.cooldown_ms) / 1000.0)
+
+            # Cooldown scheduling:
+            # - If cooldown_ms_min/max are set (max>0 and max>=min), pick a random cooldown each cycle.
+            # - Otherwise use fixed cooldown_ms.
+            cooldown_s = 0.0
+            try:
+                mn = int(getattr(cfg, "cooldown_ms_min", 0) or 0)
+                mx = int(getattr(cfg, "cooldown_ms_max", 0) or 0)
+                if mx > 0:
+                    if mn < 0:
+                        mn = 0
+                    if mx < mn:
+                        mx = mn
+                    cooldown_ms = random.randint(mn, mx)
+                    cooldown_s = max(0.0, float(cooldown_ms) / 1000.0)
+                else:
+                    cooldown_s = max(0.0, float(cfg.cooldown_ms) / 1000.0)
+            except Exception:
+                cooldown_s = max(0.0, float(cfg.cooldown_ms) / 1000.0)
             if last_cycle_at and (now - last_cycle_at) < cooldown_s:
                 await asyncio.sleep(min(0.25, cooldown_s))
                 continue
