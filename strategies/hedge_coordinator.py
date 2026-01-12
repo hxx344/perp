@@ -135,6 +135,11 @@ try:
 except ImportError:  # pragma: no cover - script execution path
     from adjustments import AdjustmentAction, GrvtAdjustmentManager
 
+try:
+    from .backpack_adjustments import BackpackAdjustmentManager
+except ImportError:  # pragma: no cover - script execution path
+    from backpack_adjustments import BackpackAdjustmentManager
+
 BASE_DIR = Path(__file__).resolve().parent
 PDT_ROOT_DIR = BASE_DIR.parent
 
@@ -1412,6 +1417,7 @@ class HedgeState:
     strategy_metrics: Optional[Dict[str, Any]] = None
     grvt_accounts: Optional[Dict[str, Any]] = None
     paradex_accounts: Optional[Dict[str, Any]] = None
+    backpack_accounts: Optional[Dict[str, Any]] = None
 
     def update_from_payload(self, payload: Dict[str, Any]) -> None:
         position_raw = payload.get("position")
@@ -1430,6 +1436,7 @@ class HedgeState:
         strategy_metrics_raw = payload.get("strategy_metrics")
         grvt_accounts_raw = payload.get("grvt_accounts")
         paradex_accounts_raw = payload.get("paradex_accounts")
+        backpack_accounts_raw = payload.get("backpack_accounts")
 
         if position_raw is not None:
             try:
@@ -1530,6 +1537,16 @@ class HedgeState:
                 normalized_para["accounts"] = accounts_block[:50]
             self.paradex_accounts = normalized_para
 
+        if isinstance(backpack_accounts_raw, dict):
+            normalized_bp = copy.deepcopy(backpack_accounts_raw)
+            accounts_block = normalized_bp.get("accounts")
+            if isinstance(accounts_block, list) and len(accounts_block) > 50:
+                normalized_bp["accounts"] = accounts_block[:50]
+            positions_block = normalized_bp.get("positions")
+            if isinstance(positions_block, list) and len(positions_block) > 100:
+                normalized_bp["positions"] = positions_block[:100]
+            self.backpack_accounts = normalized_bp
+
         self.last_update_ts = time.time()
 
     def serialize(self) -> Dict[str, Any]:
@@ -1555,6 +1572,8 @@ class HedgeState:
             payload["grvt_accounts"] = copy.deepcopy(self.grvt_accounts)
         if self.paradex_accounts is not None:
             payload["paradex_accounts"] = copy.deepcopy(self.paradex_accounts)
+        if self.backpack_accounts is not None:
+            payload["backpack_accounts"] = copy.deepcopy(self.backpack_accounts)
         return payload
 
     @classmethod
@@ -3162,6 +3181,7 @@ class CoordinatorApp:
         self._coordinator = HedgeCoordinator(alert_settings=alert_settings)
         # Para/global alert scopes are controlled by CLI; do not force inheritance here.
         self._adjustments = GrvtAdjustmentManager()
+        self._backpack_adjustments = BackpackAdjustmentManager()
         self._vol_monitor = (
             VolatilityMonitor(
                 symbols=volatility_symbols,
@@ -3261,6 +3281,11 @@ class CoordinatorApp:
                 web.post("/para/adjust", self.handle_para_adjust),
                 web.post("/para/transfer", self.handle_para_transfer),
                 web.post("/para/adjust/ack", self.handle_para_adjust_ack),
+
+                # Backpack adjustments (monitor-executed)
+                web.get("/backpack/adjustments", self.handle_backpack_adjustments_list),
+                web.post("/backpack/adjust", self.handle_backpack_adjust_create),
+                web.post("/backpack/adjust/ack", self.handle_backpack_adjust_ack),
                 web.get("/simulation/pnl", self.handle_simulation_pnl),
 
                 # Backpack volume booster
@@ -4360,11 +4385,86 @@ class CoordinatorApp:
             pending = []
             pending += await self._adjustments.pending_for_agent(agent_id)
             pending += await self._para_adjustments.pending_for_agent(agent_id)
+            pending += await self._backpack_adjustments.pending_for_agent(agent_id)
             if pending:
                 agent_block = snapshot.get("agent")
                 if isinstance(agent_block, dict):
                     agent_block["pending_adjustments"] = pending
         return web.json_response(snapshot)
+
+    async def handle_backpack_adjustments_list(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        payload = await self._backpack_adjustments.list_all()
+        return web.json_response({"adjustments": payload})
+
+    async def handle_backpack_adjust_create(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="adjust payload must be JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="adjust payload must be an object")
+
+        agent_id = str(body.get("agent_id") or "").strip()
+        if not agent_id:
+            raise web.HTTPBadRequest(text="agent_id is required")
+        action = str(body.get("action") or "").strip().lower()
+        if action not in {"add", "reduce"}:
+            raise web.HTTPBadRequest(text="action must be 'add' or 'reduce'")
+        magnitude = body.get("magnitude")
+        symbols_raw = body.get("symbols")
+        if isinstance(symbols_raw, str) and symbols_raw:
+            symbols = [symbols_raw]
+        elif isinstance(symbols_raw, list) and symbols_raw:
+            symbols = [str(s) for s in symbols_raw if str(s).strip()]
+        else:
+            symbols = []
+        if not symbols:
+            raise web.HTTPBadRequest(text="symbols is required")
+        payload_cfg = body.get("payload")
+        payload_dict = payload_cfg if isinstance(payload_cfg, dict) else {}
+
+        adj = self._backpack_adjustments.create(
+            agent_id=agent_id,
+            action=action,
+            magnitude=magnitude,
+            symbols=symbols,
+            payload=payload_dict,
+        )
+        return web.json_response({"request_id": adj.request_id, "status": "queued"})
+
+    async def handle_backpack_adjust_ack(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="ack payload must be JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="ack payload must be an object")
+
+        request_id = str(body.get("request_id") or "").strip()
+        agent_id = str(body.get("agent_id") or "").strip()
+        status = str(body.get("status") or "").strip().lower()
+        note_raw = body.get("note")
+        note = str(note_raw) if note_raw is not None else None
+        if not request_id or not agent_id or not status:
+            raise web.HTTPBadRequest(text="request_id, agent_id, status are required")
+
+        extra = dict(body)
+        for k in ("request_id", "agent_id", "status", "note"):
+            extra.pop(k, None)
+
+        ok = await self._backpack_adjustments.acknowledge(
+            request_id=request_id,
+            agent_id=agent_id,
+            status=status,
+            note=note,
+            extra=extra,
+        )
+        if not ok:
+            raise web.HTTPNotFound(text="unknown request_id")
+        return web.json_response({"ok": True})
 
     async def handle_control_update(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
