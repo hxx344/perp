@@ -3646,9 +3646,14 @@
           // If the normal handler is also attached, sendBpAdjustment will see
           // bpAdjustLocked and no-op, so it's safe.
           try {
-            void sendBpAdjustment(actionLabel);
+            const promise = sendBpAdjustment(actionLabel);
+            if (promise && typeof promise.catch === 'function') {
+              promise.catch((e) => {
+                setBpAdjustStatus(`sendBpAdjustment 异步异常：${e}`, { stickyMs: 30000 });
+              });
+            }
           } catch (e) {
-            setBpAdjustStatus(`sendBpAdjustment 调用异常：${e}`, { stickyMs: 30000 });
+            setBpAdjustStatus(`sendBpAdjustment 同步异常：${e}`, { stickyMs: 30000 });
           }
         },
         true
@@ -6933,7 +6938,7 @@
           // ignore
         }
 
-        const rawMagnitude = parseFloat(bpAdjustSizeInput?.value ?? '1');
+  const rawMagnitude = parseFloat(bpAdjustSizeInput?.value ?? '1');
         const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : 1;
         bpAdjustLocked = true;
         updateBpAdjustButtons();
@@ -6955,6 +6960,15 @@
         }
 
         try {
+          if (typeof fetch !== 'function') {
+            throw new Error('fetch 不可用（浏览器环境异常）');
+          }
+          if (DEBUG_UI) {
+            setBpAdjustStatus(
+              `DEBUG: 即将 POST /backpack/adjust · payload=${JSON.stringify(payload)}`,
+              { stickyMs: 30000 }
+            );
+          }
           const response = await fetch('/backpack/adjust', {
             method: 'POST',
             credentials: 'same-origin',
@@ -6964,6 +6978,9 @@
             },
             body: JSON.stringify(payload)
           });
+          if (DEBUG_UI) {
+            setBpAdjustStatus(`DEBUG: 收到响应 status=${response.status}`, { stickyMs: 30000 });
+          }
           redirectIfUnauthorized(response);
           if (!response.ok) {
             const text = await response.text();
