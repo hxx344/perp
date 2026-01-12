@@ -47,6 +47,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import quote_plus
 
+try:
+    import dotenv  # type: ignore
+except Exception:  # pragma: no cover
+    dotenv = None
+
 from aiohttp import ClientSession, ClientTimeout, web
 
 import uuid
@@ -58,6 +63,28 @@ import uuid
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+
+def _load_repo_dotenv() -> bool:
+    """Best-effort load of `perp-dex-tools/.env`.
+
+    - Does NOT override existing process environment variables.
+    - Does NOT raise if dotenv isn't installed.
+    """
+
+    if dotenv is None:
+        return False
+    env_path = REPO_ROOT / ".env"
+    if not env_path.exists():
+        return False
+    try:
+        return bool(dotenv.load_dotenv(env_path, override=False))
+    except Exception:
+        return False
+
+
+# Make coordinator behavior consistent with other scripts that accept an env file.
+_load_repo_dotenv()
 
 # Local imports (support both package mode and script mode).
 try:
@@ -101,6 +128,16 @@ def _make_backpack_client(symbol: str = "") -> Any:
         "contract_id": sym,
     }
     return BackpackClient(cfg)  # type: ignore[misc]
+
+
+def _bp_env_diagnostics() -> Dict[str, Any]:
+    required = ["BACKPACK_PUBLIC_KEY", "BACKPACK_SECRET_KEY"]
+    missing = [name for name in required if not (os.getenv(name) or "").strip()]
+    return {
+        "required": required,
+        "missing": missing,
+        "configured": len(missing) == 0,
+    }
 
 PERSISTED_PARA_AUTO_BALANCE_FILE = Path(__file__).with_name(".para_auto_balance_config.json")
 BP_VOLUME_HISTORY_FILE = Path(__file__).with_name(".bp_volume_history.json")
@@ -2978,6 +3015,7 @@ class CoordinatorApp:
 
     async def handle_bp_volume_status(self, request: web.Request) -> web.Response:
         del request
+        env_diag = _bp_env_diagnostics()
         async with self._bp_volume.lock:
             runs = []
             for sym, state in sorted(self._bp_volume.states.items()):
@@ -3026,7 +3064,7 @@ class CoordinatorApp:
                         "wear_total_net_per_10k": wear_per_10k,
                     }
                 )
-            return web.json_response({"ok": True, "runs": runs})
+            return web.json_response({"ok": True, "env": env_diag, "runs": runs})
 
     async def handle_bp_volume_metrics(self, request: web.Request) -> web.Response:
         # Note: this endpoint historically returned the *in-memory* state.
@@ -3097,6 +3135,17 @@ class CoordinatorApp:
     async def handle_bp_volume_start(self, request: web.Request) -> web.Response:
         if BackpackClient is None:
             return web.json_response({"ok": False, "error": "Backpack dependencies not available"}, status=500)
+
+        env_diag = _bp_env_diagnostics()
+        if not env_diag["configured"]:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "Backpack env not configured (missing required environment variables)",
+                    "env": env_diag,
+                },
+                status=400,
+            )
 
         try:
             payload = await request.json()
