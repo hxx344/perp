@@ -318,6 +318,53 @@ class BackpackAccountMonitor:
         except Exception as exc:
             summary["positions_error"] = str(exc)
 
+        # Fallback: if the exchange client doesn't expose positions, try common
+        # Backpack REST endpoints directly (signed).
+        if not positions:
+            candidates = [
+                # Keep this list aligned with `openapi_bp.json`.
+                # OpenAPI (confirmed):
+                # - GET /api/v1/position (Instruction: positionQuery)
+                # - GET /api/v1/borrowLend/positions (Instruction: borrowLendPositionQuery)
+                #
+                # Note: older codebases sometimes probe /api/v1/positions or /api/v1/perp/*,
+                # but these are not present in the OpenAPI spec we ship in this repo.
+                ("positionQuery", "GET", "/api/v1/position"),
+                ("borrowLendPositionQuery", "GET", "/api/v1/borrowLend/positions"),
+            ]
+            last_err: Optional[str] = None
+            for instruction, method, path in candidates:
+                try:
+                    raw = self._bp_request(instruction, method, path, params={})
+                    # Accept both list and dict payloads.
+                    if isinstance(raw, list):
+                        for entry in raw:
+                            if isinstance(entry, dict):
+                                positions.append(cast(Dict[str, Any], entry))
+                        if positions:
+                            summary["positions_source"] = path
+                            break
+                    if isinstance(raw, dict):
+                        # Try common wrappers.
+                        wrapped = None
+                        for key in ("positions", "data", "result"):
+                            val = raw.get(key)
+                            if isinstance(val, list):
+                                wrapped = val
+                                break
+                        if wrapped is not None:
+                            for entry in wrapped:
+                                if isinstance(entry, dict):
+                                    positions.append(cast(Dict[str, Any], entry))
+                            if positions:
+                                summary["positions_source"] = path
+                                break
+                except Exception as exc:
+                    last_err = f"{path}: {exc}"
+                    continue
+            if not positions and last_err and "positions_error" not in summary:
+                summary["positions_error"] = last_err
+
         payload = {
             "agent_id": self._cfg.agent_id,
             "instrument": f"BACKPACK {self._cfg.label}",
