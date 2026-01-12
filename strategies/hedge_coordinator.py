@@ -3315,7 +3315,7 @@ class CoordinatorApp:
         net_fee_rate = fee_rate * max(0.0, 1.0 - rebate_rate)
         depth_safety_factor = float(params.get("depth_safety_factor") or cfg.depth_safety_factor)
 
-        source = "http"
+        source = "ws"
         age_ms: Optional[float] = None
 
         bid1: Decimal = Decimal("0")
@@ -3333,15 +3333,25 @@ class CoordinatorApp:
                     last_ts = self._bp_bbo_ws.last_update_ts(symbol)  # type: ignore[union-attr]
                 if last_ts:
                     age_ms = max(0.0, (time.time() - float(last_ts)) * 1000.0)
-                source = "ws"
                 bid1, bid1_qty, ask1, ask1_qty = quote
-            
+
+        # WS-only: if the symbol hasn't produced a quote yet, return a soft “warming up” payload.
         if not quote:
-            try:
-                client = _make_backpack_client(symbol)
-                bid1, bid1_qty, ask1, ask1_qty = await client.fetch_bbo_with_qty(symbol)
-            except Exception as exc:
-                return web.json_response({"ok": False, "error": f"bbo_fetch_failed: {exc}"}, status=502)
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": "bbo_not_ready: waiting for WS bookTicker",
+                    "symbol": symbol,
+                    "source": "ws",
+                    "age_ms": age_ms,
+                    "bid1": None,
+                    "bid1_qty": None,
+                    "ask1": None,
+                    "ask1_qty": None,
+                    "ts": _now_ts(),
+                },
+                status=503,
+            )
 
         mid = (bid1 + ask1) / Decimal("2") if (bid1 > 0 and ask1 > 0) else Decimal("0")
         spread_abs = ask1 - bid1
@@ -3410,6 +3420,8 @@ class CoordinatorApp:
             SERVER_INSTANCE_ID,
         )
 
+        # IMPORTANT: WS-only for BBO. We still use BackpackClient for order placement,
+        # but we must NOT use it for best bid/ask discovery.
         client = _make_backpack_client()
 
         consecutive_failures = 0
@@ -3482,17 +3494,21 @@ class CoordinatorApp:
                 await asyncio.sleep(min(0.25, cooldown_s))
                 continue
 
-            # Fetch L1.
-            try:
-                bid1, bid1_qty, ask1, ask1_qty = await client.fetch_bbo_with_qty(symbol)
-            except Exception as exc:
+            # Fetch L1 (WS-only).
+            quote: Optional[Tuple[Decimal, Decimal, Decimal, Decimal]] = None
+            if getattr(self, "_bp_bbo_ws", None) is not None:
+                with suppress(Exception):
+                    quote = await self._bp_bbo_ws.get_quote(symbol)  # type: ignore[union-attr]
+            if not quote:
                 async with self._bp_volume.lock:
                     st = self._bp_volume.states.get(symbol_u)
                     if st is not None and st.run_id == run_id:
-                        st.last_error = f"bbo_fetch_failed: {exc} | symbol={symbol}"
-                        st.last_gate = "bbo_fetch_failed"
-                await asyncio.sleep(0.5)
+                        st.last_gate = "bbo_ws_warming_up"
+                        st.last_note = f"waiting_ws_bbo: symbol={symbol}"
+                await asyncio.sleep(0.25)
                 continue
+
+            bid1, bid1_qty, ask1, ask1_qty = quote
 
             if bid1 <= 0 or ask1 <= 0:
                 async with self._bp_volume.lock:
