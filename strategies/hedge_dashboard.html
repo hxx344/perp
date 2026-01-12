@@ -7870,7 +7870,7 @@
         const priceSeriesBlock = data?.volatility?.price_series;
         // BTC/ETH volatility feed removed; without it, the price chart simply has no series.
         if (!priceSeriesBlock) {
-          return [];
+          return { percentSeries: [], diffSeries: null };
         }
         const priceEntries = priceSeriesBlock && typeof priceSeriesBlock === 'object'
           ? Object.values(priceSeriesBlock)
