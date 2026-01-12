@@ -375,6 +375,13 @@ class BackpackVolumeState:
     last_error: str = ""
     # Non-error informational message shown in status (e.g. waiting for depth)
     last_note: str = ""
+    # Runner diagnostics (helps debug "running but no fills" from the panel)
+    last_gate: str = ""
+    last_bid1: str = ""
+    last_ask1: str = ""
+    last_cap_qty: str = ""
+    last_spread_bps: Optional[float] = None
+    last_qty_exec: str = ""
     cfg: BackpackVolumeConfig = field(default_factory=BackpackVolumeConfig)
     summary: BackpackVolumeSummary = field(default_factory=BackpackVolumeSummary)
     recent: Deque[BackpackVolumeCycleRecord] = field(default_factory=lambda: deque(maxlen=200))
@@ -2986,6 +2993,12 @@ class CoordinatorApp:
                         "cycles_target": state.cfg.cycles,
                         "last_error": state.last_error,
                         "last_note": getattr(state, "last_note", ""),
+                        "last_gate": getattr(state, "last_gate", ""),
+                        "last_bid1": getattr(state, "last_bid1", ""),
+                        "last_ask1": getattr(state, "last_ask1", ""),
+                        "last_cap_qty": getattr(state, "last_cap_qty", ""),
+                        "last_spread_bps": getattr(state, "last_spread_bps", None),
+                        "last_qty_exec": getattr(state, "last_qty_exec", ""),
                         "volume_quote": quote,
                         "wear_total_net": wear_total_net,
                         "wear_total_net_per_10k": wear_per_10k,
@@ -3477,10 +3490,17 @@ class CoordinatorApp:
                     st = self._bp_volume.states.get(symbol_u)
                     if st is not None and st.run_id == run_id:
                         st.last_error = f"bbo_fetch_failed: {exc} | symbol={symbol}"
+                        st.last_gate = "bbo_fetch_failed"
                 await asyncio.sleep(0.5)
                 continue
 
             if bid1 <= 0 or ask1 <= 0:
+                async with self._bp_volume.lock:
+                    st = self._bp_volume.states.get(symbol_u)
+                    if st is not None and st.run_id == run_id:
+                        st.last_gate = "invalid_l1"
+                        st.last_bid1 = str(bid1)
+                        st.last_ask1 = str(ask1)
                 if _bp_volume_debug_enabled() and (now % 5) < 1:
                     _bpv_log(
                         "warning",
@@ -3505,6 +3525,16 @@ class CoordinatorApp:
             safe_qty = cap_qty * Decimal(str(max(0.0, min(cfg.depth_safety_factor, 1.0))))
             qty_exec = min(cfg.qty_per_cycle, safe_qty)
 
+            # Save last snapshot for UI/debug.
+            async with self._bp_volume.lock:
+                st = self._bp_volume.states.get(symbol_u)
+                if st is not None and st.run_id == run_id:
+                    st.last_bid1 = str(bid1)
+                    st.last_ask1 = str(ask1)
+                    st.last_cap_qty = str(cap_qty)
+                    st.last_spread_bps = spread_bps
+                    st.last_qty_exec = str(qty_exec)
+
             # Depth gate: only execute when current L1 capacity can cover BOTH legs comfortably.
             # Requirement: cap_qty must be >= 2 * qty_per_cycle, otherwise wait.
             if cap_qty < (cfg.qty_per_cycle * Decimal("2")):
@@ -3517,6 +3547,7 @@ class CoordinatorApp:
                                 f"waiting_depth: cap_qty={cap_qty} < 2*qty_per_cycle={cfg.qty_per_cycle * Decimal('2')} "
                                 f"| symbol={symbol}"
                             )
+                        st.last_gate = "waiting_depth"
                 await asyncio.sleep(0.25)
                 continue
 
@@ -3532,6 +3563,10 @@ class CoordinatorApp:
                 pass
 
             if cfg.min_cap_qty > 0 and cap_qty < cfg.min_cap_qty:
+                async with self._bp_volume.lock:
+                    st = self._bp_volume.states.get(symbol_u)
+                    if st is not None and st.run_id == run_id:
+                        st.last_gate = "min_cap_qty"
                 if _bp_volume_debug_enabled() and (now % 5) < 1:
                     _bpv_log(
                         "warning",
@@ -3543,6 +3578,10 @@ class CoordinatorApp:
                 await asyncio.sleep(0.25)
                 continue
             if spread_bps <= 0 or spread_bps > cfg.max_spread_bps:
+                async with self._bp_volume.lock:
+                    st = self._bp_volume.states.get(symbol_u)
+                    if st is not None and st.run_id == run_id:
+                        st.last_gate = "spread"
                 if _bp_volume_debug_enabled() and (now % 5) < 1:
                     _bpv_log(
                         "warning",
@@ -3556,6 +3595,10 @@ class CoordinatorApp:
                 await asyncio.sleep(0.25)
                 continue
             if qty_exec <= 0:
+                async with self._bp_volume.lock:
+                    st = self._bp_volume.states.get(symbol_u)
+                    if st is not None and st.run_id == run_id:
+                        st.last_gate = "qty_exec"
                 if _bp_volume_debug_enabled() and (now % 5) < 1:
                     _bpv_log(
                         "warning",
@@ -3625,6 +3668,7 @@ class CoordinatorApp:
                     if st is not None and st.run_id == run_id:
                         ctx = f"symbol={symbol} qty_exec={qty_exec} spread_bps={spread_bps:.2f}"
                         st.last_error = f"cycle_failed: {exc} | {ctx}{(' | tb=' + tb) if tb else ''}"
+                        st.last_gate = "cycle_failed"
                         if consecutive_failures >= 3:
                             st.running = False
                 await asyncio.sleep(0.5)
@@ -3632,6 +3676,11 @@ class CoordinatorApp:
 
             consecutive_failures = 0
             last_cycle_at = _now_ts()
+
+            async with self._bp_volume.lock:
+                st = self._bp_volume.states.get(symbol_u)
+                if st is not None and st.run_id == run_id:
+                    st.last_gate = "executed"
 
             paired_qty = min(buy_filled_qty, sell_filled_qty)
             buy_notional = buy_avg * buy_filled_qty
