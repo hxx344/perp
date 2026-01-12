@@ -62,11 +62,17 @@ except ImportError:  # pragma: no cover
     from backpack_bookticker_ws import BackpackBookTickerWS  # type: ignore
 
 # Optional Backpack trading dependencies.
+_BACKPACK_IMPORT_ERROR: Optional[str] = None
 try:
     from exchanges.backpack import BackpackClient, TradingConfig  # type: ignore
-except Exception:  # pragma: no cover
+except Exception as exc:  # pragma: no cover
     BackpackClient = None  # type: ignore
     TradingConfig = None  # type: ignore
+    _BACKPACK_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+    logging.getLogger("hedge.coordinator").exception(
+        "Backpack dependency import failed: %s",
+        _BACKPACK_IMPORT_ERROR,
+    )
 
 
 def _make_backpack_client(symbol: str = "") -> Any:
@@ -2878,13 +2884,25 @@ class CoordinatorApp:
                 dict(request.query),
             )
         if BackpackClient is None or TradingConfig is None:
+            payload: Dict[str, Any] = {
+                "ok": False,
+                "error": "Backpack dependencies not available",
+            }
             if _coord_debug_enabled():
+                payload["debug"] = {
+                    "BackpackClient": "ok" if BackpackClient is not None else "None",
+                    "TradingConfig": "ok" if TradingConfig is not None else "None",
+                    "import_error": _BACKPACK_IMPORT_ERROR,
+                    "sys_executable": sys.executable,
+                    "repo_root": str(REPO_ROOT),
+                }
                 LOGGER.warning(
-                    "[debug] Backpack dependencies missing: BackpackClient=%s TradingConfig=%s",
-                    "ok" if BackpackClient is not None else "None",
-                    "ok" if TradingConfig is not None else "None",
+                    "[debug] Backpack dependencies missing: BackpackClient=%s TradingConfig=%s err=%s",
+                    payload["debug"]["BackpackClient"],
+                    payload["debug"]["TradingConfig"],
+                    payload["debug"]["import_error"],
                 )
-            return web.json_response({"ok": False, "error": "Backpack dependencies not available"}, status=500)
+            return web.json_response(payload, status=500)
 
         try:
             client = _make_backpack_client("ETH-PERP")
