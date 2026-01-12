@@ -70,12 +70,13 @@ except ImportError:  # pragma: no cover
     from backpack_bookticker_ws import BackpackBookTickerWS  # type: ignore
 
 # Optional Backpack trading dependencies.
+# Note: exchanges.backpack in this repo exports BackpackClient(config: dict). It
+# does not expose TradingConfig (that was from an older SDK wrapper).
 _BACKPACK_IMPORT_ERROR: Optional[str] = None
 try:
-    from exchanges.backpack import BackpackClient, TradingConfig  # type: ignore
+    from exchanges.backpack import BackpackClient  # type: ignore
 except Exception as exc:  # pragma: no cover
     BackpackClient = None  # type: ignore
-    TradingConfig = None  # type: ignore
     _BACKPACK_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
     logging.getLogger("hedge.coordinator").exception(
         "Backpack dependency import failed: %s",
@@ -90,9 +91,16 @@ def _make_backpack_client(symbol: str = "") -> Any:
     gracefully return 500 with a clear message.
     """
 
-    if BackpackClient is None or TradingConfig is None:
+    if BackpackClient is None:
         raise RuntimeError("Backpack dependencies not available")
-    return BackpackClient(TradingConfig(), symbol=symbol)  # type: ignore[misc]
+
+    # Minimal config expected by BaseExchangeClient/BackpackClient implementation.
+    sym = str(symbol or "").strip() or "ETH-PERP"
+    cfg: Dict[str, Any] = {
+        "ticker": sym,
+        "contract_id": sym,
+    }
+    return BackpackClient(cfg)  # type: ignore[misc]
 
 PERSISTED_PARA_AUTO_BALANCE_FILE = Path(__file__).with_name(".para_auto_balance_config.json")
 BP_VOLUME_HISTORY_FILE = Path(__file__).with_name(".bp_volume_history.json")
@@ -2883,7 +2891,7 @@ class CoordinatorApp:
                 request.path,
                 dict(request.query),
             )
-        if BackpackClient is None or TradingConfig is None:
+        if BackpackClient is None:
             payload: Dict[str, Any] = {
                 "ok": False,
                 "error": "Backpack dependencies not available",
@@ -2891,15 +2899,13 @@ class CoordinatorApp:
             if _coord_debug_enabled():
                 payload["debug"] = {
                     "BackpackClient": "ok" if BackpackClient is not None else "None",
-                    "TradingConfig": "ok" if TradingConfig is not None else "None",
                     "import_error": _BACKPACK_IMPORT_ERROR,
                     "sys_executable": sys.executable,
                     "repo_root": str(REPO_ROOT),
                 }
                 LOGGER.warning(
-                    "[debug] Backpack dependencies missing: BackpackClient=%s TradingConfig=%s err=%s",
+                    "[debug] Backpack dependencies missing: BackpackClient=%s err=%s",
                     payload["debug"]["BackpackClient"],
-                    payload["debug"]["TradingConfig"],
                     payload["debug"]["import_error"],
                 )
             return web.json_response(payload, status=500)
@@ -3026,7 +3032,7 @@ class CoordinatorApp:
         return web.json_response({"ok": True, "symbol": symbol})
 
     async def handle_bp_volume_start(self, request: web.Request) -> web.Response:
-        if BackpackClient is None or TradingConfig is None:
+        if BackpackClient is None:
             return web.json_response({"ok": False, "error": "Backpack dependencies not available"}, status=500)
 
         try:
@@ -3210,7 +3216,7 @@ class CoordinatorApp:
         - depth_safety_factor: optional; defaults to current cfg.depth_safety_factor
         - fee_rate / rebate_rate: optional; defaults to current cfg values
         """
-        if BackpackClient is None or TradingConfig is None:
+        if BackpackClient is None:
             return web.json_response({"ok": False, "error": "Backpack dependencies not available"}, status=500)
 
         params = request.rel_url.query
@@ -3311,7 +3317,7 @@ class CoordinatorApp:
         """Background task for Backpack volume boosting (BUY market -> SELL market)."""
         # Per-symbol runner; stop when state.running flips or run_id changes.
         # Defensive: if Backpack deps are missing, don't crash the task with AssertionError.
-        if BackpackClient is None or TradingConfig is None:
+        if BackpackClient is None:
             async with self._bp_volume.lock:
                 state = self._bp_volume.states.get(symbol_u)
                 if state is not None and state.run_id == run_id:
@@ -3319,7 +3325,6 @@ class CoordinatorApp:
                     state.running = False
             return
 
-        client = _make_backpack_client()
         client = _make_backpack_client()
 
         consecutive_failures = 0
