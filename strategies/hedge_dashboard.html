@@ -6490,6 +6490,23 @@
         return text;
       }
 
+      // Shared helper for PARA/GRVT/Backpack adjustment panels.
+      // Some earlier builds referenced it without defining it, which breaks the
+      // click handler before the fetch() call is executed.
+      function describeAdjustmentAction(action) {
+        const value = String(action || '').trim().toLowerCase();
+        if (value === 'add' || value === 'increase') {
+          return '加仓';
+        }
+        if (value === 'reduce' || value === 'decrease') {
+          return '减仓';
+        }
+        if (!value) {
+          return '--';
+        }
+        return value.toUpperCase();
+      }
+
       // Some pages used these helpers as globals; ensure they exist.
       function formatTimestamp(value) {
         if (value === undefined || value === null) {
