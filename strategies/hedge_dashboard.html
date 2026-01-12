@@ -2999,6 +2999,13 @@
         }
       } catch (e) {
         bpStatus.textContent = `市场加载失败：${e.message}`;
+        if (bpSymbolSelect) {
+          bpSymbolSelect.innerHTML = '';
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'Markets load failed (check server logs)';
+          bpSymbolSelect.appendChild(opt);
+        }
       }
     }
 
@@ -6326,6 +6333,27 @@
         }
         const match = candidate.match(/[A-Z]+/);
         return match ? match[0] : null;
+      }
+
+      // --- Symbol normalization ---
+      // Some panels rely on normalizeSymbolLabel(), but older builds didn't include it.
+      // Keep a lightweight implementation here to avoid runtime crashes that prevent
+      // subsequent UI bootstrapping (e.g. Backpack markets dropdown).
+      function normalizeSymbolLabel(symbol) {
+        if (symbol == null) {
+          return '';
+        }
+        let text = String(symbol).trim();
+        if (!text) {
+          return '';
+        }
+        // Prefer a consistent display value across exchanges.
+        text = text.toUpperCase();
+        // Common separators normalization.
+        text = text.replace(/\s+/g, '');
+        // Keep common futures naming but normalize delimiters.
+        text = text.replace(/[:_\-]+/g, '-');
+        return text;
       }
 
       function resolveMarginTier(baseAsset, notionalValue) {
