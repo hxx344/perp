@@ -6851,6 +6851,16 @@
         if (!action || bpAdjustLocked) {
           return;
         }
+
+        if (bpAdjustStatus) {
+          bpAdjustStatus.textContent = `已点击：${describeAdjustmentAction(action)}，准备提交…`;
+        }
+        try {
+          console.debug('[bp-adjust] click', { action });
+        } catch (_) {
+          // ignore
+        }
+
         const rawMagnitude = parseFloat(bpAdjustSizeInput?.value ?? '1');
         const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : 1;
         bpAdjustLocked = true;
@@ -6877,6 +6887,7 @@
         try {
           const response = await fetch('/backpack/adjust', {
             method: 'POST',
+            credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
           });
