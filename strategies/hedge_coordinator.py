@@ -51,6 +51,14 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 import uuid
 
+# Ensure imports work regardless of the current working directory or service wrapper.
+# Some deployments end up with sys.path[0] == ".../strategies", which breaks
+# imports like `from exchanges...`. We pin the repository root (parent of this
+# file's directory) so intra-repo imports resolve.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 # Local imports (support both package mode and script mode).
 try:
     from .adjustments import AdjustmentAction, GrvtAdjustmentManager  # type: ignore
@@ -85,14 +93,6 @@ def _make_backpack_client(symbol: str = "") -> Any:
     if BackpackClient is None or TradingConfig is None:
         raise RuntimeError("Backpack dependencies not available")
     return BackpackClient(TradingConfig(), symbol=symbol)  # type: ignore[misc]
-
-# Ensure imports work regardless of the current working directory or service wrapper.
-# Some deployments end up with sys.path[0] == ".../strategies", which breaks
-# imports like `from exchanges...`. We pin the repository root (parent of this
-# file's directory) so intra-repo imports resolve.
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 PERSISTED_PARA_AUTO_BALANCE_FILE = Path(__file__).with_name(".para_auto_balance_config.json")
 BP_VOLUME_HISTORY_FILE = Path(__file__).with_name(".bp_volume_history.json")
