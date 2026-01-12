@@ -9259,6 +9259,7 @@
           let hasWallet = false;
           let latestUpdate = 0;
           const flattenedAccounts = [];
+          let sawAnyPositions = false;
 
           for (const [agentId, snapshot] of entries) {
             if (!snapshot || typeof snapshot !== 'object') {
@@ -9269,6 +9270,9 @@
             const accountsRaw = snapshot.accounts;
             const accounts = Array.isArray(accountsRaw) ? accountsRaw : [];
             const snapshotPositions = Array.isArray(snapshot.positions) ? snapshot.positions : [];
+            if (snapshotPositions.length) {
+              sawAnyPositions = true;
+            }
             const snapshotTs = Number(summary.updated_at ?? snapshot.updated_at);
             if (Number.isFinite(snapshotTs) && snapshotTs > latestUpdate) {
               latestUpdate = snapshotTs;
@@ -9352,7 +9356,12 @@
 
           const updatedText = formatTimestamp(latestUpdate);
           if (bpSummaryTime) bpSummaryTime.textContent = updatedText ?? '--';
-          if (bpSummaryUpdated) bpSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
+          if (bpSummaryUpdated) {
+            const baseText = updatedText ? `Updated ${updatedText}` : 'Updated —';
+            bpSummaryUpdated.textContent = (!sawAnyPositions && flattenedAccounts.length)
+              ? `${baseText} · 未收到 positions（请确认已运行 backpack_account_monitor 并上报持仓）`
+              : baseText;
+          }
 
           if (!bpAccountGrid) {
             return;
