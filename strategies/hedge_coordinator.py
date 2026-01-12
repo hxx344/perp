@@ -377,6 +377,10 @@ class BackpackVolumeState:
     last_note: str = ""
     # Runner diagnostics (helps debug "running but no fills" from the panel)
     last_gate: str = ""
+    # Best-effort runner liveness hints for status/debug.
+    last_heartbeat_ts: float = 0.0
+    last_cycle_attempt_ts: float = 0.0
+    task_last_exception: str = ""
     last_bid1: str = ""
     last_ask1: str = ""
     last_cap_qty: str = ""
@@ -2977,6 +2981,19 @@ class CoordinatorApp:
         async with self._bp_volume.lock:
             runs = []
             for sym, state in sorted(self._bp_volume.states.items()):
+                task_done = None
+                task_cancelled = None
+                task_exception = None
+                if getattr(state, "task", None) is not None:
+                    with suppress(Exception):
+                        task_done = bool(state.task.done())  # type: ignore[union-attr]
+                    with suppress(Exception):
+                        task_cancelled = bool(state.task.cancelled())  # type: ignore[union-attr]
+                    with suppress(Exception):
+                        if state.task.done():  # type: ignore[union-attr]
+                            exc = state.task.exception()  # type: ignore[union-attr]
+                            if exc is not None:
+                                task_exception = f"{type(exc).__name__}: {exc}"
                 summary_dict: Dict[str, Any] = {}
                 with suppress(Exception):
                     summary_dict = state.summary.to_dict(state.cfg) or {}
@@ -2999,6 +3016,11 @@ class CoordinatorApp:
                         "last_cap_qty": getattr(state, "last_cap_qty", ""),
                         "last_spread_bps": getattr(state, "last_spread_bps", None),
                         "last_qty_exec": getattr(state, "last_qty_exec", ""),
+                        "last_heartbeat_ts": getattr(state, "last_heartbeat_ts", 0.0),
+                        "last_cycle_attempt_ts": getattr(state, "last_cycle_attempt_ts", 0.0),
+                        "task_done": task_done,
+                        "task_cancelled": task_cancelled,
+                        "task_exception": task_exception or getattr(state, "task_last_exception", ""),
                         "volume_quote": quote,
                         "wear_total_net": wear_total_net,
                         "wear_total_net_per_10k": wear_per_10k,
@@ -3437,6 +3459,8 @@ class CoordinatorApp:
                 if (not state.running) or state.run_id != run_id:
                     return
                 cfg = copy.deepcopy(state.cfg)
+                with suppress(Exception):
+                    state.last_heartbeat_ts = _now_ts()
 
             # Defensive: symbol must be a non-empty string. If it's None/empty,
             # fail fast so we don't raise confusing AttributeError deep in client code (e.g. `.upper()`).
@@ -3629,6 +3653,10 @@ class CoordinatorApp:
 
             # Execute BUY -> SELL (market), sell qty follows buy filled.
             try:
+                async with self._bp_volume.lock:
+                    st = self._bp_volume.states.get(symbol_u)
+                    if st is not None and st.run_id == run_id:
+                        st.last_cycle_attempt_ts = _now_ts()
                 # User assumption: both legs fill immediately. Run them concurrently to reduce serial latency.
                 _bpv_log(
                     "warning",
@@ -3752,6 +3780,8 @@ class CoordinatorApp:
 
             # Small yield.
             await asyncio.sleep(0)
+
+            
 
     async def handle_dashboard_redirect(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request, redirect_on_fail=True)
