@@ -3853,6 +3853,34 @@ class CoordinatorApp:
             except (TypeError, ValueError):
                 raise web.HTTPBadRequest(text="twap_duration_seconds must be an integer")
 
+        # Backpack native TWAP supports custom step/interval. Allow dashboard to specify
+        # it as either interval_ms or twap_step_seconds, and provide a reasonable
+        # default when only twap_duration_seconds is given.
+        step_raw = body.get("twap_step_seconds")
+        interval_ms_raw = body.get("interval_ms")
+        if interval_ms_raw is not None or step_raw is not None:
+            try:
+                if interval_ms_raw is not None:
+                    interval_ms = int(interval_ms_raw)
+                else:
+                    step_s = str(step_raw).strip()
+                    interval_ms = int(float(step_s) * 1000)
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text="interval_ms/twap_step_seconds must be a number")
+            if interval_ms <= 0:
+                raise web.HTTPBadRequest(text="interval_ms must be > 0")
+            payload_dict.setdefault("interval_ms", interval_ms)
+
+        # Also map twap_duration_seconds -> duration_ms for the monitor's Strategy API.
+        # Keep it best-effort; monitor has its own defaults.
+        if "twap_duration_seconds" in payload_dict and "duration_ms" not in payload_dict:
+            with suppress(Exception):
+                payload_dict["duration_ms"] = int(payload_dict["twap_duration_seconds"]) * 1000
+
+        # If user only set duration, pick a sane default step (5s) if not provided.
+        if "duration_ms" in payload_dict and "interval_ms" not in payload_dict:
+            payload_dict.setdefault("interval_ms", 5_000)
+
         adj = self._backpack_adjustments.create(
             agent_id=agent_id or "all",
             action=action,

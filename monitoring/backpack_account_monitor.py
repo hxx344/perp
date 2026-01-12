@@ -758,7 +758,15 @@ class BackpackAccountMonitor:
         agent_block = snapshot.get("agent")
         if not isinstance(agent_block, dict):
             return
-        pending = agent_block.get("pending_adjustments")
+        # The coordinator exposes Backpack adjustments via the dedicated
+        # top-level field `backpack_adjustments` (newer contract) so we don't
+        # piggyback on the shared `pending_adjustments` queue.
+        pending = snapshot.get("backpack_adjustments")
+        if not isinstance(pending, list):
+            # Backwards compatibility: older coordinator versions only provide
+            # the generic per-agent pending queue.
+            pending = agent_block.get("pending_adjustments")
+
         if not isinstance(pending, list) or not pending:
             self._prune_processed_adjustments()
             return

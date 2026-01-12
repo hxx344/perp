@@ -2606,6 +2606,11 @@
               <input type="number" id="bp-twap-duration" min="30" max="86400" step="30" value="900" />
               <small style="color: #8a94a6;">30-86400，30 秒步进</small>
             </label>
+            <label id="bp-twap-step-wrapper">
+              TWAP 步进 (秒)
+              <input type="number" id="bp-twap-step" min="1" max="3600" step="1" value="5" />
+              <small style="color: #8a94a6;">每隔多少秒下一跳；默认 5 秒</small>
+            </label>
             <div class="grvt-adjust-buttons">
               <button type="button" id="bp-adjust-add">加仓</button>
               <button type="button" class="button-danger" id="bp-adjust-reduce">减仓</button>
@@ -3325,6 +3330,8 @@
   const bpOrderModeSelect = document.getElementById('bp-order-mode');
   const bpTwapDurationInput = document.getElementById('bp-twap-duration');
   const bpTwapDurationWrapper = document.getElementById('bp-twap-duration-wrapper');
+  const bpTwapStepInput = document.getElementById('bp-twap-step');
+  const bpTwapStepWrapper = document.getElementById('bp-twap-step-wrapper');
   const bpResetSymbolButton = document.getElementById('bp-reset-symbol');
   const bpAdjustAddButton = document.getElementById('bp-adjust-add');
   const bpAdjustReduceButton = document.getElementById('bp-adjust-reduce');
@@ -6940,6 +6947,20 @@
         if (bpTwapDurationWrapper) {
           bpTwapDurationWrapper.style.display = mode === 'twap' ? 'block' : 'none';
         }
+        if (bpTwapStepWrapper) {
+          bpTwapStepWrapper.style.display = mode === 'twap' ? 'block' : 'none';
+        }
+      }
+
+      function clampBpTwapStepSeconds(value) {
+        const raw = typeof value === 'string' ? parseFloat(value) : Number(value);
+        const step = Number.isFinite(raw) ? raw : 0;
+        const min = 1;
+        const max = 3600;
+        if (step <= 0) {
+          return null;
+        }
+        return Math.max(min, Math.min(max, Math.round(step)));
       }
 
       async function sendBpAdjustment(action) {
@@ -6972,6 +6993,11 @@
           const duration = clampTwapDurationSeconds(bpTwapDurationInput?.value ?? 0) || 900;
           payload.order_mode = 'twap';
           payload.twap_duration_seconds = duration;
+
+          const stepSeconds = clampBpTwapStepSeconds(bpTwapStepInput?.value ?? 0);
+          if (stepSeconds) {
+            payload.twap_step_seconds = stepSeconds;
+          }
         } else {
           payload.order_mode = 'market';
         }
