@@ -236,6 +236,77 @@ class BackpackAccountMonitor:
         summary: Dict[str, Any] = {}
         positions: List[Dict[str, Any]] = []
 
+        # Dashboard expects some numeric fields on each account card (see `hedge_dashboard.html`).
+        # Prefer pulling these from Backpack REST (OpenAPI):
+        # - GET /api/v1/capital           (Instruction: balanceQuery)
+        # - GET /api/v1/capital/collateral (Instruction: collateralQuery)
+        # These endpoints give us stable wallet + margin summary numbers.
+        balances: Optional[Dict[str, Any]] = None
+        collateral: Optional[Dict[str, Any]] = None
+        try:
+            balances = self._bp_request(
+                "balanceQuery",
+                "GET",
+                "/api/v1/capital",
+                params={},
+            )
+            if not isinstance(balances, dict):
+                summary["balances_error"] = f"unexpected /capital response type={type(balances).__name__}"
+                balances = None
+        except Exception as exc:
+            summary["balances_error"] = str(exc)
+
+        try:
+            collateral = self._bp_request(
+                "collateralQuery",
+                "GET",
+                "/api/v1/capital/collateral",
+                params={},
+            )
+            if not isinstance(collateral, dict):
+                summary["collateral_error"] = f"unexpected /capital/collateral response type={type(collateral).__name__}"
+                collateral = None
+        except Exception as exc:
+            summary["collateral_error"] = str(exc)
+
+        # Parse out a couple of common, dashboard-friendly numbers.
+        # - balance: prefer USDC available for perps; fall back to sum(available)
+        # - equity: prefer netEquity from MarginAccountSummary
+        # - unrealized_pnl: prefer pnlUnrealized from MarginAccountSummary
+        balance_available: Optional[Decimal] = None
+        balance_total: Optional[Decimal] = None
+        equity: Optional[Decimal] = None
+        unrealized_pnl: Optional[Decimal] = None
+
+        if isinstance(balances, dict) and balances:
+            usdc = balances.get("USDC")
+            if isinstance(usdc, dict):
+                balance_available = _decimal_from(usdc.get("available"))
+                balance_total = _decimal_from(usdc.get("total"))
+            if balance_available is None:
+                acc = Decimal("0")
+                any_val = False
+                for v in balances.values():
+                    if not isinstance(v, dict):
+                        continue
+                    dv = _decimal_from(v.get("available"))
+                    if dv is None:
+                        continue
+                    any_val = True
+                    acc += dv
+                if any_val:
+                    balance_available = acc
+
+        if isinstance(collateral, dict) and collateral:
+            equity = _decimal_from(collateral.get("netEquity"))
+            unrealized_pnl = _decimal_from(collateral.get("pnlUnrealized"))
+
+        # Expose raw snapshots for debug/inspection.
+        if balances is not None:
+            summary["balances"] = balances
+        if collateral is not None:
+            summary["collateral"] = collateral
+
         try:
             get_positions = getattr(self._client, "get_positions", None)
             if callable(get_positions):
@@ -256,6 +327,11 @@ class BackpackAccountMonitor:
                 "accounts": [
                     {
                         "name": self._cfg.label,
+                        # Common field names the dashboard renderer understands.
+                        "balance": _decimal_to_str(balance_total) or _decimal_to_str(balance_available),
+                        "available_balance": _decimal_to_str(balance_available),
+                        "equity": _decimal_to_str(equity),
+                        "unrealized_pnl": _decimal_to_str(unrealized_pnl),
                     }
                 ],
                 "positions": positions,
