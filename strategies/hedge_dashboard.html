@@ -2516,6 +2516,81 @@
       </div>
       <p class="empty" id="bp-empty">Waiting for Backpack monitor…</p>
 
+      <div class="grvt-card hidden" id="bp-card">
+        <div class="grvt-summary-grid">
+          <article class="card grvt-summary-card">
+            <h3>Total PnL</h3>
+            <div class="value" id="bp-total-pnl">--</div>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Net Equity</h3>
+            <div class="value" id="bp-total-equity">--</div>
+            <p class="summary-sub" id="bp-wallet-balance">Wallet --</p>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Last Update</h3>
+            <div class="value" id="bp-summary-time">--</div>
+            <p class="grvt-summary-updated" id="bp-summary-updated">Updated —</p>
+          </article>
+        </div>
+        <div>
+          <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">Per Account Snapshot</h3>
+          <div class="grvt-account-grid" id="bp-account-grid"></div>
+          <p class="empty hidden" id="bp-accounts-empty">No account data yet…</p>
+        </div>
+        <div class="grvt-adjust-panel" id="bp-adjust-panel">
+          <div class="grvt-adjust-header">
+            <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Backpack Position Adjustments</h3>
+            <p class="summary-sub" style="margin: 0;">广播加/减仓指令到 Backpack VPS</p>
+          </div>
+          <div class="grvt-adjust-controls">
+            <label>
+              Symbol
+              <input type="text" id="bp-adjust-symbol" placeholder="ETH-PERP" />
+            </label>
+            <label>
+              Size
+              <input type="number" id="bp-adjust-size" min="0.001" step="0.001" value="1" />
+            </label>
+            <label>
+              下单方式
+              <select id="bp-order-mode">
+                <option value="market">市价</option>
+                <option value="twap" selected>TWAP</option>
+              </select>
+            </label>
+            <label id="bp-twap-duration-wrapper">
+              TWAP 时长 (秒)
+              <input type="number" id="bp-twap-duration" min="30" max="86400" step="30" value="900" />
+              <small style="color: #8a94a6;">30-86400，30 秒步进</small>
+            </label>
+            <div class="grvt-adjust-buttons">
+              <button type="button" id="bp-adjust-add">加仓</button>
+              <button type="button" class="button-danger" id="bp-adjust-reduce">减仓</button>
+            </div>
+            <p class="grvt-adjust-status" id="bp-adjust-status">等待指令…</p>
+          </div>
+          <div class="grvt-adjust-history">
+            <table>
+              <thead>
+                <tr>
+                  <th rowspan="2">时间</th>
+                  <th rowspan="2">动作</th>
+                  <th rowspan="2">数量</th>
+                  <th rowspan="2">币种</th>
+                  <th rowspan="2">状态</th>
+                  <th colspan="4" style="text-align:center;">VPS 明细</th>
+                </tr>
+                <tr>
+                  <th>节点</th><th>下单</th><th>均价</th><th>成交</th>
+                </tr>
+              </thead>
+              <tbody id="bp-adjust-history"><tr><td colspan="9">暂无记录</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <section class="grid" style="margin-top: 1rem;">
         <article class="card" style="grid-column: 1 / -1;">
           <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 1rem; flex-wrap: wrap;">
@@ -2629,81 +2704,6 @@
           </div>
         </article>
       </section>
-
-      <div class="grvt-card hidden" id="bp-card">
-        <div class="grvt-summary-grid">
-          <article class="card grvt-summary-card">
-            <h3>Total PnL</h3>
-            <div class="value" id="bp-total-pnl">--</div>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>Net Equity</h3>
-            <div class="value" id="bp-total-equity">--</div>
-            <p class="summary-sub" id="bp-wallet-balance">Wallet --</p>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>Last Update</h3>
-            <div class="value" id="bp-summary-time">--</div>
-            <p class="grvt-summary-updated" id="bp-summary-updated">Updated —</p>
-          </article>
-        </div>
-        <div>
-          <h3 style="margin-bottom: 0.75rem; font-size: 1rem;">Per Account Snapshot</h3>
-          <div class="grvt-account-grid" id="bp-account-grid"></div>
-          <p class="empty hidden" id="bp-accounts-empty">No account data yet…</p>
-        </div>
-        <div class="grvt-adjust-panel" id="bp-adjust-panel">
-          <div class="grvt-adjust-header">
-            <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Backpack Position Adjustments</h3>
-            <p class="summary-sub" style="margin: 0;">广播加/减仓指令到 Backpack VPS</p>
-          </div>
-          <div class="grvt-adjust-controls">
-            <label>
-              Symbol
-              <input type="text" id="bp-adjust-symbol" placeholder="ETH-PERP" />
-            </label>
-            <label>
-              Size
-              <input type="number" id="bp-adjust-size" min="0.001" step="0.001" value="1" />
-            </label>
-            <label>
-              下单方式
-              <select id="bp-order-mode">
-                <option value="market">市价</option>
-                <option value="twap" selected>TWAP</option>
-              </select>
-            </label>
-            <label id="bp-twap-duration-wrapper">
-              TWAP 时长 (秒)
-              <input type="number" id="bp-twap-duration" min="30" max="86400" step="30" value="900" />
-              <small style="color: #8a94a6;">30-86400，30 秒步进</small>
-            </label>
-            <div class="grvt-adjust-buttons">
-              <button type="button" id="bp-adjust-add">加仓</button>
-              <button type="button" class="button-danger" id="bp-adjust-reduce">减仓</button>
-            </div>
-            <p class="grvt-adjust-status" id="bp-adjust-status">等待指令…</p>
-          </div>
-          <div class="grvt-adjust-history">
-            <table>
-              <thead>
-                <tr>
-                  <th rowspan="2">时间</th>
-                  <th rowspan="2">动作</th>
-                  <th rowspan="2">数量</th>
-                  <th rowspan="2">币种</th>
-                  <th rowspan="2">状态</th>
-                  <th colspan="4" style="text-align:center;">VPS 明细</th>
-                </tr>
-                <tr>
-                  <th>节点</th><th>下单</th><th>均价</th><th>成交</th>
-                </tr>
-              </thead>
-              <tbody id="bp-adjust-history"><tr><td colspan="9">暂无记录</td></tr></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
     </section>
 
     <section class="agent-section">
