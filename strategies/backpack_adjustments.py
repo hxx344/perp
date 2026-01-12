@@ -24,7 +24,7 @@ from __future__ import annotations
 import copy
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
@@ -40,8 +40,21 @@ class BackpackAdjustment:
     status: str = "pending"  # pending|succeeded|failed
     note: Optional[str] = None
     acked_at: Optional[float] = None
+    # Per-agent acknowledgement details (useful when agent_id == "all").
+    acks: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
+        # Compute an aggregate status when there are per-agent ACKs.
+        overall_status: Optional[str] = None
+        if self.acks:
+            statuses = [str(v.get("status") or "").lower() for v in self.acks.values()]
+            if any(s in {"failed", "error"} for s in statuses):
+                overall_status = "failed"
+            elif statuses and all(s in {"succeeded", "success", "completed"} for s in statuses):
+                overall_status = "completed"
+            else:
+                overall_status = "in_progress"
+
         data = {
             "request_id": self.request_id,
             "agent_id": self.agent_id,
@@ -53,6 +66,13 @@ class BackpackAdjustment:
             "status": self.status,
             "provider": "backpack",
         }
+        if self.acks:
+            data["agents"] = [
+                {"agent_id": agent_id, **copy.deepcopy(info)}
+                for agent_id, info in sorted(self.acks.items(), key=lambda kv: kv[0])
+            ]
+        if overall_status is not None:
+            data["overall_status"] = overall_status
         if self.note is not None:
             data["note"] = self.note
         if self.acked_at is not None:
@@ -89,7 +109,11 @@ class BackpackAdjustmentManager:
     async def pending_for_agent(self, agent_id: str) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
         for adj in self._pending.values():
-            if adj.agent_id == agent_id and adj.status == "pending":
+            # Broadcast requests are stored with agent_id == "all".
+            # Any agent may pick them up.
+            if adj.status != "pending":
+                continue
+            if adj.agent_id == agent_id or adj.agent_id == "all":
                 out.append(adj.to_dict())
         return out
 
@@ -100,15 +124,36 @@ class BackpackAdjustmentManager:
         adj = self._pending.get(request_id)
         if adj is None:
             return False
-        if adj.agent_id != agent_id:
+        # For broadcast requests (agent_id == "all"), allow any agent to ACK.
+        # For targeted requests, enforce agent identity.
+        if adj.agent_id != "all" and adj.agent_id != agent_id:
             return False
-        adj.status = str(status)
-        if note is not None:
-            adj.note = str(note)
-        adj.acked_at = time.time()
-        # Store any extra fields for visibility.
-        if isinstance(extra, dict) and extra:
-            merged = dict(adj.payload)
-            merged.update(extra)
-            adj.payload = merged
+
+        st = str(status)
+        now = time.time()
+        if adj.agent_id == "all":
+            # Track per-agent ACKs.
+            ack_info: Dict[str, Any] = {
+                "status": st,
+                "acked_at": now,
+            }
+            if note is not None:
+                ack_info["note"] = str(note)
+            if isinstance(extra, dict) and extra:
+                ack_info["extra"] = copy.deepcopy(extra)
+            adj.acks[str(agent_id)] = ack_info
+            adj.acked_at = now
+            # Keep legacy status as pending until at least one ACK arrives.
+            # Once any ACK arrives, surface as in_progress via overall_status.
+        else:
+            # Targeted request legacy behavior.
+            adj.status = st
+            if note is not None:
+                adj.note = str(note)
+            adj.acked_at = now
+            # Store any extra fields for visibility.
+            if isinstance(extra, dict) and extra:
+                merged = dict(adj.payload)
+                merged.update(extra)
+                adj.payload = merged
         return True
