@@ -21,9 +21,43 @@
 
       .dashboard-layout {
         display: grid;
-        grid-template-columns: 120px minmax(0, 1fr);
+        grid-template-columns: 1fr;
         gap: 1.5rem;
         align-items: start;
+      }
+
+      /* Move exchange filter bar to the top (instead of left sidebar). */
+      .dashboard-sidebar {
+        display: none;
+      }
+
+      .dashboard-filterbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+        padding: 0.75rem 0;
+        margin: 0 0 1rem;
+        background: rgba(17, 17, 17, 0.92);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      .dashboard-filterbar-title {
+        margin: 0;
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #7f8fa9;
+        padding-right: 0.25rem;
+      }
+
+      .dashboard-filterbar .sidebar-filter {
+        width: auto;
+        white-space: nowrap;
       }
 
       .dashboard-sidebar {
@@ -90,9 +124,8 @@
         .dashboard-layout {
           grid-template-columns: 1fr;
         }
-        .dashboard-sidebar {
-          position: static;
-        }
+        .dashboard-sidebar { position: static; }
+        .dashboard-filterbar { position: static; }
       }
 
       h1 {
@@ -1774,14 +1807,7 @@
   <body>
     <div class="dashboard-layout">
       <aside class="dashboard-sidebar" aria-label="Dashboard navigation">
-        <p class="sidebar-title">面板筛选</p>
-        <ul class="sidebar-nav">
-          <li><button type="button" class="sidebar-filter active" data-filter="all">全部</button></li>
-          <li><button type="button" class="sidebar-filter" data-filter="para">PARA</button></li>
-          <li><button type="button" class="sidebar-filter" data-filter="grvt">GRVT</button></li>
-          <li><button type="button" class="sidebar-filter" data-filter="bp">Backpack</button></li>
-        </ul>
-
+        <!-- sidebar removed: filter bar moved to top -->
       </aside>
 
       <main class="dashboard-main">
@@ -1793,6 +1819,14 @@
           <form id="logout-form" method="post" action="/logout">
             <button type="submit" class="logout-button">退出登录</button>
           </form>
+        </div>
+
+        <div class="dashboard-filterbar" aria-label="Dashboard filter bar">
+          <p class="dashboard-filterbar-title">面板筛选</p>
+          <button type="button" class="sidebar-filter active" data-filter="all">全部</button>
+          <button type="button" class="sidebar-filter" data-filter="para">PARA</button>
+          <button type="button" class="sidebar-filter" data-filter="grvt">GRVT</button>
+          <button type="button" class="sidebar-filter" data-filter="bp">Backpack</button>
         </div>
 
     <section class="grvt-section" data-exchange="para">
