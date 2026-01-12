@@ -2911,10 +2911,16 @@ class CoordinatorApp:
             return web.json_response(payload, status=500)
 
         try:
-            client = _make_backpack_client("ETH-PERP")
-            if _coord_debug_enabled():
-                LOGGER.info("[debug] created Backpack client: %s", type(client).__name__)
-            markets = client.public_client.get_markets()  # type: ignore[union-attr]
+            # Important: listing markets should NOT require account credentials.
+            # BackpackClient enforces BACKPACK_PUBLIC_KEY/BACKPACK_SECRET_KEY in _validate_config.
+            # Use the official SDK Public client directly.
+            try:
+                from bpx.public import Public  # type: ignore
+            except Exception as exc:
+                raise RuntimeError(f"bpx_public_import_failed: {exc}")
+
+            public_client = Public()
+            markets = public_client.get_markets()
             if _coord_debug_enabled():
                 LOGGER.info(
                     "[debug] markets payload type=%s len=%s",
