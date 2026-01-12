@@ -3585,6 +3585,38 @@
   let paraPendingRequestId = null;
   let bpAdjustLocked = false;
   let bpPendingRequestId = null;
+  let bpAdjustStatusStickyUntil = 0;
+
+  function setBpAdjustStatus(text, { stickyMs = 0 } = {}) {
+    if (!bpAdjustStatus) {
+      return;
+    }
+    bpAdjustStatus.textContent = String(text ?? '');
+    if (stickyMs && Number.isFinite(stickyMs) && stickyMs > 0) {
+      bpAdjustStatusStickyUntil = Date.now() + stickyMs;
+    }
+  }
+
+  function shouldRespectBpAdjustSticky() {
+    return Date.now() < (bpAdjustStatusStickyUntil || 0);
+  }
+
+  function validateBpAdjustDom() {
+    const missing = [];
+    if (!bpAdjustAddButton) missing.push('#bp-adjust-add');
+    if (!bpAdjustReduceButton) missing.push('#bp-adjust-reduce');
+    if (!bpAdjustSizeInput) missing.push('#bp-adjust-size');
+    if (!bpOrderModeSelect) missing.push('#bp-order-mode');
+    // symbols dropdown can be empty, but it must exist
+    if (!bpAdjustSymbolsSelect) missing.push('#bp-adjust-symbols');
+    if (missing.length) {
+      setBpAdjustStatus(`Backpack 调仓 UI 缺少元素：${missing.join(', ')}`, { stickyMs: 60_000 });
+      bpAdjustLocked = true;
+      updateBpAdjustButtons();
+      return false;
+    }
+    return true;
+  }
   let grvtTransferLocked = false;
   let grvtTransferOptionsKey = '';
   const grvtTransferDefaults = new Map();
@@ -6852,9 +6884,8 @@
           return;
         }
 
-        if (bpAdjustStatus) {
-          bpAdjustStatus.textContent = `已点击：${describeAdjustmentAction(action)}，准备提交…`;
-        }
+        // Ensure we always provide immediate UI feedback that survives the 2s refresh loop.
+        setBpAdjustStatus(`已点击：${describeAdjustmentAction(action)}，准备提交…`, { stickyMs: 8000 });
         try {
           console.debug('[bp-adjust] click', { action });
         } catch (_) {
@@ -6865,9 +6896,7 @@
         const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : 1;
         bpAdjustLocked = true;
         updateBpAdjustButtons();
-        if (bpAdjustStatus) {
-          bpAdjustStatus.textContent = `提交${describeAdjustmentAction(action)}请求…`;
-        }
+        setBpAdjustStatus(`提交${describeAdjustmentAction(action)}请求…`, { stickyMs: 8000 });
 
         const payload = { action, magnitude };
         const symbols = getSelectedBpSymbols();
@@ -6888,26 +6917,26 @@
           const response = await fetch('/backpack/adjust', {
             method: 'POST',
             credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest'
+            },
             body: JSON.stringify(payload)
           });
           redirectIfUnauthorized(response);
           if (!response.ok) {
             const text = await response.text();
-            throw new Error(text || `HTTP ${response.status}`);
+            const detail = (text || '').trim();
+            throw new Error(detail ? `HTTP ${response.status}: ${detail}` : `HTTP ${response.status}`);
           }
           const responsePayload = await response.json();
           bpPendingRequestId = responsePayload?.request?.request_id ?? responsePayload?.request_id ?? null;
-          if (bpAdjustStatus) {
-            bpAdjustStatus.textContent = '等待 VPS ACK…';
-          }
+          setBpAdjustStatus('已提交，等待 VPS ACK…', { stickyMs: 8000 });
           await refreshMetrics();
         } catch (error) {
           bpAdjustLocked = false;
           updateBpAdjustButtons();
-          if (bpAdjustStatus) {
-            bpAdjustStatus.textContent = `请求失败：${error}`;
-          }
+          setBpAdjustStatus(`请求失败：${error}`, { stickyMs: 30_000 });
         }
       }
 
@@ -6951,24 +6980,26 @@
           const agents = Array.isArray(active.agents) ? active.agents : [];
           const pendingAgents = agents.filter((a) => normalizeStatus(a?.status) === 'pending');
           const scopeText = describeSymbolScope(active?.target_symbols ?? active?.symbols);
-          if (bpAdjustStatus) {
-            bpAdjustStatus.textContent = `等待 ${pendingAgents.length}/${agents.length || '-'} 个 VPS ACK（${scopeText}）`;
+          if (!shouldRespectBpAdjustSticky()) {
+            setBpAdjustStatus(`等待 ${pendingAgents.length}/${agents.length || '-'} 个 VPS ACK（${scopeText}）`);
           }
         } else if (adjustments.length) {
           const latest = adjustments[0];
           const st = normalizeStatus(latest?.overall_status ?? latest?.status);
           const scopeText = describeSymbolScope(latest?.target_symbols ?? latest?.symbols);
-          if (bpAdjustStatus) {
+          if (!shouldRespectBpAdjustSticky()) {
             if (st === 'completed') {
-              bpAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)}（${scopeText}）已完成`;
+              setBpAdjustStatus(`最近一次 ${describeAdjustmentAction(latest.action)}（${scopeText}）已完成`);
             } else if (st === 'failed') {
-              bpAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)}（${scopeText}）部分失败`;
+              setBpAdjustStatus(`最近一次 ${describeAdjustmentAction(latest.action)}（${scopeText}）部分失败`);
             } else {
-              bpAdjustStatus.textContent = `最近状态：${st || '--'}（${scopeText}）`;
+              setBpAdjustStatus(`最近状态：${st || '--'}（${scopeText}）`);
             }
           }
-        } else if (bpAdjustStatus) {
-          bpAdjustStatus.textContent = '等待指令…（默认全部币种）';
+        } else {
+          if (!shouldRespectBpAdjustSticky()) {
+            setBpAdjustStatus('等待指令…（默认全部币种）');
+          }
         }
 
         bpAdjustLocked = locked;
@@ -10281,6 +10312,9 @@
           clearBpSymbolSelection();
         });
       }
+
+      // Backpack adjust UI sanity check (ensures clicks are observable).
+      validateBpAdjustDom();
       const selectAlternativeTarget = () => {
         if (!grvtTransferTargetSelect || !grvtTransferSourceSelect) {
           return;
