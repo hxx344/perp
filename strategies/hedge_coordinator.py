@@ -215,6 +215,11 @@ def _coord_debug_enabled() -> bool:
     return _env_debug("HEDGE_COORD_DEBUG", False)
 
 
+def _bp_volume_debug_enabled() -> bool:
+    """Extra-verbose debug for Backpack volume booster."""
+    return _env_debug("HEDGE_BP_VOLUME_DEBUG", False) or _coord_debug_enabled()
+
+
 def _decimal(value: Any, default: str = "0") -> Decimal:
     try:
         if isinstance(value, Decimal):
@@ -3048,6 +3053,13 @@ class CoordinatorApp:
         if not isinstance(payload, dict):
             payload = {}
 
+        if _bp_volume_debug_enabled():
+            LOGGER.info(
+                "[bp_volume][start] remote=%s payload=%s",
+                request.remote,
+                {k: payload.get(k) for k in sorted(payload.keys())},
+            )
+
         symbol = str(payload.get("symbol") or "").strip()
         if not symbol:
             return web.json_response({"ok": False, "error": "symbol required"}, status=400)
@@ -3080,9 +3092,27 @@ class CoordinatorApp:
         if cfg.max_spread_bps <= 0:
             return web.json_response({"ok": False, "error": "max_spread_bps must be > 0"}, status=400)
 
+        if _bp_volume_debug_enabled():
+            LOGGER.info(
+                "[bp_volume][start] parsed cfg symbol=%s qty_per_cycle=%s cycles=%s max_spread_bps=%s cooldown_ms=%s depth_safety_factor=%s min_cap_qty=%s fee_rate=%s rebate_rate=%s net_fee_rate=%s qty_scale=%s",
+                cfg.symbol,
+                cfg.qty_per_cycle,
+                cfg.cycles,
+                cfg.max_spread_bps,
+                cfg.cooldown_ms,
+                cfg.depth_safety_factor,
+                cfg.min_cap_qty,
+                cfg.fee_rate,
+                cfg.rebate_rate,
+                cfg.net_fee_rate,
+                cfg.qty_scale,
+            )
+
         async with self._bp_volume.lock:
             existing = self._bp_volume.states.get(symbol_u)
             if existing and existing.running and existing.task:
+                if _bp_volume_debug_enabled():
+                    LOGGER.info("[bp_volume][start] already running symbol=%s run_id=%s", symbol_u, existing.run_id)
                 return web.json_response({"ok": True, "running": True, "run_id": existing.run_id, "symbol": symbol_u})
 
             # Continue totals from persisted snapshot (if any) so stop/start does not reset totals.
@@ -3106,6 +3136,8 @@ class CoordinatorApp:
 
             state.task = asyncio.create_task(self._bp_volume_runner(symbol_u, state.run_id))
             self._bp_volume.states[symbol_u] = state
+            if _bp_volume_debug_enabled():
+                LOGGER.info("[bp_volume][start] task created symbol=%s run_id=%s", symbol_u, state.run_id)
             return web.json_response({"ok": True, "running": True, "run_id": state.run_id, "symbol": symbol_u})
 
     async def handle_bp_volume_stop(self, request: web.Request) -> web.Response:
@@ -3331,6 +3363,15 @@ class CoordinatorApp:
                     state.running = False
             return
 
+        if _bp_volume_debug_enabled():
+            LOGGER.info(
+                "[bp_volume][runner] start symbol_u=%s run_id=%s pid=%s instance_id=%s",
+                symbol_u,
+                run_id,
+                os.getpid(),
+                SERVER_INSTANCE_ID,
+            )
+
         client = _make_backpack_client()
 
         consecutive_failures = 0
@@ -3355,6 +3396,14 @@ class CoordinatorApp:
                         state.last_error = "cycle_failed: invalid symbol"
                         state.running = False
                 return
+
+            if _bp_volume_debug_enabled() and consecutive_failures == 0 and not last_cycle_at:
+                LOGGER.info(
+                    "[bp_volume][runner] resolved symbol=%s qty_per_cycle=%s max_spread_bps=%s",
+                    symbol,
+                    cfg.qty_per_cycle,
+                    cfg.max_spread_bps,
+                )
 
             # Pre-flight: if last cycle left a residual position, flatten it first.
             # User assumption: market orders fill immediately; we still guard with best-effort checks.
@@ -3406,6 +3455,8 @@ class CoordinatorApp:
                 continue
 
             if bid1 <= 0 or ask1 <= 0:
+                if _bp_volume_debug_enabled() and (now % 5) < 1:
+                    LOGGER.info("[bp_volume][gate] invalid_l1 bid1=%s ask1=%s symbol=%s", bid1, ask1, symbol)
                 await asyncio.sleep(0.5)
                 continue
 
@@ -3449,22 +3500,55 @@ class CoordinatorApp:
                 pass
 
             if cfg.min_cap_qty > 0 and cap_qty < cfg.min_cap_qty:
+                if _bp_volume_debug_enabled() and (now % 5) < 1:
+                    LOGGER.info("[bp_volume][gate] min_cap_qty cap_qty=%s min_cap_qty=%s symbol=%s", cap_qty, cfg.min_cap_qty, symbol)
                 await asyncio.sleep(0.25)
                 continue
             if spread_bps <= 0 or spread_bps > cfg.max_spread_bps:
+                if _bp_volume_debug_enabled() and (now % 5) < 1:
+                    LOGGER.info(
+                        "[bp_volume][gate] spread spread_bps=%.2f max_spread_bps=%.2f bid1=%s ask1=%s symbol=%s",
+                        spread_bps,
+                        cfg.max_spread_bps,
+                        bid1,
+                        ask1,
+                        symbol,
+                    )
                 await asyncio.sleep(0.25)
                 continue
             if qty_exec <= 0:
+                if _bp_volume_debug_enabled() and (now % 5) < 1:
+                    LOGGER.info("[bp_volume][gate] qty_exec<=0 qty_exec=%s symbol=%s", qty_exec, symbol)
                 await asyncio.sleep(0.25)
                 continue
 
             # Execute BUY -> SELL (market), sell qty follows buy filled.
             try:
                 # User assumption: both legs fill immediately. Run them concurrently to reduce serial latency.
+                if _bp_volume_debug_enabled():
+                    LOGGER.info(
+                        "[bp_volume][exec] placing market orders symbol=%s qty_exec=%s bid1=%s ask1=%s spread_bps=%.2f",
+                        symbol,
+                        qty_exec,
+                        bid1,
+                        ask1,
+                        spread_bps,
+                    )
                 buy, sell = await asyncio.gather(
                     client.place_market_order(symbol, qty_exec, "buy"),
                     client.place_market_order(symbol, qty_exec, "sell"),
                 )
+
+                if _bp_volume_debug_enabled():
+                    LOGGER.info(
+                        "[bp_volume][exec] buy.success=%s sell.success=%s buy.status=%s sell.status=%s buy.err=%s sell.err=%s",
+                        getattr(buy, "success", None),
+                        getattr(sell, "success", None),
+                        getattr(buy, "status", None),
+                        getattr(sell, "status", None),
+                        getattr(buy, "error_message", None),
+                        getattr(sell, "error_message", None),
+                    )
 
                 if not buy.success:
                     raise RuntimeError(buy.error_message or "buy failed")
