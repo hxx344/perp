@@ -6356,6 +6356,39 @@
         return text;
       }
 
+      // Some pages used these helpers as globals; ensure they exist.
+      function formatTimestamp(value) {
+        if (value === undefined || value === null) {
+          return null;
+        }
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) {
+          return null;
+        }
+        // Heuristic: seconds vs milliseconds.
+        const ms = n < 10_000_000_000 ? n * 1000 : n;
+        try {
+          return new Date(ms).toLocaleString();
+        } catch {
+          return null;
+        }
+      }
+
+      function formatDuration(msOrSeconds) {
+        const n = Number(msOrSeconds);
+        if (!Number.isFinite(n) || n < 0) {
+          return '--';
+        }
+        // Most callers pass seconds; tolerate milliseconds.
+        const seconds = n > 10_000 ? Math.round(n / 1000) : Math.round(n);
+        const minutes = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        if (minutes <= 0) {
+          return `${secs}s`;
+        }
+        return `${minutes}m${String(secs).padStart(2, '0')}s`;
+      }
+
       function resolveMarginTier(baseAsset, notionalValue) {
         if (!baseAsset || !Number.isFinite(notionalValue) || notionalValue <= 0) {
           return null;
