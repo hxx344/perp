@@ -10246,6 +10246,7 @@
             const summary = summaryRaw && typeof summaryRaw === 'object' ? summaryRaw : {};
             const accountsRaw = snapshot.accounts;
             const accounts = Array.isArray(accountsRaw) ? accountsRaw : [];
+            const snapshotPositions = Array.isArray(snapshot.positions) ? snapshot.positions : [];
             const snapshotTs = Number(summary.updated_at ?? snapshot.updated_at);
             if (Number.isFinite(snapshotTs) && snapshotTs > latestUpdate) {
               latestUpdate = snapshotTs;
@@ -10277,7 +10278,9 @@
                   total,
                   equity,
                   wallet,
-                  positions: Array.isArray(obj.positions) ? obj.positions : [],
+                  // Backpack monitor currently reports positions at snapshot-level.
+                  // If per-account positions are not provided, fall back to snapshot.positions.
+                  positions: Array.isArray(obj.positions) ? obj.positions : snapshotPositions,
                   updatedTs: snapshotTs,
                   sortKey: buildAccountSortKey(agentId, obj, summary),
                 });
@@ -10310,7 +10313,7 @@
                 total,
                 equity,
                 wallet,
-                positions: [],
+                positions: snapshotPositions,
                 updatedTs: snapshotTs,
                 sortKey: buildAccountSortKey(agentId, null, summary),
               });
@@ -10392,6 +10395,49 @@
                 <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
               </dl>
             `;
+
+            // Positions table (best-effort). Expect monitor-side normalized keys, but
+            // also tolerate raw Backpack keys.
+            const positionsList = Array.isArray(entry.positions) ? entry.positions : [];
+            if (positionsList.length) {
+              const table = document.createElement('table');
+              table.className = 'grvt-positions-table';
+              table.innerHTML = `
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Side</th>
+                    <th>Size</th>
+                    <th>Entry</th>
+                    <th>Mark</th>
+                    <th>PnL</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              `;
+              const body = table.querySelector('tbody');
+              for (const position of positionsList) {
+                const symbol = position?.symbol ?? position?.s ?? '--';
+                const netQty = parseDecimal(position?.net_size ?? position?.netQuantity ?? position?.q);
+                const entryPx = parseDecimal(position?.entry_price ?? position?.entryPrice ?? position?.B);
+                const markPx = parseDecimal(position?.mark_price ?? position?.markPrice ?? position?.M);
+                const pnl = parseDecimal(position?.pnl ?? position?.unrealizedPnl ?? position?.P);
+                const side = Number.isFinite(netQty)
+                  ? (netQty >= 0 ? 'LONG' : 'SHORT')
+                  : (position?.side ? String(position.side).toUpperCase() : '—');
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                  <td>${escapeHtml(String(symbol))}</td>
+                  <td>${escapeHtml(String(side))}</td>
+                  <td>${escapeHtml(Number.isFinite(netQty) ? formatDecimal(Math.abs(netQty), 4) : '--')}</td>
+                  <td>${escapeHtml(Number.isFinite(entryPx) ? formatDecimal(entryPx, 4) : '--')}</td>
+                  <td>${escapeHtml(Number.isFinite(markPx) ? formatDecimal(markPx, 4) : '--')}</td>
+                  <td>${escapeHtml(Number.isFinite(pnl) ? formatDecimal(pnl, 6) : '--')}</td>
+                `;
+                body.appendChild(row);
+              }
+              card.appendChild(table);
+            }
 
             bpAccountGrid.appendChild(card);
           }
