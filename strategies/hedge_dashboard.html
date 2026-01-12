@@ -1681,8 +1681,10 @@
       }
 
       .logout-button:hover {
-        background: rgba(255, 255, 255, 0.15);
-      }
+          background: rgba(255, 255, 255, 0.2);
+          border: 1px solid rgba(255, 255, 255, 0.4);
+        }
+
 
       /* Prevent long values from breaking layout */
       .value,
@@ -2578,9 +2580,15 @@
             <p class="summary-sub" style="margin: 0;">广播加/减仓指令到 Backpack VPS</p>
           </div>
           <div class="grvt-adjust-controls">
-            <label>
-              Symbol
-              <input type="text" id="bp-adjust-symbol" placeholder="ETH-PERP" />
+            <label for="bp-adjust-symbols" class="grvt-adjust-symbols">
+              <div class="grvt-symbol-label">
+                <span>目标币种</span>
+                <small>选择需要调整的币种；未选中时广播所有</small>
+              </div>
+              <div class="grvt-symbol-input">
+                <select id="bp-adjust-symbols"></select>
+                <button type="button" class="grvt-symbol-reset" id="bp-reset-symbol">清空</button>
+              </div>
             </label>
             <label>
               Size
@@ -3311,6 +3319,18 @@
   const grvtAccountGrid = document.getElementById('grvt-account-grid');
   const grvtAccountsEmpty = document.getElementById('grvt-accounts-empty');
 
+  const bpAdjustPanel = document.getElementById('bp-adjust-panel');
+  const bpAdjustSizeInput = document.getElementById('bp-adjust-size');
+  const bpAdjustSymbolsSelect = document.getElementById('bp-adjust-symbols');
+  const bpOrderModeSelect = document.getElementById('bp-order-mode');
+  const bpTwapDurationInput = document.getElementById('bp-twap-duration');
+  const bpTwapDurationWrapper = document.getElementById('bp-twap-duration-wrapper');
+  const bpResetSymbolButton = document.getElementById('bp-reset-symbol');
+  const bpAdjustAddButton = document.getElementById('bp-adjust-add');
+  const bpAdjustReduceButton = document.getElementById('bp-adjust-reduce');
+  const bpAdjustStatus = document.getElementById('bp-adjust-status');
+  const bpAdjustHistoryBody = document.getElementById('bp-adjust-history');
+
   const paraAccountCount = document.getElementById('para-account-count');
   const paraEmpty = document.getElementById('para-empty');
   const paraCard = document.getElementById('para-card');
@@ -3563,6 +3583,8 @@
   let grvtPendingRequestId = null;
   let paraAdjustLocked = false;
   let paraPendingRequestId = null;
+  let bpAdjustLocked = false;
+  let bpPendingRequestId = null;
   let grvtTransferLocked = false;
   let grvtTransferOptionsKey = '';
   const grvtTransferDefaults = new Map();
@@ -6743,6 +6765,141 @@
         });
       }
 
+      function updateBpSymbolOptions(symbols) {
+        if (!bpAdjustSymbolsSelect) {
+          return;
+        }
+        if (document.activeElement === bpAdjustSymbolsSelect) {
+          return;
+        }
+        const normalized = Array.from(
+          new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => normalizeSymbolLabel(symbol)).filter(Boolean))
+        ).sort();
+        const previousValue = normalizeSymbolLabel(bpAdjustSymbolsSelect.value);
+        const disabled = normalized.length === 0;
+        bpAdjustSymbolsSelect.disabled = disabled;
+        if (bpResetSymbolButton) {
+          bpResetSymbolButton.disabled = disabled;
+        }
+
+        const existingValues = Array.from(bpAdjustSymbolsSelect.options).map((opt) => normalizeSymbolLabel(opt.value));
+        const sameList = existingValues.length === normalized.length && existingValues.every((v, i) => v === normalized[i]);
+        if (!sameList) {
+          const oldScrollTop = bpAdjustSymbolsSelect.scrollTop;
+          bpAdjustSymbolsSelect.innerHTML = '';
+          for (const symbol of normalized) {
+            const option = document.createElement('option');
+            option.value = symbol;
+            option.textContent = symbol;
+            bpAdjustSymbolsSelect.appendChild(option);
+          }
+          bpAdjustSymbolsSelect.scrollTop = oldScrollTop;
+        }
+
+        if (previousValue && normalized.includes(previousValue)) {
+          bpAdjustSymbolsSelect.value = previousValue;
+        } else {
+          bpAdjustSymbolsSelect.selectedIndex = -1;
+        }
+      }
+
+      function getSelectedBpSymbols() {
+        if (!bpAdjustSymbolsSelect) {
+          return null;
+        }
+        const value = bpAdjustSymbolsSelect.value;
+        if (!value) {
+          return null;
+        }
+        return [value];
+      }
+
+      function clearBpSymbolSelection() {
+        if (!bpAdjustSymbolsSelect) {
+          return;
+        }
+        bpAdjustSymbolsSelect.value = '';
+        bpAdjustSymbolsSelect.selectedIndex = -1;
+      }
+
+      if (bpAdjustSymbolsSelect) {
+        bpAdjustSymbolsSelect.addEventListener('blur', () => {
+          refreshMetrics();
+        });
+        bpAdjustSymbolsSelect.addEventListener('change', () => {
+          refreshMetrics();
+        });
+      }
+
+      function updateBpAdjustButtons() {
+        const disabled = bpAdjustLocked;
+        [bpAdjustAddButton, bpAdjustReduceButton].forEach((button) => {
+          if (button) {
+            button.disabled = disabled;
+          }
+        });
+      }
+
+      function updateBpTwapVisibility() {
+        const mode = (bpOrderModeSelect?.value || 'twap').toLowerCase();
+        if (bpTwapDurationWrapper) {
+          bpTwapDurationWrapper.style.display = mode === 'twap' ? 'block' : 'none';
+        }
+      }
+
+      async function sendBpAdjustment(action) {
+        if (!action || bpAdjustLocked) {
+          return;
+        }
+        const rawMagnitude = parseFloat(bpAdjustSizeInput?.value ?? '1');
+        const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : 1;
+        bpAdjustLocked = true;
+        updateBpAdjustButtons();
+        if (bpAdjustStatus) {
+          bpAdjustStatus.textContent = `提交${describeAdjustmentAction(action)}请求…`;
+        }
+
+        const payload = { action, magnitude };
+        const symbols = getSelectedBpSymbols();
+        if (symbols) {
+          payload.symbols = symbols;
+        }
+
+        const orderMode = (bpOrderModeSelect?.value || 'twap').toLowerCase();
+        if (orderMode === 'twap') {
+          const duration = clampTwapDurationSeconds(bpTwapDurationInput?.value ?? 0) || 900;
+          payload.order_mode = 'twap';
+          payload.twap_duration_seconds = duration;
+        } else {
+          payload.order_mode = 'market';
+        }
+
+        try {
+          const response = await fetch('/backpack/adjust', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const responsePayload = await response.json();
+          bpPendingRequestId = responsePayload?.request?.request_id ?? responsePayload?.request_id ?? null;
+          if (bpAdjustStatus) {
+            bpAdjustStatus.textContent = '等待 VPS ACK…';
+          }
+          await refreshMetrics();
+        } catch (error) {
+          bpAdjustLocked = false;
+          updateBpAdjustButtons();
+          if (bpAdjustStatus) {
+            bpAdjustStatus.textContent = `请求失败：${error}`;
+          }
+        }
+      }
+
       function updateParaAdjustButtons() {
         const disabled = paraAdjustLocked;
         [paraAdjustAddButton, paraAdjustReduceButton].forEach((button) => {
@@ -9294,6 +9451,7 @@
           let latestUpdate = 0;
           const flattenedAccounts = [];
           let sawAnyPositions = false;
+          const symbolCandidates = new Set();
 
           for (const [agentId, snapshot] of entries) {
             if (!snapshot || typeof snapshot !== 'object') {
@@ -9379,6 +9537,19 @@
               });
             }
           }
+
+          // Symbols for broadcast-adjust dropdown (best-effort based on current positions).
+          for (const entry of flattenedAccounts) {
+            const positions = Array.isArray(entry?.positions) ? entry.positions : [];
+            for (const position of positions) {
+              const raw = position?.symbol ?? position?.s;
+              if (raw) {
+                symbolCandidates.add(String(raw));
+              }
+            }
+          }
+
+          updateBpSymbolOptions(Array.from(symbolCandidates));
 
           const sourcesLabel = entries.length === 1 ? 'source' : 'sources';
           const accountLabel = aggregateAccountCount === 1 ? 'account' : 'accounts';
@@ -9935,6 +10106,16 @@
       if (paraAdjustReduceButton) {
         paraAdjustReduceButton.addEventListener('click', () => sendParaAdjustment('reduce'));
       }
+      if (bpOrderModeSelect) {
+        bpOrderModeSelect.addEventListener('change', updateBpTwapVisibility);
+        updateBpTwapVisibility();
+      }
+      if (bpAdjustAddButton) {
+        bpAdjustAddButton.addEventListener('click', () => sendBpAdjustment('add'));
+      }
+      if (bpAdjustReduceButton) {
+        bpAdjustReduceButton.addEventListener('click', () => sendBpAdjustment('reduce'));
+      }
       if (grvtResetSymbolButton) {
         grvtResetSymbolButton.addEventListener('click', () => {
           clearGrvtSymbolSelection();
@@ -9943,6 +10124,11 @@
       if (paraResetSymbolButton) {
         paraResetSymbolButton.addEventListener('click', () => {
           clearParaSymbolSelection();
+        });
+      }
+      if (bpResetSymbolButton) {
+        bpResetSymbolButton.addEventListener('click', () => {
+          clearBpSymbolSelection();
         });
       }
       const selectAlternativeTarget = () => {
