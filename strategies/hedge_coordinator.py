@@ -3956,11 +3956,23 @@ class CoordinatorApp:
         # Coordinator provides aggregated snapshot; extract per-agent control queue.
         snapshot = await self._coordinator.snapshot()
         controls = snapshot.get("controls")
+        out: Dict[str, Any]
         if isinstance(controls, dict):
             per_agent = controls.get(agent_id)
             if isinstance(per_agent, dict):
-                return web.json_response(per_agent)
-        return web.json_response({"agent_id": agent_id, "pending_adjustments": []})
+                out = dict(per_agent)
+            else:
+                out = {"agent_id": agent_id, "pending_adjustments": []}
+        else:
+            out = {"agent_id": agent_id, "pending_adjustments": []}
+
+        # IMPORTANT: also attach Backpack pending adjustments.
+        # Backpack monitor executors poll /control; without this they will never
+        # receive dashboard-created backpack adjustments, leaving them stuck in
+        # pending state with 0 ACKs.
+        with suppress(Exception):
+            out["backpack_adjustments"] = await self._backpack_adjustments.pending_for_agent(agent_id)
+        return web.json_response(out)
 
     async def handle_auto_balance_get(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
