@@ -3335,12 +3335,14 @@ class CoordinatorApp:
                     age_ms = max(0.0, (time.time() - float(last_ts)) * 1000.0)
                 bid1, bid1_qty, ask1, ask1_qty = quote
 
-        # WS-only: if the symbol hasn't produced a quote yet, return a soft “warming up” payload.
+        # WS-only: if the symbol hasn't produced a quote yet, return a non-error
+        # warm-up payload so the UI doesn't flash an error when switching symbols.
         if not quote:
             return web.json_response(
                 {
-                    "ok": False,
-                    "error": "bbo_not_ready: waiting for WS bookTicker",
+                    "ok": True,
+                    "ready": False,
+                    "note": "waiting_ws_bbo",
                     "symbol": symbol,
                     "source": "ws",
                     "age_ms": age_ms,
@@ -3349,8 +3351,7 @@ class CoordinatorApp:
                     "ask1": None,
                     "ask1_qty": None,
                     "ts": _now_ts(),
-                },
-                status=503,
+                }
             )
 
         mid = (bid1 + ask1) / Decimal("2") if (bid1 > 0 and ask1 > 0) else Decimal("0")
@@ -3377,6 +3378,7 @@ class CoordinatorApp:
         return web.json_response(
             {
                 "ok": True,
+                "ready": True,
                 "symbol": symbol,
                 "source": source,
                 "age_ms": age_ms,
