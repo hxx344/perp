@@ -371,9 +371,6 @@ def _env_debug(name: str, default: bool = False) -> bool:
 
 PARA_STALE_DEBUG_ENV = "PARA_STALE_DEBUG"
 PARA_RISK_DEBUG_ENV = "PARA_RISK_DEBUG"
-MAX_SPREAD_HISTORY = 600
-MAX_STRATEGY_EVENTS = 400
-MAX_STRATEGY_TRADES = 200
 GLOBAL_RISK_ALERT_KEY = "__global_risk__"
 PARA_RISK_ALERT_KEY = "__para_risk__"
 TRANSFERABLE_HISTORY_LIMIT = 720
@@ -916,8 +913,6 @@ class HedgeState:
     depths: Dict[str, int] = field(default_factory=dict)
     last_update_ts: float = field(default_factory=time.time)
     runtime_seconds: float = 0.0
-    spread_metrics: Optional[Dict[str, Any]] = None
-    strategy_metrics: Optional[Dict[str, Any]] = None
     grvt_accounts: Optional[Dict[str, Any]] = None
     paradex_accounts: Optional[Dict[str, Any]] = None
     backpack_accounts: Optional[Dict[str, Any]] = None
@@ -935,8 +930,6 @@ class HedgeState:
         depths_raw = payload.get("depths")
         maker_depth_raw = payload.get("maker_depth")
         runtime_raw = payload.get("runtime_seconds") or payload.get("runtime")
-        spread_metrics_raw = payload.get("spread_metrics")
-        strategy_metrics_raw = payload.get("strategy_metrics")
         grvt_accounts_raw = payload.get("grvt_accounts")
         paradex_accounts_raw = payload.get("paradex_accounts")
         backpack_accounts_raw = payload.get("backpack_accounts")
@@ -1009,23 +1002,6 @@ class HedgeState:
             except (TypeError, ValueError):
                 LOGGER.warning("Invalid runtime payload: %s", runtime_raw)
 
-        if isinstance(spread_metrics_raw, dict):
-            normalized_spread = copy.deepcopy(spread_metrics_raw)
-            history = normalized_spread.get("history")
-            if isinstance(history, list) and len(history) > MAX_SPREAD_HISTORY:
-                normalized_spread["history"] = history[-MAX_SPREAD_HISTORY:]
-            self.spread_metrics = normalized_spread
-
-        if isinstance(strategy_metrics_raw, dict):
-            normalized_strategy = copy.deepcopy(strategy_metrics_raw)
-            recent_events = normalized_strategy.get("recent_events")
-            if isinstance(recent_events, list) and len(recent_events) > MAX_STRATEGY_EVENTS:
-                normalized_strategy["recent_events"] = recent_events[-MAX_STRATEGY_EVENTS:]
-            recent_trades = normalized_strategy.get("recent_trades")
-            if isinstance(recent_trades, list) and len(recent_trades) > MAX_STRATEGY_TRADES:
-                normalized_strategy["recent_trades"] = recent_trades[-MAX_STRATEGY_TRADES:]
-            self.strategy_metrics = normalized_strategy
-
         if isinstance(grvt_accounts_raw, dict):
             normalized_grvt = copy.deepcopy(grvt_accounts_raw)
             accounts_block = normalized_grvt.get("accounts")
@@ -1067,10 +1043,6 @@ class HedgeState:
         }
         if self.agent_id is not None:
             payload["agent_id"] = self.agent_id
-        if self.spread_metrics is not None:
-            payload["spread_metrics"] = copy.deepcopy(self.spread_metrics)
-        if self.strategy_metrics is not None:
-            payload["strategy_metrics"] = copy.deepcopy(self.strategy_metrics)
         if self.grvt_accounts is not None:
             payload["grvt_accounts"] = copy.deepcopy(self.grvt_accounts)
         if self.paradex_accounts is not None:
@@ -2130,21 +2102,6 @@ class HedgeCoordinator:
         snapshot["last_agent_id"] = self._last_agent_id
         controls_snapshot = self._controls_snapshot()
         snapshot.update(controls_snapshot)
-
-        spread_map = {
-            agent_id: copy.deepcopy(state.spread_metrics)
-            for agent_id, state in self._states.items()
-            if state.spread_metrics
-        }
-        if spread_map:
-            snapshot["spread_metrics"] = spread_map
-        strategy_map = {
-            agent_id: copy.deepcopy(state.strategy_metrics)
-            for agent_id, state in self._states.items()
-            if state.strategy_metrics
-        }
-        if strategy_map:
-            snapshot["strategy_metrics"] = strategy_map
         grvt_map = {
             agent_id: copy.deepcopy(state.grvt_accounts)
             for agent_id, state in self._states.items()
