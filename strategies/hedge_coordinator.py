@@ -3797,33 +3797,49 @@ class CoordinatorApp:
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="adjust payload must be an object")
 
-        agent_id = str(body.get("agent_id") or "").strip()
-        if not agent_id:
-            raise web.HTTPBadRequest(text="agent_id is required")
+        # Dashboard may broadcast to all backpack monitors; allow agent_id to be optional.
+        agent_id = str(body.get("agent_id") or "").strip() or None
         action = str(body.get("action") or "").strip().lower()
         if action not in {"add", "reduce"}:
             raise web.HTTPBadRequest(text="action must be 'add' or 'reduce'")
         magnitude = body.get("magnitude")
         symbols_raw = body.get("symbols")
-        if isinstance(symbols_raw, str) and symbols_raw:
-            symbols = [symbols_raw]
-        elif isinstance(symbols_raw, list) and symbols_raw:
-            symbols = [str(s) for s in symbols_raw if str(s).strip()]
+
+        # symbols:
+        # - None / [] => broadcast all symbols (monitor-side should decide per-account held symbols)
+        # - ["BTC-PERP", ...] => broadcast selected symbols
+        if symbols_raw is None:
+            symbols: List[str] = []
+        elif isinstance(symbols_raw, str):
+            symbols = [symbols_raw] if symbols_raw.strip() else []
+        elif isinstance(symbols_raw, list):
+            symbols = [str(s).strip() for s in symbols_raw if str(s).strip()]
         else:
-            symbols = []
-        if not symbols:
-            raise web.HTTPBadRequest(text="symbols is required")
+            raise web.HTTPBadRequest(text="symbols must be a string or an array of strings")
+
         payload_cfg = body.get("payload")
         payload_dict = payload_cfg if isinstance(payload_cfg, dict) else {}
 
+        # Pass-through common order hints from dashboard.
+        order_mode_raw = str(body.get("order_mode") or "").strip().lower()
+        if order_mode_raw in {"twap", "market"}:
+            payload_dict.setdefault("order_mode", order_mode_raw)
+        twap_raw = body.get("twap_duration_seconds")
+        if twap_raw is not None:
+            try:
+                payload_dict.setdefault("twap_duration_seconds", int(twap_raw))
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text="twap_duration_seconds must be an integer")
+
         adj = self._backpack_adjustments.create(
-            agent_id=agent_id,
+            agent_id=agent_id or "all",
             action=action,
             magnitude=magnitude,
             symbols=symbols,
             payload=payload_dict,
         )
-        return web.json_response({"request_id": adj.request_id, "status": "queued"})
+        # Align response shape with PARA/GRVT adjustments.
+        return web.json_response({"request": {"request_id": adj.request_id, "status": "queued"}})
 
     async def handle_backpack_adjust_ack(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
