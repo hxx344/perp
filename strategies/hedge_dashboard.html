@@ -19,6 +19,82 @@
         margin-inline: auto;
       }
 
+      .dashboard-layout {
+        display: grid;
+        grid-template-columns: 220px minmax(0, 1fr);
+        gap: 1.5rem;
+        align-items: start;
+      }
+
+      .dashboard-sidebar {
+        position: sticky;
+        top: 1.5rem;
+        align-self: start;
+        background: #141823;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 14px;
+        padding: 1rem;
+        box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+      }
+
+      .sidebar-title {
+        margin: 0 0 0.75rem;
+        font-size: 0.85rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #7f8fa9;
+      }
+
+      .sidebar-nav {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 0.35rem;
+      }
+
+      .sidebar-nav button {
+        width: 100%;
+        text-align: left;
+        padding: 0.55rem 0.75rem;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.02);
+        color: #f2f4f8;
+        cursor: pointer;
+        font-size: 0.9rem;
+        transition: background 0.2s ease, border-color 0.2s ease;
+      }
+
+      .sidebar-nav button:hover {
+        background: rgba(255, 255, 255, 0.06);
+        border-color: rgba(255, 255, 255, 0.14);
+      }
+
+      .sidebar-nav button.active {
+        background: rgba(124, 77, 255, 0.2);
+        border-color: rgba(124, 77, 255, 0.55);
+      }
+
+      .sidebar-hint {
+        margin: 0.85rem 0 0;
+        font-size: 0.8rem;
+        color: #8a94a6;
+        line-height: 1.35;
+      }
+
+      @media (max-width: 920px) {
+        body {
+          padding: 1.25rem;
+        }
+        .dashboard-layout {
+          grid-template-columns: 1fr;
+        }
+        .dashboard-sidebar {
+          position: static;
+        }
+      }
+
       h1 {
         font-size: 1.75rem;
         margin-bottom: 0.5rem;
@@ -1696,17 +1772,30 @@
     </style>
   </head>
   <body>
-    <div class="dashboard-top">
-      <div>
-        <h1>Hedging Cycle Overview</h1>
-        <p class="subtitle">Live metrics reported by the Aster–Lighter hedging executor.</p>
-      </div>
-      <form id="logout-form" method="post" action="/logout">
-        <button type="submit" class="logout-button">退出登录</button>
-      </form>
-    </div>
+    <div class="dashboard-layout">
+      <aside class="dashboard-sidebar" aria-label="Dashboard navigation">
+        <p class="sidebar-title">面板筛选</p>
+        <ul class="sidebar-nav">
+          <li><button type="button" class="sidebar-filter active" data-filter="all">全部</button></li>
+          <li><button type="button" class="sidebar-filter" data-filter="para">PARA</button></li>
+          <li><button type="button" class="sidebar-filter" data-filter="grvt">GRVT</button></li>
+          <li><button type="button" class="sidebar-filter" data-filter="bp">Backpack</button></li>
+        </ul>
+        <p class="sidebar-hint">点击左侧交易所名称，仅显示对应板块；“全部”会恢复所有内容。</p>
+      </aside>
 
-    <section class="grvt-section">
+      <main class="dashboard-main">
+        <div class="dashboard-top">
+          <div>
+            <h1>Hedging Cycle Overview</h1>
+            <p class="subtitle">Live metrics reported by the Aster–Lighter hedging executor.</p>
+          </div>
+          <form id="logout-form" method="post" action="/logout">
+            <button type="submit" class="logout-button">退出登录</button>
+          </form>
+        </div>
+
+    <section class="grvt-section" data-exchange="para">
       <div class="section-header">
         <div class="section-header-info">
           <h2>PARA Multi-Account Monitor</h2>
@@ -2054,7 +2143,7 @@
     <!-- BTC/ETH Volatility Signals removed -->
     <!-- BTC/ETH Pair Simulation removed -->
 
-    <section class="grvt-section">
+    <section class="grvt-section" data-exchange="grvt">
       <div class="section-header">
         <div class="section-header-info">
           <h2>GRVT Multi-Account Monitor</h2>
@@ -2415,7 +2504,7 @@
       </div>
     </section>
 
-    <section class="grvt-section">
+    <section class="grvt-section" data-exchange="bp">
       <div class="section-header">
         <div class="section-header-info">
           <h2>Backpack Multi-Account Monitor</h2>
@@ -2776,7 +2865,10 @@
 
     <p class="updated" id="updated">Awaiting data…</p>
 
-    <script>
+  </main>
+  </div>
+
+  <script>
     const agentGrid = document.getElementById('agent-grid');
     const agentEmpty = document.getElementById('agent-empty');
     const agentCount = document.getElementById('agent-count');
@@ -8085,6 +8177,45 @@
           legend: grvtPriceChartLegend,
         }, data);
       }
+
+      // --- Exchange sidebar filtering ---
+      function applyExchangeFilter(filter) {
+        const normalized = String(filter || 'all').toLowerCase();
+        const sections = Array.from(document.querySelectorAll('section[data-exchange]'));
+        for (const section of sections) {
+          const exchange = String(section.getAttribute('data-exchange') || '').toLowerCase();
+          const visible = normalized === 'all' || (exchange && exchange === normalized);
+          section.classList.toggle('hidden', !visible);
+        }
+        const buttons = Array.from(document.querySelectorAll('.sidebar-filter'));
+        for (const btn of buttons) {
+          btn.classList.toggle('active', String(btn.dataset.filter || 'all') === normalized);
+        }
+        try {
+          window.localStorage.setItem('hedge-dashboard:exchange-filter', normalized);
+        } catch (err) {
+          // ignore
+        }
+      }
+
+      function initExchangeFilterNav() {
+        const buttons = Array.from(document.querySelectorAll('.sidebar-filter'));
+        if (!buttons.length) {
+          return;
+        }
+        for (const btn of buttons) {
+          btn.addEventListener('click', () => applyExchangeFilter(btn.dataset.filter || 'all'));
+        }
+        let initial = 'all';
+        try {
+          initial = window.localStorage.getItem('hedge-dashboard:exchange-filter') || 'all';
+        } catch (err) {
+          initial = 'all';
+        }
+        applyExchangeFilter(initial);
+      }
+
+      document.addEventListener('DOMContentLoaded', initExchangeFilterNav);
 
       function renderParaPriceChart(data) {
         renderPriceChartFor({
