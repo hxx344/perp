@@ -3712,7 +3712,29 @@ class CoordinatorApp:
         self._enforce_dashboard_auth(request, redirect_on_fail=True)
         if not DASHBOARD_PATH.exists():
             raise web.HTTPNotFound(text="dashboard asset missing; ensure hedge_dashboard.html exists")
-        return web.FileResponse(path=DASHBOARD_PATH)
+        # IMPORTANT: avoid stale cached dashboard on VPS/browser/proxy.
+        # We also inject a small build marker so operators can confirm the
+        # currently served HTML version.
+        try:
+            raw = DASHBOARD_PATH.read_text(encoding="utf-8")
+        except Exception:
+            return web.FileResponse(path=DASHBOARD_PATH)
+
+        build_id = f"{SERVER_INSTANCE_ID}:{int(time.time())}"
+        marker = (
+            "\n<!-- hedge-dashboard-build:{build_id} -->\n"
+            "<script>window.__HEDGE_DASHBOARD_BUILD = {json};</script>\n"
+        ).format(build_id=build_id, json=json.dumps(build_id))
+        if "</body>" in raw:
+            body = raw.replace("</body>", marker + "</body>")
+        else:
+            body = raw + marker
+
+        resp = web.Response(text=body, content_type="text/html")
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
 
     async def handle_metrics(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
