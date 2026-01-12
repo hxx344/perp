@@ -47,115 +47,54 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import quote_plus
 
-# Ensure imports work regardless of the current working directory or service wrapper.
-# Some deployments end up with sys.path[0] == ".../strategies", which breaks
-# imports like `from exchanges...`. We pin the repository root (parent of this
-# file's directory) to the front of sys.path.
-_THIS_DIR = Path(__file__).resolve().parent
-_REPO_ROOT = str(_THIS_DIR.parent)
-if _REPO_ROOT and _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-elif sys.path and sys.path[0] != _REPO_ROOT:
-    # If it's already present but not at the front, prefer it.
-    with suppress(Exception):
-        sys.path.remove(_REPO_ROOT)
-        sys.path.insert(0, _REPO_ROOT)
+from aiohttp import ClientSession, ClientTimeout, web
 
 import uuid
 
-# Persist Backpack volume history on disk so clearing survives page refresh.
-BP_VOLUME_HISTORY_FILE = _THIS_DIR / "bp_volume_history.json"
-
+# Local imports (support both package mode and script mode).
 try:
-    from dotenv import load_dotenv
-except Exception:  # pragma: no cover
-    # python-dotenv is listed in requirements.txt, but we keep a soft fallback
-    # so the coordinator still starts in minimal environments.
-    load_dotenv = None  # type: ignore[assignment]
+    from .adjustments import AdjustmentAction, GrvtAdjustmentManager  # type: ignore
+    from .backpack_adjustments import BackpackAdjustmentManager  # type: ignore
+    from .backpack_bookticker_ws import BackpackBookTickerWS  # type: ignore
+except ImportError:  # pragma: no cover
+    from adjustments import AdjustmentAction, GrvtAdjustmentManager  # type: ignore
+    from backpack_adjustments import BackpackAdjustmentManager  # type: ignore
+    from backpack_bookticker_ws import BackpackBookTickerWS  # type: ignore
 
-from aiohttp import ClientSession, ClientTimeout, web
-
-# Optional: Backpack public `bookTicker.<symbol>` WS cache for faster L1.
-# Kept in a standalone module to avoid inflating this (very large) file.
+# Optional Backpack trading dependencies.
 try:
-    from strategies.backpack_bookticker_ws import BackpackBookTickerWS
+    from exchanges.backpack import BackpackClient, TradingConfig  # type: ignore
 except Exception:  # pragma: no cover
-    BackpackBookTickerWS = None  # type: ignore[assignment]
-
-try:
-    from exchanges.backpack import BackpackClient
-    from trading_bot import TradingConfig
-except Exception:  # pragma: no cover
-    # Keep imports soft so the coordinator can still boot for non-Backpack use,
-    # but provide high-signal diagnostics when explicitly enabled.
-    if os.getenv("HEDGE_COORD_DEBUG") in {"1", "true", "True", "yes", "on"}:
-        logging.getLogger("hedge.coordinator").exception(
-            "[debug] Failed to import Backpack deps (BackpackClient/TradingConfig). cwd=%s sys.path[0:5]=%s",
-            os.getcwd(),
-            sys.path[:5],
-        )
-    BackpackClient = None  # type: ignore[assignment]
-    TradingConfig = None  # type: ignore[assignment]
+    BackpackClient = None  # type: ignore
+    TradingConfig = None  # type: ignore
 
 
-def _make_backpack_client(symbol_hint: str = "ETH-PERP") -> Any:
-    """Create a minimal BackpackClient instance for public/account calls.
+def _make_backpack_client(symbol: str = "") -> Any:
+    """Create Backpack client if dependencies are available.
 
-    Note: BackpackClient is typed as accepting Dict[str, Any] (BaseExchangeClient), but
-    in this repo it's instantiated with TradingConfig throughout. We follow that convention.
+    This is intentionally lazy: when Backpack deps aren't installed, callers should
+    gracefully return 500 with a clear message.
     """
 
-    assert BackpackClient is not None and TradingConfig is not None
-    base = "ETH"
-    try:
-        if isinstance(symbol_hint, str) and symbol_hint:
-            base = symbol_hint.split("-")[0].strip().upper() or base
-    except Exception:
-        pass
+    if BackpackClient is None or TradingConfig is None:
+        raise RuntimeError("Backpack dependencies not available")
+    return BackpackClient(TradingConfig(), symbol=symbol)  # type: ignore[misc]
 
-    cfg = TradingConfig(
-        ticker=base,
-        contract_id="",
-        quantity=Decimal("0.01"),
-        take_profit=Decimal("0"),
-        tick_size=Decimal("0"),
-        direction="buy",
-        max_orders=1,
-        wait_time=1,
-        exchange="backpack",
-        grid_step=Decimal("-100"),
-        stop_price=Decimal("-1"),
-        pause_price=Decimal("-1"),
-        boost_mode=True,
-    )
-    return BackpackClient(cfg)  # type: ignore[arg-type]
+# Ensure imports work regardless of the current working directory or service wrapper.
+# Some deployments end up with sys.path[0] == ".../strategies", which breaks
+# imports like `from exchanges...`. We pin the repository root (parent of this
+# file's directory) so intra-repo imports resolve.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-try:
-    from .adjustments import AdjustmentAction, GrvtAdjustmentManager
-except ImportError:  # pragma: no cover - script execution path
-    from adjustments import AdjustmentAction, GrvtAdjustmentManager
-
-try:
-    from .backpack_adjustments import BackpackAdjustmentManager
-except ImportError:  # pragma: no cover - script execution path
-    from backpack_adjustments import BackpackAdjustmentManager
-
-BASE_DIR = Path(__file__).resolve().parent
-PDT_ROOT_DIR = BASE_DIR.parent
-
-# Load environment variables from repository root .env (if present).
-# Note: we deliberately do NOT override existing process environment variables.
-if load_dotenv is not None:
-    load_dotenv(PDT_ROOT_DIR / ".env", override=False)
-
-DASHBOARD_PATH = BASE_DIR / "hedge_dashboard.html"
-PERSISTED_STATE_DIR = BASE_DIR / ".coordinator_state"
-PERSISTED_STATE_DIR.mkdir(exist_ok=True)
-PERSISTED_PARA_AUTO_BALANCE_FILE = PERSISTED_STATE_DIR / "para_auto_balance.json"
-
-# Diagnostics for UI debugging: correlate requests across multi-process / multi-instance deployments.
-SERVER_INSTANCE_ID = uuid.uuid4().hex
+PERSISTED_PARA_AUTO_BALANCE_FILE = Path(__file__).with_name(".para_auto_balance_config.json")
+BP_VOLUME_HISTORY_FILE = Path(__file__).with_name(".bp_volume_history.json")
+DASHBOARD_PATH = Path(__file__).with_name("hedge_dashboard.html")
 SERVER_PID = os.getpid()
+SERVER_INSTANCE_ID = secrets.token_hex(8)
+
+# HistoricalPriceFetcher removed (Binance klines dependency removed).
 LOGIN_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"zh-CN\">
     <head>
@@ -792,442 +731,6 @@ class AutoBalanceMeasurement:
             "target_agent": self.target_agent,
             "transfer_amount": _fmt(self.transfer_amount),
         }
-
-
-class VolatilityMonitor:
-    """Background task that polls spot prices to derive BTC/ETH volatility signals."""
-
-    _ENDPOINT = "https://api.binance.com/api/v3/klines"
-    _DEFAULT_SYMBOLS: Tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
-    _DEFAULT_TIMEFRAMES: Tuple[Tuple[str, int], ...] = (
-        ("15m", 15),
-        ("1h", 60),
-        ("4h", 240),
-        ("24h", 1440),
-    )
-    _PRICE_SERIES_LIMIT = 720
-
-    def __init__(
-        self,
-        *,
-        symbols: Optional[Sequence[str]] = None,
-        poll_interval: float = 60.0,
-        history_limit: int = 1800,
-        timeout: float = 10.0,
-    ) -> None:
-        cleaned_symbols: List[str] = []
-        for symbol in symbols or self._DEFAULT_SYMBOLS:
-            if not symbol:
-                continue
-            normalized = str(symbol).strip().upper()
-            if normalized and normalized not in cleaned_symbols:
-                cleaned_symbols.append(normalized)
-        if not cleaned_symbols:
-            cleaned_symbols = list(self._DEFAULT_SYMBOLS)
-
-        self._symbols: Tuple[str, ...] = tuple(cleaned_symbols)
-        self._symbol_labels: Dict[str, str] = {
-            symbol: self._base_label(symbol) for symbol in self._symbols
-        }
-        self._pair: Optional[Tuple[str, str]] = (
-            (self._symbols[0], self._symbols[1]) if len(self._symbols) >= 2 else None
-        )
-        self._timeframes: Tuple[Tuple[str, int], ...] = self._DEFAULT_TIMEFRAMES
-        max_minutes = max(minutes for _, minutes in self._timeframes)
-        history_floor = max_minutes + 5
-        history_cap = max(history_floor, 2500)
-        try:
-            requested_history = int(history_limit)
-        except (TypeError, ValueError):
-            requested_history = history_floor
-        if requested_history <= 0:
-            requested_history = history_floor
-        self._history_limit = max(history_floor, min(requested_history, history_cap))
-        self._poll_interval = max(float(poll_interval), 20.0)
-        self._timeout = max(float(timeout), 3.0)
-        self._session: Optional[ClientSession] = None
-        self._task: Optional[asyncio.Task[Any]] = None
-        self._stopped = False
-        self._histories: Dict[str, Deque[Dict[str, float]]] = {
-            symbol: deque(maxlen=self._history_limit) for symbol in self._symbols
-        }
-        self._chart_history_points = min(self._history_limit, self._PRICE_SERIES_LIMIT)
-        self._snapshot: Optional[Dict[str, Any]] = None
-        self._lock = asyncio.Lock()
-        self._last_error: Optional[str] = None
-
-    async def start(self) -> None:
-        if self._task or not self._symbols:
-            return
-        self._stopped = False
-        self._session = ClientSession(timeout=ClientTimeout(total=self._timeout))
-        try:
-            await self._refresh_all()
-        except Exception as exc:  # pragma: no cover - network bootstrap path
-            LOGGER.warning("Initial volatility refresh failed: %s", exc)
-        self._task = asyncio.create_task(self._run_loop())
-
-    async def stop(self) -> None:
-        self._stopped = True
-        if self._task:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
-            self._task = None
-        if self._session and not self._session.closed:
-            await self._session.close()
-        self._session = None
-
-    async def snapshot(self) -> Optional[Dict[str, Any]]:
-        async with self._lock:
-            if self._snapshot is None:
-                return None
-            return copy.deepcopy(self._snapshot)
-
-    async def _run_loop(self) -> None:
-        try:
-            while not self._stopped:
-                await asyncio.sleep(self._poll_interval)
-                await self._refresh_all()
-        except asyncio.CancelledError:  # pragma: no cover - shutdown path
-            raise
-        except Exception as exc:  # pragma: no cover - defensive
-            LOGGER.warning("Volatility monitor task stopped: %s", exc)
-
-    def _ensure_session(self) -> ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = ClientSession(timeout=ClientTimeout(total=self._timeout))
-        return self._session
-
-    async def _refresh_all(self) -> None:
-        if not self._symbols:
-            return
-        latest_error: Optional[str] = None
-        any_success = False
-        for symbol in self._symbols:
-            try:
-                await self._fetch_symbol(symbol)
-                any_success = True
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # pragma: no cover - network path
-                latest_error = f"{symbol}: {exc}"
-                LOGGER.warning("Volatility fetch for %s failed: %s", symbol, exc)
-        if latest_error:
-            self._last_error = latest_error
-        elif any_success:
-            self._last_error = None
-        await self._update_snapshot()
-
-    async def _fetch_symbol(self, symbol: str) -> None:
-        session = self._ensure_session()
-        target = self._history_limit
-        if target <= 0:
-            target = 500
-        collected: List[Dict[str, float]] = []
-        end_time_ms: Optional[int] = None
-        api_limit = 1000
-
-        while len(collected) < target:
-            batch_size = min(api_limit, target - len(collected))
-            params: Dict[str, Any] = {
-                "symbol": symbol,
-                "interval": "1m",
-                "limit": str(batch_size),
-            }
-            if end_time_ms is not None:
-                params["endTime"] = end_time_ms
-            async with session.get(self._ENDPOINT, params=params) as response:
-                if response.status != 200:
-                    body_preview = (await response.text())[:200]
-                    raise RuntimeError(f"{symbol}: HTTP {response.status} {body_preview}")
-                payload = await response.json()
-            if not isinstance(payload, list):
-                raise RuntimeError("Unexpected payload type from Binance")
-            if not payload:
-                break
-
-            chunk: List[Dict[str, float]] = []
-            for entry in payload:
-                try:
-                    open_time = float(entry[0]) / 1000.0
-                    close_time = float(entry[6]) / 1000.0
-                    chunk.append(
-                        {
-                            "open_time": open_time,
-                            "close_time": close_time,
-                            "open": float(entry[1]),
-                            "high": float(entry[2]),
-                            "low": float(entry[3]),
-                            "close": float(entry[4]),
-                        }
-                    )
-                except (IndexError, TypeError, ValueError):
-                    continue
-            if not chunk:
-                break
-
-            # prepend older chunk so the list stays chronological
-            collected = chunk + collected
-
-            first_open = payload[0][0]
-            try:
-                end_time_ms = int(first_open) - 1
-            except (TypeError, ValueError):
-                end_time_ms = None
-            if len(payload) < batch_size:
-                break
-
-        if not collected:
-            return
-        if len(collected) > target:
-            collected = collected[-target:]
-        self._histories[symbol] = deque(collected, maxlen=self._history_limit)
-
-    async def _update_snapshot(self) -> None:
-        snapshot = self._build_snapshot()
-        async with self._lock:
-            self._snapshot = snapshot
-
-    def _build_snapshot(self) -> Optional[Dict[str, Any]]:
-        symbols_payload: Dict[str, Any] = {}
-        price_series_payload: Dict[str, Any] = {}
-        for symbol in self._symbols:
-            payload = self._compute_symbol_metrics(symbol)
-            if payload:
-                symbols_payload[symbol] = payload
-            series = self._serialize_price_series(symbol)
-            if series:
-                price_series_payload[symbol] = {
-                    "symbol": symbol,
-                    "label": self._symbol_labels.get(symbol, symbol),
-                    "series": series,
-                }
-        if not symbols_payload:
-            return None
-        snapshot: Dict[str, Any] = {
-            "updated_at": time.time(),
-            "source": "binance",
-            "symbols": symbols_payload,
-            "timeframes": [label for label, _ in self._timeframes],
-        }
-        if price_series_payload:
-            snapshot["price_series"] = price_series_payload
-        guidance = self._compute_pair_guidance(symbols_payload)
-        if guidance:
-            snapshot["hedge_guidance"] = guidance
-        if self._last_error:
-            snapshot["last_error"] = self._last_error
-        return snapshot
-
-    def _compute_symbol_metrics(self, symbol: str) -> Optional[Dict[str, Any]]:
-        history = self._histories.get(symbol)
-        if not history or len(history) < 5:
-            return None
-        candles = list(history)
-        last_candle = candles[-1]
-        timeframes_payload: Dict[str, Any] = {}
-        for label, minutes in self._timeframes:
-            tf_payload = self._compute_timeframe_metrics(symbol, minutes)
-            if tf_payload:
-                timeframes_payload[label] = tf_payload
-        if not timeframes_payload:
-            return None
-        return {
-            "symbol": symbol,
-            "label": self._symbol_labels.get(symbol, symbol),
-            "last_price": last_candle.get("close"),
-            "last_updated": last_candle.get("close_time"),
-            "timeframes": timeframes_payload,
-        }
-
-    def _compute_timeframe_metrics(self, symbol: str, minutes: int) -> Optional[Dict[str, Any]]:
-        if minutes <= 1:
-            return None
-        window = self._window_candles(symbol, minutes, include_anchor=True)
-        if len(window) < minutes + 1:
-            return None
-        closes = [entry["close"] for entry in window]
-        first_close = closes[0]
-        last_close = closes[-1]
-        if first_close <= 0 or last_close <= 0:
-            return None
-        returns = self._window_returns(symbol, minutes)
-        realized_vol = self._annualized_vol(returns, minutes)
-        return_pct = ((last_close / first_close) - 1.0) * 100.0
-        atr_values = self._compute_atr(symbol, minutes)
-        amplitude_pct = self._compute_amplitude_pct(symbol, minutes, last_close)
-        payload: Dict[str, Any] = {
-            "return_pct": return_pct,
-            "sample_count": len(window) - 1,
-        }
-        if realized_vol is not None:
-            payload["realized_vol_pct"] = realized_vol
-        if atr_values:
-            payload.update(atr_values)
-        if amplitude_pct is not None:
-            payload["amplitude_pct"] = amplitude_pct
-        return payload
-
-    def _serialize_price_series(self, symbol: str) -> Optional[List[Dict[str, float]]]:
-        history = self._histories.get(symbol)
-        if not history:
-            return None
-        window = list(history)[-self._chart_history_points :]
-        if len(window) < 2:
-            return None
-        series: List[Dict[str, float]] = []
-        for candle in window:
-            ts = candle.get("close_time")
-            price = candle.get("close")
-            if isinstance(ts, (int, float)) and isinstance(price, (int, float)):
-                series.append({"ts": ts, "price": price})
-        if len(series) < 2:
-            return None
-        return series
-
-    def _compute_atr(self, symbol: str, minutes: int) -> Optional[Dict[str, Any]]:
-        window = self._window_candles(symbol, minutes)
-        if len(window) < minutes:
-            return None
-        prev_close = self._window_candles(symbol, minutes, include_anchor=True)
-        if len(prev_close) < minutes + 1:
-            return None
-        prev_value = prev_close[0]["close"]
-        true_ranges: List[float] = []
-        for candle in window:
-            high = candle["high"]
-            low = candle["low"]
-            tr = max(
-                high - low,
-                abs(high - prev_value),
-                abs(low - prev_value),
-            )
-            true_ranges.append(tr)
-            prev_value = candle["close"]
-        if not true_ranges:
-            return None
-        atr_abs = sum(true_ranges) / len(true_ranges)
-        last_close = window[-1]["close"]
-        atr_pct = (atr_abs / last_close * 100.0) if last_close > 0 else None
-        payload = {"atr_abs": atr_abs}
-        if atr_pct is not None:
-            payload["atr_pct"] = atr_pct
-        return payload
-
-    def _compute_amplitude_pct(self, symbol: str, minutes: int, last_close: float) -> Optional[float]:
-        window = self._window_candles(symbol, minutes)
-        if len(window) < minutes or last_close <= 0:
-            return None
-        high = max(candle["high"] for candle in window)
-        low = min(candle["low"] for candle in window)
-        if not math.isfinite(high) or not math.isfinite(low) or high <= 0 or low <= 0:
-            return None
-        return ((high - low) / last_close) * 100.0
-
-    def _window_candles(self, symbol: str, count: int, *, include_anchor: bool = False) -> List[Dict[str, float]]:
-        history = self._histories.get(symbol)
-        if not history:
-            return []
-        needed = count + 1 if include_anchor else count
-        if len(history) < needed:
-            return []
-        return list(history)[-needed:]
-
-    def _window_returns(self, symbol: str, minutes: int) -> List[float]:
-        window = self._window_candles(symbol, minutes, include_anchor=True)
-        returns: List[float] = []
-        if len(window) < minutes + 1:
-            return returns
-        for index in range(1, len(window)):
-            prev_close = window[index - 1]["close"]
-            close = window[index]["close"]
-            if prev_close > 0 and close > 0:
-                returns.append(math.log(close / prev_close))
-        return returns
-
-    @staticmethod
-    def _annualized_vol(returns: Sequence[float], window_minutes: int) -> Optional[float]:
-        if len(returns) < 2 or window_minutes <= 0:
-            return None
-        variance = statistics.pvariance(returns)
-        if variance <= 0:
-            return 0.0
-        minutes_per_year = 60 * 24 * 365
-        scale = math.sqrt(minutes_per_year / float(window_minutes))
-        return math.sqrt(variance) * scale * 100.0
-
-    def _compute_pair_guidance(self, payloads: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if not self._pair:
-            return None
-        base_symbol, quote_symbol = self._pair
-        if base_symbol not in payloads or quote_symbol not in payloads:
-            return None
-        timeframe_stats: Dict[str, Any] = {}
-        for label, minutes in self._timeframes:
-            stats = self._pair_timeframe_stats(base_symbol, quote_symbol, minutes)
-            if stats:
-                timeframe_stats[label] = stats
-        if not timeframe_stats:
-            return None
-        return {
-            "pair": f"{self._symbol_labels.get(quote_symbol, quote_symbol)}/{self._symbol_labels.get(base_symbol, base_symbol)}",
-            "base_symbol": base_symbol,
-            "quote_symbol": quote_symbol,
-            "timeframes": timeframe_stats,
-        }
-
-    def _pair_timeframe_stats(self, base_symbol: str, quote_symbol: str, minutes: int) -> Optional[Dict[str, Any]]:
-        base_returns = self._window_returns(base_symbol, minutes)
-        quote_returns = self._window_returns(quote_symbol, minutes)
-        n = min(len(base_returns), len(quote_returns))
-        if n < 2:
-            return None
-        base_series = base_returns[-n:]
-        quote_series = quote_returns[-n:]
-        mean_base = statistics.fmean(base_series)
-        mean_quote = statistics.fmean(quote_series)
-        cov = sum((a - mean_base) * (b - mean_quote) for a, b in zip(base_series, quote_series)) / n
-        var_base = statistics.pvariance(base_series)
-        var_quote = statistics.pvariance(quote_series)
-        if var_base <= 0 or var_quote <= 0:
-            return None
-        corr = cov / math.sqrt(var_base * var_quote)
-        vol_ratio = math.sqrt(var_quote / var_base)
-        beta = corr * vol_ratio
-        base_return_pct = self._compute_return_pct(base_symbol, minutes)
-        quote_return_pct = self._compute_return_pct(quote_symbol, minutes)
-        spread = None
-        if base_return_pct is not None and quote_return_pct is not None:
-            spread = quote_return_pct - base_return_pct
-        payload: Dict[str, Any] = {
-            "corr": corr,
-            "vol_ratio": vol_ratio,
-            "beta": beta,
-        }
-        if spread is not None:
-            payload["return_spread_pct"] = spread
-        return payload
-
-    def _compute_return_pct(self, symbol: str, minutes: int) -> Optional[float]:
-        window = self._window_candles(symbol, minutes, include_anchor=True)
-        if len(window) < minutes + 1:
-            return None
-        first = window[0]["close"]
-        last = window[-1]["close"]
-        if first <= 0 or last <= 0:
-            return None
-        return ((last / first) - 1.0) * 100.0
-
-    @staticmethod
-    def _base_label(symbol: str) -> str:
-        text = (symbol or "").upper()
-        suffixes = ("USDT", "USD", "USDC", "PERP", "-PERP", "_PERP")
-        for suffix in suffixes:
-            if text.endswith(suffix) and len(text) > len(suffix):
-                text = text[: -len(suffix)]
-                break
-        return text or symbol
 
 
 class HistoricalPriceFetcher:
@@ -3173,25 +2676,11 @@ class CoordinatorApp:
         dashboard_password: Optional[str] = None,
         dashboard_session_ttl: float = 7 * 24 * 3600,
         alert_settings: Optional[RiskAlertSettings] = None,
-        enable_volatility_monitor: bool = True,
-        volatility_symbols: Optional[Sequence[str]] = None,
-        volatility_poll_interval: float = 60.0,
-        volatility_history_limit: int = 1800,
     ) -> None:
         self._coordinator = HedgeCoordinator(alert_settings=alert_settings)
         # Para/global alert scopes are controlled by CLI; do not force inheritance here.
         self._adjustments = GrvtAdjustmentManager()
         self._backpack_adjustments = BackpackAdjustmentManager()
-        self._vol_monitor = (
-            VolatilityMonitor(
-                symbols=volatility_symbols,
-                poll_interval=volatility_poll_interval,
-                history_limit=volatility_history_limit,
-            )
-            if enable_volatility_monitor
-            else None
-        )
-        self._price_service = HistoricalPriceFetcher()
         self._dashboard_username = (dashboard_username or "").strip()
         self._dashboard_password = (dashboard_password or "").strip()
         self._session_cookie: str = "hedge_session"
@@ -3286,7 +2775,6 @@ class CoordinatorApp:
                 web.get("/backpack/adjustments", self.handle_backpack_adjustments_list),
                 web.post("/backpack/adjust", self.handle_backpack_adjust_create),
                 web.post("/backpack/adjust/ack", self.handle_backpack_adjust_ack),
-                web.get("/simulation/pnl", self.handle_simulation_pnl),
 
                 # Backpack volume booster
                 web.get("/api/backpack/volume/markets", self.handle_bp_volume_markets),
@@ -3300,13 +2788,8 @@ class CoordinatorApp:
                 web.get("/api/backpack/bbo", self.handle_bp_bbo_preview),
             ]
         )
-        if self._vol_monitor:
-            self._app.on_startup.append(self._on_startup)
-            self._app.on_cleanup.append(self._on_cleanup)
-        else:
-            # still need Feishu background tasks even when volatility monitor is disabled
-            self._app.on_startup.append(self._on_startup)
-            self._app.on_cleanup.append(self._on_cleanup)
+        self._app.on_startup.append(self._on_startup)
+        self._app.on_cleanup.append(self._on_cleanup)
 
     def _load_persisted_para_auto_balance_config(self) -> None:
         path = PERSISTED_PARA_AUTO_BALANCE_FILE
@@ -3352,8 +2835,6 @@ class CoordinatorApp:
 
     async def _on_startup(self, app: web.Application) -> None:
         del app  # unused
-        if self._vol_monitor:
-            await self._vol_monitor.start()
         if self._bp_bbo_ws is not None:
             with suppress(Exception):
                 await self._bp_bbo_ws.start()
@@ -3361,10 +2842,7 @@ class CoordinatorApp:
 
     async def _on_cleanup(self, app: web.Application) -> None:
         del app  # unused
-        if self._vol_monitor:
-            await self._vol_monitor.stop()
-        if self._price_service:
-            await self._price_service.close()
+        # volatility monitor removed
         await self._coordinator.stop_background_tasks()
 
         if self._bp_bbo_ws is not None:
@@ -4110,217 +3588,7 @@ class CoordinatorApp:
         payload["grvt_adjustments"] = await self._adjustments.summary()
         payload["para_adjustments"] = await self._para_adjustments.summary()
         payload["auto_balance"] = self._auto_balance_status_snapshot()
-        payload["para_auto_balance"] = self._para_auto_balance_status_snapshot()
-        if self._vol_monitor:
-            payload["volatility"] = await self._vol_monitor.snapshot()
         return web.json_response(payload)
-
-    async def handle_simulation_pnl(self, request: web.Request) -> web.Response:
-        self._enforce_dashboard_auth(request)
-        if not self._price_service:
-            raise web.HTTPServiceUnavailable(text="historical price service unavailable")
-
-        params = request.rel_url.query
-
-        def _parse_int(name: str, default: int, *, min_value: int, max_value: int) -> int:
-            raw = params.get(name)
-            if raw is None:
-                return default
-            try:
-                value = int(float(raw))
-            except (TypeError, ValueError):
-                raise web.HTTPBadRequest(text=f"{name} must be numeric")
-            if value < min_value:
-                value = min_value
-            if value > max_value:
-                value = max_value
-            return value
-
-        def _parse_float(name: str, default: float, *, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
-            raw = params.get(name)
-            if raw is None:
-                return default
-            try:
-                value = float(str(raw))
-            except (TypeError, ValueError):
-                raise web.HTTPBadRequest(text=f"{name} must be numeric")
-            if not math.isfinite(value):
-                raise web.HTTPBadRequest(text=f"{name} must be finite")
-            if min_value is not None and value < min_value:
-                value = min_value
-            if max_value is not None and value > max_value:
-                value = max_value
-            return value
-
-        long_symbol = self._sanitize_binance_symbol(params.get("long_symbol"), "BTCUSDT")
-        short_symbol = self._sanitize_binance_symbol(params.get("short_symbol"), "ETHUSDT")
-        normalized_interval = self._price_service.normalize_interval(params.get("interval"))
-        interval_minutes = self._price_service.interval_minutes(normalized_interval)
-        window_days = _parse_int("window_days", 365, min_value=30, max_value=365)
-        start_offset_days = _parse_float("start_offset_days", 0.0, min_value=0.0, max_value=float(window_days))
-        samples_per_day = max(1, int(round(1440 / max(interval_minutes, 1))))
-        target_points = max(samples_per_day * window_days, samples_per_day * 30)
-
-        def _resolve_amount(primary: str, alternate: Optional[str], fallback: float) -> float:
-            raw = params.get(primary)
-            label = primary
-            if raw is None and alternate:
-                raw = params.get(alternate)
-                if raw is not None:
-                    label = alternate
-            if raw is None:
-                return fallback
-            try:
-                value = float(str(raw))
-            except (TypeError, ValueError):
-                raise web.HTTPBadRequest(text=f"{label} must be numeric")
-            if not math.isfinite(value):
-                raise web.HTTPBadRequest(text=f"{label} must be finite")
-            value = abs(value)
-            return value if value > 0 else fallback
-
-        long_value = _resolve_amount("long_amount", "btc_amount", 100000.0)
-        short_value = _resolve_amount("short_amount", "eth_amount", 150000.0)
-
-        try:
-            long_series = await self._price_service.get_series(long_symbol, interval=normalized_interval, points=target_points)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._raise_price_fetch_error(exc, long_symbol)
-
-        try:
-            short_series = await self._price_service.get_series(short_symbol, interval=normalized_interval, points=target_points)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            self._raise_price_fetch_error(exc, short_symbol)
-
-        points = self._build_simulation_points(long_series, short_series)
-        if len(points) < samples_per_day * 7:
-            raise web.HTTPServiceUnavailable(text="insufficient overlapping price history")
-        max_start_index = max(0, len(points) - 2)
-        max_offset_days = max_start_index / max(samples_per_day, 1)
-        start_offset_days = min(start_offset_days, max_offset_days)
-        raw_start_index = int(start_offset_days * samples_per_day)
-        start_index = min(max(0, raw_start_index), max_start_index)
-
-        anchor_point = points[start_index] if start_index < len(points) else None
-        base_long_price = float(anchor_point.get("long", 0.0)) if anchor_point else 0.0
-        base_short_price = float(anchor_point.get("short", 0.0)) if anchor_point else 0.0
-
-        def _notional_to_quantity(value: float, price: float) -> float:
-            if value <= 0 or price <= 0:
-                return 0.0
-            return value / price
-
-        long_amount = _notional_to_quantity(long_value, base_long_price)
-        short_amount = _notional_to_quantity(short_value, base_short_price)
-
-        pnl_series = self._compute_pair_pnl_series(points, start_index, long_amount, short_amount)
-        start_anchor_ts = points[start_index]["ts"] if start_index < len(points) else None
-        latest_pnl = pnl_series[-1]["pnl"] if pnl_series else 0.0
-        range_info = self._build_range_payload(points)
-
-        payload = {
-            "source": "binance",
-            "long_symbol": long_symbol,
-            "short_symbol": short_symbol,
-            "long_label": VolatilityMonitor._base_label(long_symbol),
-            "short_label": VolatilityMonitor._base_label(short_symbol),
-            "interval": normalized_interval,
-            "window_days": window_days,
-            "samples_per_day": samples_per_day,
-            "point_count": len(points),
-            "range": range_info,
-            "default": {
-                "start_index": start_index,
-                "start_ts": start_anchor_ts,
-                "start_iso": self._format_iso_timestamp(start_anchor_ts),
-                "long_value": long_value,
-                "short_value": short_value,
-                "long_amount": long_amount,
-                "short_amount": short_amount,
-                "series": [
-                    {"ts": row["ts"], "pnl": row["pnl"], "long": row["long"], "short": row["short"]}
-                    for row in pnl_series
-                ],
-                "latest_pnl": latest_pnl,
-            },
-            "points": [
-                {"ts": entry["ts"], "long": entry["long"], "short": entry["short"]}
-                for entry in points
-            ],
-        }
-        return web.json_response(payload)
-
-    @staticmethod
-    def _build_simulation_points(
-        long_series: Sequence[Mapping[str, Any]],
-        short_series: Sequence[Mapping[str, Any]],
-    ) -> List[Dict[str, float]]:
-        def _series_to_map(series: Sequence[Mapping[str, Any]]) -> Dict[int, float]:
-            mapping: Dict[int, float] = {}
-            for entry in series or []:
-                ts_raw = entry.get("ts")
-                price_raw = entry.get("close") if "close" in entry else entry.get("price")
-                if ts_raw is None or price_raw is None:
-                    continue
-                try:
-                    ts_value = int(round(float(ts_raw)))
-                    price_value = float(price_raw)
-                except (TypeError, ValueError):
-                    continue
-                if not math.isfinite(price_value):
-                    continue
-                mapping[ts_value] = price_value
-            return mapping
-
-        long_map = _series_to_map(long_series)
-        short_map = _series_to_map(short_series)
-        timestamps = sorted(set(long_map.keys()) & set(short_map.keys()))
-        points: List[Dict[str, float]] = []
-        for ts in timestamps:
-            long_price = long_map.get(ts)
-            short_price = short_map.get(ts)
-            if long_price is None or short_price is None:
-                continue
-            points.append({
-                "ts": float(ts),
-                "long": float(long_price),
-                "short": float(short_price),
-            })
-        return points
-
-    @staticmethod
-    def _compute_pair_pnl_series(
-        points: Sequence[Mapping[str, float]],
-        start_index: int,
-        long_amount: float,
-        short_amount: float,
-    ) -> List[Dict[str, float]]:
-        if not points:
-            return []
-        bounded_index = max(0, min(start_index, len(points) - 1))
-        anchor = points[bounded_index]
-        base_long = float(anchor.get("long", 0.0))
-        base_short = float(anchor.get("short", 0.0))
-        series: List[Dict[str, float]] = []
-        for entry in points[bounded_index:]:
-            try:
-                ts = float(entry.get("ts", 0.0))
-                long_price = float(entry.get("long", 0.0))
-                short_price = float(entry.get("short", 0.0))
-            except (TypeError, ValueError):
-                continue
-            pnl = (long_price - base_long) * long_amount - (short_price - base_short) * short_amount
-            series.append({
-                "ts": ts,
-                "pnl": pnl,
-                "long": long_price,
-                "short": short_price,
-            })
-        return series
 
     def _build_range_payload(self, points: Sequence[Mapping[str, float]]) -> Optional[Dict[str, Any]]:
         if not points:
@@ -4369,27 +3637,18 @@ class CoordinatorApp:
         except Exception:
             raise web.HTTPBadRequest(text="update payload must be JSON")
 
+        # ...existing code...
+        # NOTE: BTC/ETH volatility + pair simulation endpoints were removed; this handler
+        # continues to accept monitor updates for the dashboard.
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="update payload must be an object")
 
-        state = await self._coordinator.update(body)
-        await self._maybe_auto_balance(state)
-        await self._maybe_para_auto_balance(state)
-        return web.json_response(state)
-
-    async def handle_control_get(self, request: web.Request) -> web.Response:
-        self._enforce_dashboard_auth(request)
-        agent_id = request.rel_url.query.get("agent_id")
-        snapshot = await self._coordinator.control_snapshot(agent_id)
-        if agent_id:
-            pending = []
-            pending += await self._adjustments.pending_for_agent(agent_id)
-            pending += await self._para_adjustments.pending_for_agent(agent_id)
-            pending += await self._backpack_adjustments.pending_for_agent(agent_id)
-            if pending:
-                agent_block = snapshot.get("agent")
-                if isinstance(agent_block, dict):
-                    agent_block["pending_adjustments"] = pending
+        await self._coordinator.update(body)
+        snapshot = await self._coordinator.snapshot()
+        snapshot["grvt_adjustments"] = await self._adjustments.summary()
+        snapshot["para_adjustments"] = await self._para_adjustments.summary()
+        snapshot["auto_balance"] = self._auto_balance_status_snapshot()
+        snapshot["para_auto_balance"] = self._para_auto_balance_status_snapshot()
         return web.json_response(snapshot)
 
     async def handle_backpack_adjustments_list(self, request: web.Request) -> web.Response:
@@ -4518,6 +3777,20 @@ class CoordinatorApp:
             raise web.HTTPBadRequest(text="control payload requires 'action' or 'paused'")
 
         return web.json_response(snapshot)
+
+    async def handle_control_get(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        agent_id = (request.rel_url.query.get("agent_id") or "").strip()
+        if not agent_id:
+            raise web.HTTPBadRequest(text="agent_id is required")
+        # Coordinator provides aggregated snapshot; extract per-agent control queue.
+        snapshot = await self._coordinator.snapshot()
+        controls = snapshot.get("controls")
+        if isinstance(controls, dict):
+            per_agent = controls.get(agent_id)
+            if isinstance(per_agent, dict):
+                return web.json_response(per_agent)
+        return web.json_response({"agent_id": agent_id, "pending_adjustments": []})
 
     async def handle_auto_balance_get(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
@@ -6213,20 +5486,11 @@ async def _run_app(args: argparse.Namespace) -> None:
             risk_threshold * 100,
         )
 
-    enable_vol_monitor = not getattr(args, "disable_volatility_monitor", False)
-    volatility_symbols: Optional[List[str]] = None
-    symbols_raw = getattr(args, "volatility_symbols", None)
-    if symbols_raw:
-        volatility_symbols = [item.strip() for item in symbols_raw.split(",") if item.strip()]
     coordinator_app = CoordinatorApp(
         dashboard_username=args.dashboard_username,
         dashboard_password=args.dashboard_password,
         dashboard_session_ttl=args.dashboard_session_ttl,
         alert_settings=global_settings,
-        enable_volatility_monitor=enable_vol_monitor,
-        volatility_symbols=volatility_symbols,
-        volatility_poll_interval=max(getattr(args, "volatility_poll_interval", 60.0), 20.0),
-        volatility_history_limit=max(getattr(args, "volatility_history_limit", 1800), 100),
     )
 
     # Apply PARA settings after app starts so that the CLI can choose which scopes are enabled.
@@ -6369,28 +5633,6 @@ def _parse_args() -> argparse.Namespace:
             "{account_label} ({agent_id}) loss {loss_value} / {base_label} {base_value}",
         ),
         help="Template for Bark alert bodies.",
-    )
-    parser.add_argument(
-        "--disable-volatility-monitor",
-        action="store_true",
-        help="Disable external BTC/ETH volatility polling.",
-    )
-    parser.add_argument(
-        "--volatility-symbols",
-        default=os.getenv("VOLATILITY_SYMBOLS", "BTCUSDT,ETHUSDT"),
-        help="Comma-separated spot symbols to sample for volatility (default BTCUSDT,ETHUSDT).",
-    )
-    parser.add_argument(
-        "--volatility-poll-interval",
-        type=float,
-        default=_env_float("VOLATILITY_POLL_INTERVAL", 60.0),
-        help="Seconds between volatility updates (min 20s).",
-    )
-    parser.add_argument(
-        "--volatility-history-limit",
-        type=int,
-        default=int(os.getenv("VOLATILITY_HISTORY_LIMIT", "1800")),
-        help="Number of 1m candles to keep for volatility stats (must exceed largest window).",
     )
     return parser.parse_args()
 
