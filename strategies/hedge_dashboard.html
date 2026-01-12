@@ -6911,6 +6911,143 @@
         }
       }
 
+      async function fetchBackpackAdjustments() {
+        try {
+          const response = await fetch('/backpack/adjustments', {
+            method: 'GET',
+            credentials: 'same-origin',
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            return null;
+          }
+          return await response.json();
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function renderBackpackAdjustments(payload) {
+        if (!bpAdjustPanel || !bpAdjustHistoryBody) {
+          return;
+        }
+
+        const adjustments = Array.isArray(payload?.adjustments) ? payload.adjustments : [];
+        const normalizeStatus = (value) => String(value || '').toLowerCase();
+
+        // Determine lock state
+        let locked = false;
+        let active = null;
+        for (const adj of adjustments) {
+          const st = normalizeStatus(adj?.overall_status ?? adj?.status);
+          if (['pending', 'in_progress'].includes(st)) {
+            active = adj;
+            break;
+          }
+        }
+        if (active) {
+          locked = true;
+          bpPendingRequestId = active.request_id || null;
+          const agents = Array.isArray(active.agents) ? active.agents : [];
+          const pendingAgents = agents.filter((a) => normalizeStatus(a?.status) === 'pending');
+          const scopeText = describeSymbolScope(active?.target_symbols ?? active?.symbols);
+          if (bpAdjustStatus) {
+            bpAdjustStatus.textContent = `等待 ${pendingAgents.length}/${agents.length || '-'} 个 VPS ACK（${scopeText}）`;
+          }
+        } else if (adjustments.length) {
+          const latest = adjustments[0];
+          const st = normalizeStatus(latest?.overall_status ?? latest?.status);
+          const scopeText = describeSymbolScope(latest?.target_symbols ?? latest?.symbols);
+          if (bpAdjustStatus) {
+            if (st === 'completed') {
+              bpAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)}（${scopeText}）已完成`;
+            } else if (st === 'failed') {
+              bpAdjustStatus.textContent = `最近一次 ${describeAdjustmentAction(latest.action)}（${scopeText}）部分失败`;
+            } else {
+              bpAdjustStatus.textContent = `最近状态：${st || '--'}（${scopeText}）`;
+            }
+          }
+        } else if (bpAdjustStatus) {
+          bpAdjustStatus.textContent = '等待指令…（默认全部币种）';
+        }
+
+        bpAdjustLocked = locked;
+        if (!locked) {
+          bpPendingRequestId = null;
+        }
+        updateBpAdjustButtons();
+
+        // Render history (compact)
+        if (!adjustments.length) {
+          bpAdjustHistoryBody.innerHTML = '<tr><td colspan="9">暂无广播记录</td></tr>';
+          return;
+        }
+
+        const safeText = (value) => {
+          if (value === undefined || value === null) {
+            return '--';
+          }
+          const text = String(value).trim();
+          return text ? text : '--';
+        };
+        const scopeFor = (adj) => describeSymbolScope(adj?.target_symbols ?? adj?.symbols);
+
+        const rows = [];
+        for (const adj of adjustments.slice(0, 20)) {
+          const createdText = formatTimestamp(adj.created_at) ?? '--';
+          const statusText = safeText(adj.overall_status ?? adj.status ?? 'pending');
+          const scopeText = scopeFor(adj);
+          const agents = Array.isArray(adj.agents) ? adj.agents : [];
+          const sortedAgents = agents
+            .filter((a) => a && typeof a === 'object')
+            .slice()
+            .sort((a, b) => String(a.agent_id || '').localeCompare(String(b.agent_id || '')))
+            .slice(0, 2);
+
+          const pickExtra = (agent, key) => {
+            const extra = agent?.extra;
+            if (!extra || typeof extra !== 'object') {
+              return '--';
+            }
+            return safeText(extra[key]);
+          };
+          const left = sortedAgents[0] || null;
+          const right = sortedAgents[1] || null;
+          const leftOrder = pickExtra(left, 'order_type');
+          const leftAvg = pickExtra(left, 'avg_price');
+          const leftFill = pickExtra(left, 'filled_qty');
+          const rightOrder = pickExtra(right, 'order_type');
+          const rightAvg = pickExtra(right, 'avg_price');
+          const rightFill = pickExtra(right, 'filled_qty');
+
+          rows.push(`
+            <tr class="adjust-group-top">
+              <td>${escapeHtml(createdText)}</td>
+              <td>${escapeHtml(describeAdjustmentAction(adj.action))}</td>
+              <td>${escapeHtml(String(adj.magnitude ?? '--'))}</td>
+              <td>${escapeHtml(scopeText)}</td>
+              <td>${escapeHtml(statusText)}</td>
+              <td>${escapeHtml(safeText(left?.agent_id))}</td>
+              <td>${escapeHtml(leftOrder)}</td>
+              <td>${escapeHtml(leftAvg)}</td>
+              <td>${escapeHtml(leftFill)}</td>
+            </tr>
+          `);
+          if (right) {
+            rows.push(`
+              <tr class="adjust-group-sub">
+                <td colspan="5"></td>
+                <td>${escapeHtml(safeText(right?.agent_id))}</td>
+                <td>${escapeHtml(rightOrder)}</td>
+                <td>${escapeHtml(rightAvg)}</td>
+                <td>${escapeHtml(rightFill)}</td>
+              </tr>
+            `);
+          }
+        }
+        bpAdjustHistoryBody.innerHTML = rows.join('');
+      }
+
       function updateParaAdjustButtons() {
         const disabled = paraAdjustLocked;
         [paraAdjustAddButton, paraAdjustReduceButton].forEach((button) => {
@@ -10079,6 +10216,8 @@
           renderBackpack(data);
           renderParaAdjustments(data?.para_adjustments);
           renderGrvtAdjustments(data?.grvt_adjustments);
+          const bpAdjPayload = await fetchBackpackAdjustments();
+          renderBackpackAdjustments(bpAdjPayload);
           renderAutoBalance(data?.auto_balance, data?.agents);
           renderParaAutoBalance(data?.para_auto_balance, data?.paradex_accounts || data?.agents);
           maybeRefreshRiskHistory();
