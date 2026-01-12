@@ -2515,6 +2515,121 @@
         <div class="section-header-controls"></div>
       </div>
       <p class="empty" id="bp-empty">Waiting for Backpack monitor…</p>
+
+      <section class="grid" style="margin-top: 1rem;">
+        <article class="card" style="grid-column: 1 / -1;">
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 1rem; flex-wrap: wrap;">
+            <div>
+              <h2 style="margin:0;">Backpack 刷量</h2>
+              <p class="summary-sub" style="margin: .35rem 0 0;">市价买 → 市价卖（按差价阈值触发），统计成交量与磨损（含返佣后手续费）</p>
+            </div>
+            <span class="badge badge-muted" id="bp-volume-running">stopped</span>
+          </div>
+
+          <div class="bp-run-grid" id="bp-run-grid" style="display:none;"></div>
+
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; margin-top: 1rem;">
+            <label>
+              交易对
+              <select id="bp-volume-symbol"></select>
+            </label>
+            <label>
+              单次刷量（base qty）
+              <input type="number" id="bp-volume-qty" min="0" step="0.001" value="0.2" />
+            </label>
+            <label>
+              次数（0=无限）
+              <input type="number" id="bp-volume-cycles" min="0" step="1" value="0" />
+            </label>
+            <label>
+              差价阈值（bps）
+              <input type="number" id="bp-volume-max-spread-bps" min="0" step="0.1" value="2" />
+            </label>
+            <label>
+              随机间隔最小值（ms）
+              <input type="number" id="bp-volume-cooldown-min" min="0" step="1" value="0" />
+            </label>
+            <label>
+              随机间隔最大值（ms）
+              <input type="number" id="bp-volume-cooldown-max" min="0" step="1" value="0" />
+            </label>
+          </div>
+
+          <div style="display:flex; gap:.75rem; align-items:center; margin-top: 1rem; flex-wrap: wrap;">
+            <button type="button" class="button-success" id="bp-volume-start">启动</button>
+            <button type="button" class="button-danger" id="bp-volume-stop">停止</button>
+            <button type="button" class="button-secondary" id="bp-volume-clear-history">清除当前币种历史</button>
+            <p class="summary-sub" id="bp-volume-status" style="margin:0;">等待配置…</p>
+          </div>
+
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin-top: 1rem;">
+            <article class="card" style="background: rgba(79,156,255,.06); border: 1px solid rgba(79,156,255,.14);">
+              <h2>买一 / 卖一</h2>
+              <div class="value" id="bp-bbo-price">--</div>
+              <p class="summary-sub" id="bp-bbo-meta" style="margin-top:.35rem;">--</p>
+            </article>
+            <article class="card" style="background: rgba(79,156,255,.06); border: 1px solid rgba(79,156,255,.14);">
+              <h2>盘口容量（cap）</h2>
+              <div class="value" id="bp-bbo-cap">--</div>
+              <p class="summary-sub" id="bp-bbo-qty" style="margin-top:.35rem;">--</p>
+            </article>
+            <article class="card" style="background: rgba(79,156,255,.06); border: 1px solid rgba(79,156,255,.14);">
+              <h2>预计磨损（按当前数量）</h2>
+              <div class="value" id="bp-bbo-wear">--</div>
+              <p class="summary-sub" id="bp-bbo-wear-meta" style="margin-top:.35rem;">--</p>
+            </article>
+          </div>
+
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin-top: 1rem;">
+            <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+              <h2>成交量（base）</h2>
+              <div class="value" id="bp-volume-base">--</div>
+            </article>
+            <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+              <h2>成交额（quote）</h2>
+              <div class="value" id="bp-volume-quote">--</div>
+            </article>
+            <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+              <h2>价差磨损</h2>
+              <div class="value" id="bp-wear-spread">--</div>
+            </article>
+            <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+              <h2>手续费磨损（返佣后）</h2>
+              <div class="value" id="bp-wear-fee-net">--</div>
+              <p class="summary-sub" id="bp-fee-meta">taker 0.026% × 55%</p>
+            </article>
+            <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+              <h2>总磨损（返佣后）</h2>
+              <div class="value" id="bp-wear-total-net">--</div>
+            </article>
+            <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+              <h2>每万磨损</h2>
+              <div class="value" id="bp-wear-per10k">--</div>
+              <p class="summary-sub" id="bp-wear-per10k-est">预估：--</p>
+            </article>
+          </div>
+
+          <div class="spread-table-wrapper" style="margin-top: 1rem;">
+            <table class="spread-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>交易对</th>
+                  <th>价差(bps)</th>
+                  <th>数量</th>
+                  <th>BuyAvg</th>
+                  <th>SellAvg</th>
+                  <th>Spread磨损</th>
+                  <th>Fee(返佣后)</th>
+                  <th>总磨损(返佣后)</th>
+                </tr>
+              </thead>
+              <tbody id="bp-volume-recent"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
       <div class="grvt-card hidden" id="bp-card">
         <div class="grvt-summary-grid">
           <article class="card grvt-summary-card">
@@ -2588,120 +2703,6 @@
             </table>
           </div>
         </div>
-      <section class="grid" style="margin-top: 1rem;">
-      <article class="card" style="grid-column: 1 / -1;">
-        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 1rem; flex-wrap: wrap;">
-          <div>
-            <h2 style="margin:0;">Backpack 刷量</h2>
-            <p class="summary-sub" style="margin: .35rem 0 0;">市价买 → 市价卖（按差价阈值触发），统计成交量与磨损（含返佣后手续费）</p>
-          </div>
-          <span class="badge badge-muted" id="bp-volume-running">stopped</span>
-        </div>
-
-        <div class="bp-run-grid" id="bp-run-grid" style="display:none;"></div>
-
-        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .75rem; margin-top: 1rem;">
-          <label>
-            交易对
-            <select id="bp-volume-symbol"></select>
-          </label>
-          <label>
-            单次刷量（base qty）
-            <input type="number" id="bp-volume-qty" min="0" step="0.001" value="0.2" />
-          </label>
-          <label>
-            次数（0=无限）
-            <input type="number" id="bp-volume-cycles" min="0" step="1" value="0" />
-          </label>
-          <label>
-            差价阈值（bps）
-            <input type="number" id="bp-volume-max-spread-bps" min="0" step="0.1" value="2" />
-          </label>
-          <label>
-            随机间隔最小值（ms）
-            <input type="number" id="bp-volume-cooldown-min" min="0" step="1" value="0" />
-          </label>
-          <label>
-            随机间隔最大值（ms）
-            <input type="number" id="bp-volume-cooldown-max" min="0" step="1" value="0" />
-          </label>
-        </div>
-
-        <div style="display:flex; gap:.75rem; align-items:center; margin-top: 1rem; flex-wrap: wrap;">
-          <button type="button" class="button-success" id="bp-volume-start">启动</button>
-          <button type="button" class="button-danger" id="bp-volume-stop">停止</button>
-          <button type="button" class="button-secondary" id="bp-volume-clear-history">清除当前币种历史</button>
-          <p class="summary-sub" id="bp-volume-status" style="margin:0;">等待配置…</p>
-        </div>
-
-        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin-top: 1rem;">
-          <article class="card" style="background: rgba(79,156,255,.06); border: 1px solid rgba(79,156,255,.14);">
-            <h2>买一 / 卖一</h2>
-            <div class="value" id="bp-bbo-price">--</div>
-            <p class="summary-sub" id="bp-bbo-meta" style="margin-top:.35rem;">--</p>
-          </article>
-          <article class="card" style="background: rgba(79,156,255,.06); border: 1px solid rgba(79,156,255,.14);">
-            <h2>盘口容量（cap）</h2>
-            <div class="value" id="bp-bbo-cap">--</div>
-            <p class="summary-sub" id="bp-bbo-qty" style="margin-top:.35rem;">--</p>
-          </article>
-          <article class="card" style="background: rgba(79,156,255,.06); border: 1px solid rgba(79,156,255,.14);">
-            <h2>预计磨损（按当前数量）</h2>
-            <div class="value" id="bp-bbo-wear">--</div>
-            <p class="summary-sub" id="bp-bbo-wear-meta" style="margin-top:.35rem;">--</p>
-          </article>
-        </div>
-
-        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin-top: 1rem;">
-          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
-            <h2>成交量（base）</h2>
-            <div class="value" id="bp-volume-base">--</div>
-          </article>
-          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
-            <h2>成交额（quote）</h2>
-            <div class="value" id="bp-volume-quote">--</div>
-          </article>
-          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
-            <h2>价差磨损</h2>
-            <div class="value" id="bp-wear-spread">--</div>
-          </article>
-          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
-            <h2>手续费磨损（返佣后）</h2>
-            <div class="value" id="bp-wear-fee-net">--</div>
-            <p class="summary-sub" id="bp-fee-meta">taker 0.026% × 55%</p>
-          </article>
-          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
-            <h2>总磨损（返佣后）</h2>
-            <div class="value" id="bp-wear-total-net">--</div>
-          </article>
-          <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
-            <h2>每万磨损</h2>
-            <div class="value" id="bp-wear-per10k">--</div>
-            <p class="summary-sub" id="bp-wear-per10k-est">预估：--</p>
-          </article>
-        </div>
-
-        <div class="spread-table-wrapper" style="margin-top: 1rem;">
-          <table class="spread-table">
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>交易对</th>
-                <th>价差(bps)</th>
-                <th>数量</th>
-                <th>BuyAvg</th>
-                <th>SellAvg</th>
-                <th>Spread磨损</th>
-                <th>Fee(返佣后)</th>
-                <th>总磨损(返佣后)</th>
-              </tr>
-            </thead>
-            <tbody id="bp-volume-recent"></tbody>
-          </table>
-        </div>
-      </article>
-    </section>
-
       </div>
     </section>
 
