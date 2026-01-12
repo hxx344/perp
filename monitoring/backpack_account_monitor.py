@@ -55,6 +55,46 @@ else:
 LOGGER = logging.getLogger(__name__)
 
 
+def load_env_files(paths: List[str]) -> None:
+    """Best-effort .env loader (no external deps).
+
+    Mirrors the behavior in other monitors (e.g. para_account_monitor.py):
+    - Accepts one or more file paths.
+    - Loads KEY=VALUE lines into os.environ iff the key is not already set.
+    """
+
+    if not paths:
+        return
+    for raw_path in paths:
+        if not raw_path:
+            continue
+        env_path = Path(raw_path).expanduser()
+        if not env_path.exists():
+            LOGGER.debug("Env file %s not found; skipping", env_path)
+            continue
+        try:
+            with env_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    if "=" not in stripped:
+                        continue
+                    key, value = stripped.split("=", 1)
+                    key = key.strip()
+                    if not key:
+                        continue
+                    value = value.strip()
+                    if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
+                        value = value[1:-1]
+                    if key not in os.environ:
+                        os.environ[key] = value
+        except Exception as exc:  # pragma: no cover - best effort env loading
+            LOGGER.warning("Failed to load env file %s: %s", env_path, exc)
+            continue
+        LOGGER.info("Loaded environment variables from %s", env_path)
+
+
 def _decimal_from(value: Any) -> Optional[Decimal]:
     if value is None:
         return None
@@ -391,9 +431,11 @@ class BackpackAccountMonitor:
         return method(symbol=symbol, side=side, quantity=quantity)
 
     def _bp_private_key(self) -> ed25519.Ed25519PrivateKey:
-        secret = os.getenv("BACKPACK_SECRET_KEY")
+        secret = os.getenv("BACKPACK_SECRET_KEY") or os.getenv("BACKPACK_API_SECRET")
         if not secret:
-            raise RuntimeError("BACKPACK_SECRET_KEY is required for signing")
+            raise RuntimeError(
+                "BACKPACK_SECRET_KEY (or legacy BACKPACK_API_SECRET) is required for signing"
+            )
         try:
             secret_bytes = base64.b64decode(secret)
         except Exception as exc:
@@ -437,9 +479,11 @@ class BackpackAccountMonitor:
         broker_id: Optional[int] = None,
         window_ms: int = 5000,
     ) -> Any:
-        public_key = os.getenv("BACKPACK_PUBLIC_KEY")
+        public_key = os.getenv("BACKPACK_PUBLIC_KEY") or os.getenv("BACKPACK_API_KEY")
         if not public_key:
-            raise RuntimeError("BACKPACK_PUBLIC_KEY is required for signing")
+            raise RuntimeError(
+                "BACKPACK_PUBLIC_KEY (or legacy BACKPACK_API_KEY) is required for signing"
+            )
 
         timestamp_ms = int(time.time() * 1000)
         window_ms = int(window_ms or 5000)
@@ -689,10 +733,12 @@ def _build_backpack_client() -> Any:
     if BackpackClient is None:
         raise RuntimeError(f"BackpackClient import failed: {_IMPORT_ERROR}")
 
-    public_key = os.getenv("BACKPACK_PUBLIC_KEY")
-    secret_key = os.getenv("BACKPACK_SECRET_KEY")
+    public_key = os.getenv("BACKPACK_PUBLIC_KEY") or os.getenv("BACKPACK_API_KEY")
+    secret_key = os.getenv("BACKPACK_SECRET_KEY") or os.getenv("BACKPACK_API_SECRET")
     if not public_key or not secret_key:
-        raise RuntimeError("BACKPACK_PUBLIC_KEY/BACKPACK_SECRET_KEY are required")
+        raise RuntimeError(
+            "BACKPACK_PUBLIC_KEY/BACKPACK_SECRET_KEY (or legacy BACKPACK_API_KEY/BACKPACK_API_SECRET) are required"
+        )
 
     # In this repo, exchanges.backpack.BackpackClient expects a config dict.
     # The client itself reads BACKPACK_PUBLIC_KEY/BACKPACK_SECRET_KEY from env,
@@ -710,12 +756,37 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--agent-id", default=os.getenv("AGENT_ID", "backpack"))
     parser.add_argument("--poll-interval", type=float, default=float(os.getenv("POLL_INTERVAL", "5")))
     parser.add_argument("--timeout", type=float, default=float(os.getenv("REQUEST_TIMEOUT", "10")))
+    # Backwards-compatible flag name (matches para monitor style).
+    parser.add_argument(
+        "--request-timeout",
+        dest="timeout",
+        type=float,
+        help="Alias for --timeout (request timeout in seconds).",
+    )
+    # Backwards-compatible no-op flag for parity with para monitor.
+    parser.add_argument(
+        "--max-positions",
+        type=int,
+        default=int(os.getenv("MAX_POSITIONS", "0")),
+        help="(compat) Maximum positions shown/sent. Currently not enforced for Backpack monitor.",
+    )
     parser.add_argument("--coordinator-username", default=os.getenv("COORDINATOR_USERNAME"))
     parser.add_argument("--coordinator-password", default=os.getenv("COORDINATOR_PASSWORD"))
     parser.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "INFO"))
+    parser.add_argument(
+        "--env-file",
+        action="append",
+        help="Env file to preload (defaults to .env if present). Repeat to load multiple files.",
+    )
 
     args = parser.parse_args(argv)
-    logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    env_files = args.env_file if getattr(args, "env_file", None) is not None else [".env"]
+    load_env_files(list(env_files))
 
     cfg = BackpackMonitorConfig(
         label=str(args.label),
