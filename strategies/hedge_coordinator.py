@@ -3127,9 +3127,17 @@ class HedgeCoordinator:
             if isinstance(overrides.get("kind"), str):
                 kind = str(overrides.get("kind") or "").strip().lower() or None
             use_para = kind in {"para", "para_risk", "para-risk"}
+            use_bp = kind in {"bp", "bp_risk", "bp-risk"}
 
-            notifier = self._para_bark_notifier if use_para else self._bark_notifier
-            threshold = self._para_risk_alert_threshold if use_para else self._risk_alert_threshold
+            if use_para:
+                notifier = self._para_bark_notifier
+                threshold = self._para_risk_alert_threshold
+            elif use_bp:
+                notifier = self._bp_bark_notifier
+                threshold = self._bp_risk_alert_threshold
+            else:
+                notifier = self._bark_notifier
+                threshold = self._risk_alert_threshold
             if notifier is None or threshold is None:
                 raise RuntimeError("Bark risk alerts are not enabled; configure Bark URL and threshold first.")
             stats = self._para_risk_stats if use_para else self._global_risk_stats
@@ -3185,13 +3193,13 @@ class HedgeCoordinator:
             alert = RiskAlertInfo(
                 # When testing PARA alerts, reuse the PARA key so history.kind becomes 'para_risk'
                 # and the entry shows up in the PARA history table.
-                key=PARA_RISK_ALERT_KEY if use_para else f"test::{agent_id}",
+                key=PARA_RISK_ALERT_KEY if use_para else (BP_RISK_ALERT_KEY if use_bp else f"test::{agent_id}"),
                 agent_id=agent_id,
                 account_label=account_label,
                 ratio=ratio,
                 loss_value=loss_value,
                 base_value=base_value,
-                base_label="risk_capacity(frontend_authority)" if use_para else "Equity-IM",
+                base_label="risk_capacity(frontend_authority)" if use_para else ("Equity-IM" if use_bp else "Equity-IM"),
             )
 
         await self._send_risk_alert(alert, source="test")
