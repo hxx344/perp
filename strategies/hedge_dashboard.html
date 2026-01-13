@@ -11237,9 +11237,35 @@
               aggregateAccountCount += accounts.length;
               for (const account of accounts) {
                 const obj = account && typeof account === 'object' ? account : {};
-                const total = parseDecimal(obj.total_pnl ?? obj.pnl ?? obj.unrealized_pnl);
                 const equity = parseDecimal(obj.equity ?? obj.account_value ?? obj.total_account_value);
                 const wallet = parseDecimal(obj.balance ?? obj.available_balance ?? obj.cash_balance);
+
+                // Per requirement: Backpack account total should be computed as sum(PnL) across positions.
+                // We treat pnlRealized as pnl when available (consistent with position table UX).
+                const positionsForTotal = Array.isArray(obj.positions)
+                  ? obj.positions
+                  : snapshotPositions;
+                let computedTotal = 0;
+                let hasComputedTotal = false;
+                for (const p of (Array.isArray(positionsForTotal) ? positionsForTotal : [])) {
+                  const pnl = parseDecimal(
+                    p?.pnl
+                      ?? p?.pnlRealized
+                      ?? p?.pnl_realized
+                      ?? p?.realizedPnl
+                      ?? p?.unrealizedPnl
+                      ?? p?.pnlUnrealized
+                      ?? p?.pnl_unrealized
+                  );
+                  if (Number.isFinite(pnl)) {
+                    computedTotal += pnl;
+                    hasComputedTotal = true;
+                  }
+                }
+                const total = hasComputedTotal
+                  ? computedTotal
+                  : parseDecimal(obj.total_pnl ?? obj.pnl ?? obj.unrealized_pnl);
+
                 if (Number.isFinite(total)) {
                   aggregateTotalPnl += total;
                   hasTotal = true;
@@ -11266,7 +11292,27 @@
                 });
               }
             } else {
-              const total = parseDecimal(summary.total_pnl ?? summary.pnl ?? summary.unrealized_pnl);
+              // Summary-only path: also compute total from snapshot.positions when possible.
+              let computedTotal = 0;
+              let hasComputedTotal = false;
+              for (const p of snapshotPositions) {
+                const pnl = parseDecimal(
+                  p?.pnl
+                    ?? p?.pnlRealized
+                    ?? p?.pnl_realized
+                    ?? p?.realizedPnl
+                    ?? p?.unrealizedPnl
+                    ?? p?.pnlUnrealized
+                    ?? p?.pnl_unrealized
+                );
+                if (Number.isFinite(pnl)) {
+                  computedTotal += pnl;
+                  hasComputedTotal = true;
+                }
+              }
+              const total = hasComputedTotal
+                ? computedTotal
+                : parseDecimal(summary.total_pnl ?? summary.pnl ?? summary.unrealized_pnl);
               const equity = parseDecimal(summary.equity ?? summary.account_value ?? summary.total_account_value);
               const wallet = parseDecimal(summary.balance ?? summary.available_balance ?? summary.cash_balance);
               if (Number.isFinite(total)) {
