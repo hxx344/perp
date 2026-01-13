@@ -1222,6 +1222,7 @@ class HedgeCoordinator:
         self._feishu_session: Optional[ClientSession] = None
         self._feishu_start_diagnostic_logged = False
         self._para_risk_capacity_buffer = RiskCapacityBufferState()
+        self._bp_risk_capacity_buffer = RiskCapacityBufferState()
 
     async def start_background_tasks(self) -> None:
         if not self._feishu_start_diagnostic_logged:
@@ -1468,6 +1469,21 @@ class HedgeCoordinator:
         worst_account_label: Optional[str] = None
         max_initial_margin: Optional[Decimal] = None
         any_seen = False
+        latest_update: Optional[float] = None
+
+        def _coerce_ts(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                ts = float(value)
+            except Exception:
+                return None
+            if not math.isfinite(ts) or ts <= 0:
+                return None
+            # tolerate ms timestamps
+            if ts > 1e12:
+                ts = ts / 1000.0
+            return ts
 
         for agent_id, state in self._states.items():
             bp = state.backpack_accounts
@@ -1476,6 +1492,16 @@ class HedgeCoordinator:
             any_seen = True
 
             summary = bp.get("summary") if isinstance(bp.get("summary"), dict) else None
+
+            # Track latest update timestamp (used for capacity buffer stability).
+            ts_raw = None
+            if isinstance(summary, dict):
+                ts_raw = summary.get("updated_at")
+            if ts_raw is None:
+                ts_raw = bp.get("updated_at")
+            safe_ts = _coerce_ts(ts_raw)
+            if safe_ts is not None and (latest_update is None or safe_ts > latest_update):
+                latest_update = safe_ts
             collateral = (
                 summary.get("collateral")
                 if isinstance(summary, dict) and isinstance(summary.get("collateral"), dict)
@@ -1583,6 +1609,22 @@ class HedgeCoordinator:
         if not any_seen:
             return None
 
+        # Compute raw capacity using dashboard-aligned formula: Equity - 1.5×max(IM)
+        max_im_value = max_initial_margin
+        raw_capacity: Optional[Decimal] = None
+        if max_im_value is not None and max_im_value > 0 and equity_sum > 0:
+            raw_capacity = equity_sum - (Decimal("1.5") * max_im_value)
+
+        # Apply PARA-like buffering to reduce flicker / temporary missing IM.
+        buffered_capacity, buffer_note, buffer_status = _evaluate_risk_capacity_buffer(
+            has_value=raw_capacity is not None and raw_capacity > 0,
+            value=raw_capacity if raw_capacity is not None and raw_capacity > 0 else None,
+            timestamp=latest_update,
+            base_note="",
+            state=self._bp_risk_capacity_buffer,
+        )
+        effective_capacity = buffered_capacity if buffered_capacity is not None else raw_capacity
+
         return {
             "equity_sum": equity_sum,
             "equity_available_sum": equity_available_sum,
@@ -1591,6 +1633,11 @@ class HedgeCoordinator:
             "worst_agent_id": worst_agent_id,
             "worst_account_label": worst_account_label,
             "max_initial_margin": max_initial_margin,
+            "risk_capacity_raw": raw_capacity if raw_capacity is not None and raw_capacity > 0 else None,
+            "risk_capacity_buffered": effective_capacity if effective_capacity is not None and effective_capacity > 0 else None,
+            "buffer_note": buffer_note,
+            "buffer_status": buffer_status,
+            "latest_update": latest_update,
         }
 
     def _build_bp_risk_push_card(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
@@ -1605,18 +1652,18 @@ class HedgeCoordinator:
         worst_agent = values.get("worst_agent_id") or "-"
         worst_label = values.get("worst_account_label") or "-"
         max_im: Optional[Decimal] = values.get("max_initial_margin")
+        capacity_note = values.get("buffer_note")
+        capacity_status = values.get("buffer_status")
 
         # Dashboard-aligned capacity and risk ratio:
         # capacity = equity_sum - 1.5 * max_initial_margin
         # ratio = worst_loss / capacity, worst_loss = max(0, -worst_pnl)
-        capacity: Optional[Decimal] = None
-        if max_im is not None and equity_sum > 0 and max_im > 0:
-            try:
-                capacity = equity_sum - (Decimal("1.5") * max_im)
-                if capacity <= 0:
-                    capacity = None
-            except Exception:
-                capacity = None
+        # Prefer buffered capacity (PARA-like) to reduce flicker.
+        capacity: Optional[Decimal] = values.get("risk_capacity_buffered") or None
+        if capacity is None:
+            capacity = values.get("risk_capacity_raw") or None
+        if capacity is not None and capacity <= 0:
+            capacity = None
 
         ratio: Optional[float] = None
         try:
@@ -1670,6 +1717,17 @@ class HedgeCoordinator:
                 },
             },
         ]
+
+        if capacity_note:
+            fields.append(
+                {
+                    "is_short": False,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**备注**\n{capacity_note} ({capacity_status})",
+                    },
+                }
+            )
 
         header_title = f"[Backpack] 风险播报 · RISK LEVEL: {ratio_text}"
         card = {
