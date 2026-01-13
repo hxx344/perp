@@ -7427,7 +7427,7 @@
       }
 
       function renderBpTransferAdjustments(adjustments) {
-        if (!bpTransferStatus || shouldRespectBpTransferSticky()) {
+        if (!bpTransferStatus) {
           return;
         }
         const normalizeStatus = (value) => String(value || '').toLowerCase();
@@ -7500,6 +7500,11 @@
           }
         } catch (_) {
           // ignore
+        }
+
+        // Status line respects sticky (avoid overriding “已提交…” too fast)
+        if (shouldRespectBpTransferSticky()) {
+          return;
         }
 
         if (!transfers.length) {
