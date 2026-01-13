@@ -2783,6 +2783,95 @@
             </label>
           </div>
           <div class="grvt-auto-actions">
+
+        <div class="grvt-risk-panel" id="bp-risk-panel" style="margin-top: 1rem;">
+          <div class="grvt-adjust-header">
+            <div>
+              <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Bark 告警（Backpack）</h3>
+              <p class="summary-sub" style="margin: 0;">针对 Backpack 账户权益风险的 Bark 推送配置</p>
+            </div>
+            <div class="risk-status-pill" id="bp-risk-settings-status">加载中…</div>
+          </div>
+          <div class="risk-settings-grid">
+            <section class="risk-settings-card">
+              <div class="risk-toggle">
+                <input type="checkbox" id="bp-risk-alert-enabled" />
+                <span>启用风险告警</span>
+              </div>
+              <div class="risk-slider">
+                <label class="risk-slider-label" for="bp-risk-threshold-slider">
+                  <span id="bp-risk-threshold-label">阈值 --%</span>
+                </label>
+                <input type="range" id="bp-risk-threshold-slider" min="5" max="90" step="0.5" value="30" />
+                <div class="risk-slider-scale">
+                  <span>5%</span>
+                  <span>25%</span>
+                  <span>50%</span>
+                  <span>90%</span>
+                </div>
+              </div>
+              <div class="risk-inline-inputs">
+                <label>
+                  触发阈值 (%)
+                  <input type="number" id="bp-risk-threshold-input" min="1" max="90" step="0.5" />
+                </label>
+                <label>
+                  重置阈值 (%)
+                  <input type="number" id="bp-risk-reset-input" min="1" max="90" step="0.5" />
+                </label>
+                <label>
+                  冷却 (分钟)
+                  <input type="number" id="bp-risk-cooldown-input" min="0" max="360" step="1" />
+                </label>
+              </div>
+              <p class="risk-meta" id="bp-risk-ratio-meta">等待风险数据…</p>
+            </section>
+            <section class="risk-settings-card">
+              <div class="risk-bark-grid">
+                <label>
+                  Bark URL
+                  <input type="text" id="bp-risk-bark-url" placeholder="https://api.day.app/xxxxx/%7Btitle%7D/%7Bbody%7D" />
+                </label>
+                <label>
+                  请求超时 (秒)
+                  <input type="number" id="bp-risk-bark-timeout" min="1" max="60" step="0.5" />
+                </label>
+              </div>
+            </section>
+          </div>
+          <div class="risk-settings-actions">
+            <div class="risk-actions-left">
+              <button type="button" id="bp-risk-settings-save">保存配置</button>
+              <button type="button" class="button-success" id="bp-risk-settings-test">测试 Bark</button>
+              <button type="button" class="button-ghost" id="bp-risk-settings-refresh">重新读取</button>
+              <button type="button" class="button-danger" id="bp-risk-settings-disable">关闭告警</button>
+            </div>
+            <p class="risk-settings-message" id="bp-risk-settings-message">未加载</p>
+            <p class="risk-settings-message" id="bp-risk-test-message"></p>
+          </div>
+          <div class="risk-history-card">
+            <div class="risk-history-header">
+              <h3>告警历史 (Backpack)</h3>
+              <button type="button" class="button-ghost" id="bp-risk-history-refresh">刷新</button>
+            </div>
+            <p class="risk-history-status" id="bp-risk-history-status">等待告警数据…</p>
+            <div class="risk-history-table-wrapper">
+              <table class="risk-history-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>来源</th>
+                    <th>账户</th>
+                    <th>风险%</th>
+                    <th>亏损 / 裕量</th>
+                  </tr>
+                </thead>
+                <tbody id="bp-risk-history-body"></tbody>
+              </table>
+              <p class="risk-history-empty hidden" id="bp-risk-history-empty">暂无告警</p>
+            </div>
+          </div>
+        </div>
             <button type="button" id="bp-auto-save">保存配置</button>
             <button type="button" class="button-danger" id="bp-auto-disable">停用</button>
             <button type="button" class="button-ghost" id="bp-auto-refresh">刷新状态</button>
@@ -3507,6 +3596,31 @@
   const bpTransferHistoryBody = document.getElementById('bp-transfer-history');
   const bpAdjustClearHistoryButton = document.getElementById('bp-adjust-clear-history');
 
+  const bpRiskPanel = document.getElementById('bp-risk-panel');
+  const bpRiskSettingsStatus = document.getElementById('bp-risk-settings-status');
+  const bpRiskSettingsMessage = document.getElementById('bp-risk-settings-message');
+  const bpRiskTestMessage = document.getElementById('bp-risk-test-message');
+  const bpRiskAlertEnabledInput = document.getElementById('bp-risk-alert-enabled');
+  const bpRiskThresholdSlider = document.getElementById('bp-risk-threshold-slider');
+  const bpRiskThresholdInput = document.getElementById('bp-risk-threshold-input');
+  const bpRiskResetInput = document.getElementById('bp-risk-reset-input');
+  const bpRiskCooldownInput = document.getElementById('bp-risk-cooldown-input');
+  const bpRiskThresholdLabel = document.getElementById('bp-risk-threshold-label');
+  const bpRiskMeta = document.getElementById('bp-risk-ratio-meta');
+  const bpRiskBarkUrlInput = document.getElementById('bp-risk-bark-url');
+  const bpRiskBarkAppendInput = null;
+  const bpRiskBarkTimeoutInput = document.getElementById('bp-risk-bark-timeout');
+  const bpRiskTitleTemplateInput = document.getElementById('bp-risk-title-template');
+  const bpRiskBodyTemplateInput = document.getElementById('bp-risk-body-template');
+  const bpRiskSaveButton = document.getElementById('bp-risk-settings-save');
+  const bpRiskDisableButton = document.getElementById('bp-risk-settings-disable');
+  const bpRiskRefreshButton = document.getElementById('bp-risk-settings-refresh');
+  const bpRiskTestButton = document.getElementById('bp-risk-settings-test');
+  const bpRiskHistoryBody = document.getElementById('bp-risk-history-body');
+  const bpRiskHistoryEmpty = document.getElementById('bp-risk-history-empty');
+  const bpRiskHistoryStatus = document.getElementById('bp-risk-history-status');
+  const bpRiskHistoryRefreshButton = document.getElementById('bp-risk-history-refresh');
+
   const paraAccountCount = document.getElementById('para-account-count');
   const paraEmpty = document.getElementById('para-empty');
   const paraCard = document.getElementById('para-card');
@@ -3889,8 +4003,10 @@
   let riskTestBusy = false;
   let latestGlobalRiskRatio = null;
   let paraLatestRiskRatio = null;
+  let bpLatestRiskRatio = null;
   let grvtLatestRiskRatio = null;
   let paraRiskHistoryEntries = [];
+  let bpRiskHistoryEntries = [];
 
   function recomputeGlobalRiskRatio() {
     if (Number.isFinite(paraLatestRiskRatio)) {
@@ -5034,6 +5150,29 @@
             disableButton: paraRiskDisableButton,
             refreshButton: paraRiskRefreshButton,
             testButton: paraRiskTestButton,
+          },
+          {
+            scope: 'bp',
+            panel: bpRiskPanel,
+            statusPill: bpRiskSettingsStatus,
+            message: bpRiskSettingsMessage,
+            testMessage: bpRiskTestMessage,
+            enabledInput: bpRiskAlertEnabledInput,
+            thresholdSlider: bpRiskThresholdSlider,
+            thresholdInput: bpRiskThresholdInput,
+            resetInput: bpRiskResetInput,
+            cooldownInput: bpRiskCooldownInput,
+            thresholdLabel: bpRiskThresholdLabel,
+            meta: bpRiskMeta,
+            barkUrlInput: bpRiskBarkUrlInput,
+            barkAppendInput: bpRiskBarkAppendInput,
+            barkTimeoutInput: bpRiskBarkTimeoutInput,
+            titleTemplateInput: bpRiskTitleTemplateInput,
+            bodyTemplateInput: bpRiskBodyTemplateInput,
+            saveButton: bpRiskSaveButton,
+            disableButton: bpRiskDisableButton,
+            refreshButton: bpRiskRefreshButton,
+            testButton: bpRiskTestButton,
           },
         ].filter((view) => view.panel);
       }
@@ -6301,12 +6440,13 @@
         const views = getRiskViews();
         for (const view of views) {
           const viewParts = [];
-          const isPara = view.panel === paraRiskPanel;
-          const ratio = isPara ? paraLatestRiskRatio : latestGlobalRiskRatio;
+          const isPara = view.scope === 'para';
+          const isBp = view.scope === 'bp';
+          const ratio = isPara ? paraLatestRiskRatio : (isBp ? bpLatestRiskRatio : latestGlobalRiskRatio);
           if (Number.isFinite(ratio)) {
             viewParts.push(`当前风险 ${(ratio * 100).toFixed(2)}%`);
           }
-          const snapshot = isPara ? paraRiskSettingsSnapshot : globalRiskSettingsSnapshot;
+          const snapshot = isPara ? paraRiskSettingsSnapshot : (isBp ? bpRiskSettingsSnapshot : globalRiskSettingsSnapshot);
           const thresholdSummary = getRiskThresholdSummary(snapshot);
           if (thresholdSummary) {
             viewParts.push(thresholdSummary);
@@ -6350,7 +6490,13 @@
           if (scope === 'all') {
             return true;
           }
-          return scope === 'para' ? view.scope === 'para' : view.scope !== 'para';
+          if (scope === 'para') {
+            return view.scope === 'para';
+          }
+          if (scope === 'bp') {
+            return view.scope === 'bp';
+          }
+          return view.scope === 'global';
         });
         views.forEach((view) => {
           if (view.message) {
@@ -6604,7 +6750,9 @@
 
       function updateRiskInputsState() {
         getRiskViews().forEach((view) => {
-          const viewBusy = view.mode === 'para' ? paraRiskSettingsBusy : riskSettingsBusy;
+          const viewBusy = view.scope === 'para'
+            ? paraRiskSettingsBusy
+            : (view.scope === 'bp' ? bpRiskSettingsBusy : riskSettingsBusy);
           const enabled = Boolean(view.enabledInput?.checked);
           const disableThreshold = viewBusy || !enabled;
           [view.thresholdSlider, view.thresholdInput, view.resetInput, view.cooldownInput].forEach((input) => {
@@ -6622,7 +6770,9 @@
 
       function updateRiskButtons() {
         getRiskViews().forEach((view) => {
-          const disabled = view.mode === 'para' ? paraRiskSettingsBusy : riskSettingsBusy;
+          const disabled = view.scope === 'para'
+            ? paraRiskSettingsBusy
+            : (view.scope === 'bp' ? bpRiskSettingsBusy : riskSettingsBusy);
           [view.saveButton, view.refreshButton].forEach((button) => {
             if (button) {
               button.disabled = disabled;
@@ -6658,8 +6808,20 @@
         setRiskStatusMessage('配置未保存', { scope: 'para' });
       }
 
+      function markBpRiskSettingsDirty() {
+        if (bpRiskSettingsBusy) {
+          return;
+        }
+        bpRiskSettingsDirty = true;
+        setRiskStatusMessage('配置未保存', { scope: 'bp' });
+      }
+
       let globalRiskSettingsSnapshot = null;
       let paraRiskSettingsSnapshot = null;
+  let bpRiskSettingsSnapshot = null;
+
+  let bpRiskSettingsBusy = false;
+  let bpRiskSettingsDirty = false;
 
       function normalizeRiskSettingsSnapshot(settings) {
         const snapshot = settings ? { ...settings } : null;
@@ -6678,12 +6840,19 @@
         const normalized = normalizeRiskSettingsSnapshot(settings);
         if (scope === 'para') {
           paraRiskSettingsSnapshot = normalized;
+        } else if (scope === 'bp') {
+          bpRiskSettingsSnapshot = normalized;
         } else {
           globalRiskSettingsSnapshot = normalized;
         }
 
-        const activeSnapshot = scope === 'para' ? paraRiskSettingsSnapshot : globalRiskSettingsSnapshot;
-        const views = scope === 'para' ? getRiskViews().filter((view) => view.scope === 'para') : getRiskViews().filter((view) => view.scope !== 'para');
+        const activeSnapshot = scope === 'para'
+          ? paraRiskSettingsSnapshot
+          : (scope === 'bp' ? bpRiskSettingsSnapshot : globalRiskSettingsSnapshot);
+
+        const views = scope === 'para'
+          ? getRiskViews().filter((view) => view.scope === 'para')
+          : (scope === 'bp' ? getRiskViews().filter((view) => view.scope === 'bp') : getRiskViews().filter((view) => view.scope !== 'para' && view.scope !== 'bp'));
 
         const hasThreshold = Number.isFinite(activeSnapshot?.threshold_percent)
           ? Number(activeSnapshot.threshold_percent) > 0
@@ -6731,12 +6900,12 @@
             view.statusPill.textContent = enabled ? `已启用 · ${getRiskThresholdSummary(activeSnapshot)}` : '未启用';
           }
         });
-        if (scope !== 'para') {
-          updateRiskThresholdLabel(thresholdPercent);
-        }
+        updateRiskThresholdLabel(thresholdPercent);
         if (markClean) {
           if (scope === 'para') {
             paraRiskSettingsDirty = false;
+          } else if (scope === 'bp') {
+            bpRiskSettingsDirty = false;
           } else {
             riskSettingsDirty = false;
           }
@@ -6744,6 +6913,73 @@
         }
         updateRiskButtons();
         updateRiskMeta();
+      }
+
+      async function loadBpRiskSettings({ silent = false } = {}) {
+        if (!bpRiskPanel || bpRiskSettingsBusy) {
+          return;
+        }
+        bpRiskSettingsBusy = true;
+        updateRiskButtons();
+        if (!silent) {
+          setRiskStatusMessage('读取 Backpack 风险配置…', { scope: 'bp' });
+        }
+        try {
+          const response = await fetch('/bp/risk_alert/settings', { cache: 'no-store' });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          applyRiskSettings(result.settings, { markClean: true, scope: 'bp' });
+        } catch (error) {
+          setRiskStatusMessage(`读取失败：${error}`, { scope: 'bp' });
+        } finally {
+          bpRiskSettingsBusy = false;
+          updateRiskButtons();
+        }
+      }
+
+      async function saveBpRiskSettings({ enabledOverride } = {}) {
+        if (!bpRiskPanel || bpRiskSettingsBusy) {
+          return;
+        }
+        let payload;
+        try {
+          payload = buildRiskSettingsPayload({ enabledOverride });
+        } catch (error) {
+          setRiskStatusMessage(error.message || String(error), { scope: 'bp' });
+          return;
+        }
+        bpRiskSettingsBusy = true;
+        updateRiskButtons();
+        setRiskStatusMessage('保存 Backpack 风险配置…', { scope: 'bp' });
+        try {
+          const response = await fetch('/bp/risk_alert/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          applyRiskSettings(result.settings, { markClean: true, scope: 'bp' });
+          setRiskStatusMessage('Backpack 配置已保存', { scope: 'bp' });
+          await refreshMetrics();
+        } catch (error) {
+          setRiskStatusMessage(`保存失败：${error}`, { scope: 'bp' });
+        } finally {
+          bpRiskSettingsBusy = false;
+          updateRiskButtons();
+        }
+      }
+
+      async function disableBpRiskAlerts() {
+        await saveBpRiskSettings({ enabledOverride: false });
       }
 
       function buildRiskSettingsPayload({ enabledOverride } = {}) {
@@ -7061,6 +7297,42 @@
           riskTestBusy = false;
           updateRiskButtons();
           // Force refresh history after testing to avoid confusion.
+          loadRiskHistory({ silent: false });
+        }
+      }
+
+      async function triggerBpRiskTest() {
+        if (!bpRiskPanel || riskTestBusy) {
+          return;
+        }
+        riskTestBusy = true;
+        updateRiskButtons();
+        setRiskTestMessage('推送 Backpack 测试通知…（将出现在「告警历史 (Backpack)」中）');
+        try {
+          const payload = { kind: 'bp_risk' };
+          if (Number.isFinite(bpLatestRiskRatio) && bpLatestRiskRatio > 0) {
+            payload.ratio = bpLatestRiskRatio;
+          }
+          const response = await fetch('/risk_alert/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          const alert = result?.alert || {};
+          const ratioPercent = Number(alert.ratio_percent);
+          const ratioText = Number.isFinite(ratioPercent) ? `${ratioPercent.toFixed(1)}%` : '--%';
+          setRiskTestMessage(`推送成功 · Backpack 风险 ${ratioText}`);
+        } catch (error) {
+          setRiskTestMessage(`推送失败：${error}`);
+        } finally {
+          riskTestBusy = false;
+          updateRiskButtons();
           loadRiskHistory({ silent: false });
         }
       }
@@ -11468,6 +11740,7 @@
               } else {
                 bpRiskLevel.textContent = '—';
               }
+              bpLatestRiskRatio = Number.isFinite(riskRatio) ? riskRatio : null;
               applyRiskTone(bpRiskLevel, riskRatio, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
               if (bpRiskDetail) {
                 if (worstLossAccount && hasCapacity) {
@@ -12176,6 +12449,12 @@
           loadRiskHistory({ silent: false });
         });
       }
+
+      if (bpRiskHistoryRefreshButton) {
+        bpRiskHistoryRefreshButton.addEventListener('click', () => {
+          loadRiskHistory({ silent: false });
+        });
+      }
       if (riskAlertEnabledInput) {
         riskAlertEnabledInput.addEventListener('change', () => {
           updateRiskInputsState();
@@ -12186,6 +12465,13 @@
         paraRiskAlertEnabledInput.addEventListener('change', () => {
           updateRiskInputsState();
           markParaRiskSettingsDirty();
+        });
+      }
+
+      if (bpRiskAlertEnabledInput) {
+        bpRiskAlertEnabledInput.addEventListener('change', () => {
+          updateRiskInputsState();
+          markBpRiskSettingsDirty();
         });
       }
       if (riskThresholdSlider) {
@@ -12208,6 +12494,17 @@
           markParaRiskSettingsDirty();
         });
       }
+
+      if (bpRiskThresholdSlider) {
+        bpRiskThresholdSlider.addEventListener('input', (event) => {
+          const value = clamp(Number(event.target.value), 5, 90);
+          if (bpRiskThresholdInput) {
+            bpRiskThresholdInput.value = value.toFixed(1);
+          }
+          updateRiskThresholdLabel(value);
+          markBpRiskSettingsDirty();
+        });
+      }
       if (riskThresholdInput) {
         riskThresholdInput.addEventListener('input', () => {
           const value = clamp(Number(riskThresholdInput.value), 1, 90);
@@ -12226,6 +12523,17 @@
           }
           updateRiskThresholdLabel(value);
           markParaRiskSettingsDirty();
+        });
+      }
+
+      if (bpRiskThresholdInput) {
+        bpRiskThresholdInput.addEventListener('input', () => {
+          const value = clamp(Number(bpRiskThresholdInput.value), 1, 90);
+          if (Number.isFinite(value) && bpRiskThresholdSlider) {
+            bpRiskThresholdSlider.value = value;
+          }
+          updateRiskThresholdLabel(value);
+          markBpRiskSettingsDirty();
         });
       }
       [
@@ -12257,6 +12565,41 @@
         }
         input.addEventListener('input', markParaRiskSettingsDirty);
       });
+
+      [
+        bpRiskResetInput,
+        bpRiskCooldownInput,
+        bpRiskBarkUrlInput,
+        bpRiskBarkTimeoutInput,
+        bpRiskTitleTemplateInput,
+        bpRiskBodyTemplateInput,
+      ].forEach((input) => {
+        if (!input) {
+          return;
+        }
+        input.addEventListener('input', markBpRiskSettingsDirty);
+      });
+
+      if (bpRiskSaveButton) {
+        bpRiskSaveButton.addEventListener('click', () => {
+          saveBpRiskSettings();
+        });
+      }
+      if (bpRiskTestButton) {
+        bpRiskTestButton.addEventListener('click', () => {
+          triggerBpRiskTest();
+        });
+      }
+      if (bpRiskRefreshButton) {
+        bpRiskRefreshButton.addEventListener('click', () => {
+          loadBpRiskSettings({ silent: false });
+        });
+      }
+      if (bpRiskDisableButton) {
+        bpRiskDisableButton.addEventListener('click', () => {
+          disableBpRiskAlerts();
+        });
+      }
     updateGrvtSymbolOptions([]);
     updateParaSymbolOptions([]);
     updateGrvtTransferButtons();
@@ -12271,6 +12614,7 @@
     loadBpAutoBalanceConfig({ silent: true });
     loadRiskSettings({ silent: true });
   loadParaRiskSettings({ silent: true });
+    loadBpRiskSettings({ silent: true });
     refreshMetrics();
     setInterval(refreshMetrics, 2000);
 

@@ -455,6 +455,7 @@ PARA_STALE_DEBUG_ENV = "PARA_STALE_DEBUG"
 PARA_RISK_DEBUG_ENV = "PARA_RISK_DEBUG"
 GLOBAL_RISK_ALERT_KEY = "__global_risk__"
 PARA_RISK_ALERT_KEY = "__para_risk__"
+BP_RISK_ALERT_KEY = "__bp_risk__"
 TRANSFERABLE_HISTORY_LIMIT = 720
 TRANSFERABLE_HISTORY_MERGE_SECONDS = 20.0
 ALERT_HISTORY_LIMIT = 200
@@ -1187,8 +1188,14 @@ class HedgeCoordinator:
             body_template="{account_label} ({agent_id}) loss {loss_value} / {base_label} {base_value}",
         ).normalized()
         self._para_alert_settings_updated_at = time.time()
+        self._bp_alert_settings = RiskAlertSettings(
+            title_template="Backpack Risk {ratio_percent:.1f}%",
+            body_template="{account_label} ({agent_id}) loss {loss_value} / {base_label} {base_value}",
+        ).normalized()
+        self._bp_alert_settings_updated_at = time.time()
         self._bark_notifier: Optional[BarkNotifier] = None
         self._para_bark_notifier: Optional[BarkNotifier] = None
+        self._bp_bark_notifier: Optional[BarkNotifier] = None
         self._risk_alert_threshold: Optional[float] = None
         self._risk_alert_reset: Optional[float] = None
         self._risk_alert_cooldown: float = 0.0
@@ -1197,9 +1204,14 @@ class HedgeCoordinator:
         self._para_risk_alert_reset: Optional[float] = None
         self._para_risk_alert_cooldown: float = 0.0
 
+        self._bp_risk_alert_threshold: Optional[float] = None
+        self._bp_risk_alert_reset: Optional[float] = None
+        self._bp_risk_alert_cooldown: float = 0.0
+
         self._para_stale_critical_seconds: float = 30.0
         self._apply_alert_settings()
         self._apply_para_alert_settings()
+        self._apply_bp_alert_settings()
         self._risk_alert_active: Dict[str, bool] = {}
         self._risk_alert_last_ts: Dict[str, float] = {}
 
@@ -1848,6 +1860,23 @@ class HedgeCoordinator:
         else:
             self._para_bark_notifier = None
 
+    def _apply_bp_alert_settings(self, settings: Optional[RiskAlertSettings] = None) -> None:
+        if settings is not None:
+            self._bp_alert_settings = settings.normalized()
+            self._bp_alert_settings_updated_at = time.time()
+        config = self._bp_alert_settings
+        self._bp_risk_alert_threshold = config.threshold
+        self._bp_risk_alert_reset = config.reset_ratio
+        self._bp_risk_alert_cooldown = config.cooldown
+        if config.bark_url:
+            self._bp_bark_notifier = BarkNotifier(
+                config.bark_url,
+                append_payload=False,
+                timeout=config.bark_timeout,
+            )
+        else:
+            self._bp_bark_notifier = None
+
     def _alert_settings_payload(self, now: Optional[float] = None) -> Dict[str, Any]:
         payload = self._alert_settings.to_payload()
         payload["updated_at"] = self._alert_settings_updated_at
@@ -1882,6 +1911,23 @@ class HedgeCoordinator:
             payload["cooldown_remaining"] = 0.0
         return payload
 
+    def _bp_alert_settings_payload(self, now: Optional[float] = None) -> Dict[str, Any]:
+        payload = self._bp_alert_settings.to_payload()
+        payload["updated_at"] = self._bp_alert_settings_updated_at
+        payload["active"] = bool(self._risk_alert_active.get(BP_RISK_ALERT_KEY))
+        last_alert = self._risk_alert_last_ts.get(BP_RISK_ALERT_KEY)
+        payload["last_alert_at"] = last_alert
+        cooldown = self._bp_risk_alert_cooldown or 0.0
+        if last_alert is not None and cooldown > 0:
+            ready_at = last_alert + cooldown
+            payload["cooldown_ready_at"] = ready_at
+            current = now if now is not None else time.time()
+            payload["cooldown_remaining"] = max(0.0, ready_at - current)
+        else:
+            payload["cooldown_ready_at"] = None
+            payload["cooldown_remaining"] = 0.0
+        return payload
+
     async def alert_settings_snapshot(self) -> Dict[str, Any]:
         async with self._lock:
             return self._alert_settings_payload()
@@ -1889,6 +1935,10 @@ class HedgeCoordinator:
     async def para_alert_settings_snapshot(self) -> Dict[str, Any]:
         async with self._lock:
             return self._para_alert_settings_payload()
+
+    async def bp_alert_settings_snapshot(self) -> Dict[str, Any]:
+        async with self._lock:
+            return self._bp_alert_settings_payload()
 
     async def apply_alert_settings(self, settings: RiskAlertSettings) -> Dict[str, Any]:
         async with self._lock:
@@ -1903,6 +1953,13 @@ class HedgeCoordinator:
             self._risk_alert_active.pop(PARA_RISK_ALERT_KEY, None)
             self._risk_alert_last_ts.pop(PARA_RISK_ALERT_KEY, None)
             return self._para_alert_settings_payload()
+
+    async def apply_bp_alert_settings(self, settings: RiskAlertSettings) -> Dict[str, Any]:
+        async with self._lock:
+            self._apply_bp_alert_settings(settings)
+            self._risk_alert_active.pop(BP_RISK_ALERT_KEY, None)
+            self._risk_alert_last_ts.pop(BP_RISK_ALERT_KEY, None)
+            return self._bp_alert_settings_payload()
 
     @staticmethod
     def _normalize_agent_id(raw: Any) -> str:
@@ -2473,6 +2530,8 @@ class HedgeCoordinator:
             kind = "para_stale"
         elif alert.key == PARA_RISK_ALERT_KEY:
             kind = "para_risk"
+        elif alert.key == BP_RISK_ALERT_KEY:
+            kind = "bp_risk"
         else:
             kind = "risk"
 
@@ -2495,7 +2554,7 @@ class HedgeCoordinator:
             "error": error,
         }
 
-        if kind == "para_risk":
+        if kind in {"para_risk", "bp_risk"}:
             # PARA history only needs the essential numbers for display: loss / capacity.
             # We intentionally avoid attaching extra forensics fields to keep the history light.
             pass
@@ -2614,6 +2673,7 @@ class HedgeCoordinator:
             self._recalculate_global_risk()
             alerts = self._prepare_risk_alerts(agent_id, state.grvt_accounts)
             alerts = list(alerts) + list(self._prepare_para_risk_alerts(agent_id))
+            alerts = list(alerts) + list(self._prepare_bp_risk_alerts(agent_id))
             alerts = list(alerts) + list(self._prepare_para_stale_alerts(now))
             self._prune_stale(now)
             self._last_agent_id = agent_id
@@ -2784,6 +2844,45 @@ class HedgeCoordinator:
         else:
             if stats.ratio < reset_ratio:
                 self._risk_alert_active.pop(PARA_RISK_ALERT_KEY, None)
+
+        return alerts
+
+    def _prepare_bp_risk_alerts(self, agent_id: str) -> Sequence[RiskAlertInfo]:
+        # Backpack risk alerts are scoped to BP notifier/settings only.
+        if self._bp_bark_notifier is None or self._bp_risk_alert_threshold is None:
+            return []
+
+        threshold = self._bp_risk_alert_threshold
+        reset_ratio = self._bp_risk_alert_reset if self._bp_risk_alert_reset is not None else threshold * 0.7
+        now = time.time()
+        alerts: List[RiskAlertInfo] = []
+
+        authority = self._compute_bp_authority_values() or {}
+        authority_ratio = authority.get("ratio")
+        authority_loss: Decimal = authority.get("worst_loss") or Decimal("0")
+        authority_base: Decimal = authority.get("risk_capacity_buffered") or Decimal("0")
+
+        if authority_ratio is not None and authority_ratio >= threshold and authority_base > 0 and authority_loss > 0:
+            already_active = self._risk_alert_active.get(BP_RISK_ALERT_KEY, False)
+            last_ts = self._risk_alert_last_ts.get(BP_RISK_ALERT_KEY, 0.0)
+            cooldown = self._bp_risk_alert_cooldown if self._bp_risk_alert_cooldown else self._risk_alert_cooldown
+            if not already_active and (now - last_ts) >= cooldown:
+                alerts.append(
+                    RiskAlertInfo(
+                        key=BP_RISK_ALERT_KEY,
+                        agent_id=agent_id,
+                        account_label="Backpack",
+                        ratio=float(authority_ratio),
+                        loss_value=authority_loss,
+                        base_value=authority_base,
+                        base_label="risk_capacity(frontend_authority)",
+                    )
+                )
+                self._risk_alert_active[BP_RISK_ALERT_KEY] = True
+                self._risk_alert_last_ts[BP_RISK_ALERT_KEY] = now
+        else:
+            if authority_ratio is None or authority_ratio < reset_ratio:
+                self._risk_alert_active.pop(BP_RISK_ALERT_KEY, None)
 
         return alerts
 
@@ -2968,12 +3067,21 @@ class HedgeCoordinator:
 
     async def _send_risk_alert(self, alert: RiskAlertInfo, *, source: str = "auto") -> None:
         use_para = False
+        use_bp = False
         if alert.key == PARA_RISK_ALERT_KEY:
             use_para = True
         elif isinstance(alert.key, str) and alert.key.startswith("para_stale::"):
             use_para = True
+        elif alert.key == BP_RISK_ALERT_KEY:
+            use_bp = True
 
-        notifier = self._para_bark_notifier if use_para else self._bark_notifier
+        notifier: Optional[BarkNotifier]
+        if use_para:
+            notifier = self._para_bark_notifier
+        elif use_bp:
+            notifier = self._bp_bark_notifier
+        else:
+            notifier = self._bark_notifier
         if notifier is None:
             # Avoid permanently suppressing alerts when the notifier is misconfigured.
             if isinstance(alert.key, str) and alert.key.startswith("para_stale::"):
@@ -3221,6 +3329,8 @@ class CoordinatorApp:
                 web.post("/risk_alert/settings", self.handle_risk_alert_update),
                 web.get("/para/risk_alert/settings", self.handle_para_risk_alert_settings),
                 web.post("/para/risk_alert/settings", self.handle_para_risk_alert_update),
+                web.get("/bp/risk_alert/settings", self.handle_bp_risk_alert_settings),
+                web.post("/bp/risk_alert/settings", self.handle_bp_risk_alert_update),
                 web.get("/risk_alert/history", self.handle_risk_alert_history),
                 web.post("/risk_alert/test", self.handle_risk_alert_test),
                 web.get("/grvt/adjustments", self.handle_grvt_adjustments),
@@ -5010,6 +5120,11 @@ class CoordinatorApp:
         payload = await self._coordinator.para_alert_settings_snapshot()
         return web.json_response({"settings": payload})
 
+    async def handle_bp_risk_alert_settings(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        payload = await self._coordinator.bp_alert_settings_snapshot()
+        return web.json_response({"settings": payload})
+
     async def handle_risk_alert_history(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
         limit_param = request.rel_url.query.get("limit")
@@ -5055,6 +5170,22 @@ class CoordinatorApp:
             raise web.HTTPBadRequest(text=str(exc))
         payload = await self._coordinator.apply_para_alert_settings(settings)
         LOGGER.info("PARA risk alert settings updated via dashboard")
+        return web.json_response({"settings": payload})
+
+    async def handle_bp_risk_alert_update(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="risk settings payload must be JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="risk settings payload must be an object")
+        try:
+            settings = await self._build_risk_alert_settings(body)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        payload = await self._coordinator.apply_bp_alert_settings(settings)
+        LOGGER.info("Backpack risk alert settings updated via dashboard")
         return web.json_response({"settings": payload})
 
     async def handle_risk_alert_test(self, request: web.Request) -> web.Response:
@@ -6597,11 +6728,12 @@ async def _run_app(args: argparse.Namespace) -> None:
     ).normalized()
 
     scope_raw = (getattr(args, "risk_alert_scope", "both") or "both").strip().lower()
-    if scope_raw not in {"both", "global", "para", "none"}:
-        raise SystemExit("--risk-alert-scope must be one of: both, global, para, none")
+    if scope_raw not in {"both", "global", "para", "bp", "none"}:
+        raise SystemExit("--risk-alert-scope must be one of: both, global, para, bp, none")
 
     global_settings: Optional[RiskAlertSettings] = alert_settings if scope_raw in {"both", "global"} else None
     para_settings: Optional[RiskAlertSettings] = alert_settings if scope_raw in {"both", "para"} else None
+    bp_settings: Optional[RiskAlertSettings] = alert_settings if scope_raw in {"both", "bp"} else None
 
     if alert_settings.threshold and alert_settings.bark_url:
         LOGGER.info(
@@ -6629,6 +6761,12 @@ async def _run_app(args: argparse.Namespace) -> None:
             coordinator_app._coordinator._apply_para_alert_settings(para_settings)
         except Exception:
             LOGGER.exception("Failed to apply PARA alert settings")
+
+    if bp_settings is not None:
+        try:
+            coordinator_app._coordinator._apply_bp_alert_settings(bp_settings)
+        except Exception:
+            LOGGER.exception("Failed to apply Backpack alert settings")
 
     if (args.dashboard_username or "") or (args.dashboard_password or ""):
         LOGGER.info("Dashboard authentication enabled; protected endpoints require HTTP Basic credentials")
@@ -6712,8 +6850,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--risk-alert-scope",
         default=os.getenv("RISK_ALERT_SCOPE", "both"),
-        choices=["both", "global", "para", "none"],
-        help="Which risk alert scope(s) to enable: both|global|para|none (default both).",
+        choices=["both", "global", "para", "bp", "none"],
+        help="Which risk alert scope(s) to enable: both|global|para|bp|none (default both).",
     )
     parser.add_argument(
         "--risk-alert-threshold",
