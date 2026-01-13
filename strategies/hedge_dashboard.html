@@ -7592,6 +7592,36 @@
           return;
         }
 
+        // Dual-VPS hedge mode: prefer using Backpack Auto-Balance pair (A/B) as the
+        // default target agents for every add/reduce request.
+        // Backend refuses to default to broadcast "all" for /backpack/adjust, so we
+        // explicitly submit one request per agent_id.
+        const pickAgentId = (raw) => String(raw || '').trim();
+        const agentIds = Array.from(
+          new Set(
+            [
+              pickAgentId(bpAutoAgentASelect?.value),
+              pickAgentId(bpAutoAgentBSelect?.value),
+            ].filter(Boolean)
+          )
+        );
+
+        // Fallback: if auto-balance pair isn't configured, use the currently selected strategy agent.
+        if (!agentIds.length) {
+          const fallback = pickAgentId(selectedStrategyAgent?.agent || selectedStrategyAgent?.agent_id || selectedStrategyAgent?.id);
+          if (fallback) {
+            agentIds.push(fallback);
+          }
+        }
+
+        if (!agentIds.length) {
+          setBpAdjustStatus(
+            '请求失败：未配置对冲 VPS（请在「Backpack 自动平衡」里选择账户 A/B 作为默认下发对象）',
+            { stickyMs: 30_000 }
+          );
+          return;
+        }
+
         // Disallow same-symbol concurrent TWAP on the same agent.
         const selectedSymbols = getSelectedBpSymbols() || [];
         const selectedSymbol = selectedSymbols.length ? String(selectedSymbols[0] || '').trim() : '';
@@ -7617,35 +7647,33 @@
     updateBpAdjustButtons();
     setBpAdjustStatus(`提交${describeAdjustmentAction(action)}请求…`, { stickyMs: 8000 });
 
-        const payload = { action, magnitude };
-        const symbols = selectedSymbols;
-        if (symbols && symbols.length) {
-          payload.symbols = symbols;
-        }
-
-        const orderMode = (bpOrderModeSelect?.value || 'twap').toLowerCase();
-        if (orderMode === 'twap') {
-          const duration = clampTwapDurationSeconds(bpTwapDurationInput?.value ?? 0) || 900;
-          payload.order_mode = 'twap';
-          payload.twap_duration_seconds = duration;
-
-          const stepSeconds = clampBpTwapStepSeconds(bpTwapStepInput?.value ?? 0);
-          if (stepSeconds) {
-            payload.twap_step_seconds = stepSeconds;
+        const buildBasePayload = () => {
+          const base = { action, magnitude };
+          const symbols = selectedSymbols;
+          if (symbols && symbols.length) {
+            base.symbols = symbols;
           }
-        } else {
-          payload.order_mode = 'market';
-        }
 
-        try {
-          if (typeof fetch !== 'function') {
-            throw new Error('fetch 不可用（浏览器环境异常）');
+          const orderMode = (bpOrderModeSelect?.value || 'twap').toLowerCase();
+          if (orderMode === 'twap') {
+            const duration = clampTwapDurationSeconds(bpTwapDurationInput?.value ?? 0) || 900;
+            base.order_mode = 'twap';
+            base.twap_duration_seconds = duration;
+
+            const stepSeconds = clampBpTwapStepSeconds(bpTwapStepInput?.value ?? 0);
+            if (stepSeconds) {
+              base.twap_step_seconds = stepSeconds;
+            }
+          } else {
+            base.order_mode = 'market';
           }
+          return base;
+        };
+
+        const submitOne = async (agentId) => {
+          const payload = { agent_id: agentId, ...buildBasePayload() };
           if (DEBUG_UI) {
-            setBpAdjustStatus(
-              `DEBUG: 即将 POST /backpack/adjust · payload=${JSON.stringify(payload)}`,
-              { stickyMs: 30000 }
-            );
+            setBpAdjustStatus(`DEBUG: POST /backpack/adjust · payload=${JSON.stringify(payload)}`, { stickyMs: 30000 });
           }
           const response = await fetch('/backpack/adjust', {
             method: 'POST',
@@ -7656,9 +7684,6 @@
             },
             body: JSON.stringify(payload)
           });
-          if (DEBUG_UI) {
-            setBpAdjustStatus(`DEBUG: 收到响应 status=${response.status}`, { stickyMs: 30000 });
-          }
           redirectIfUnauthorized(response);
           if (!response.ok) {
             const text = await response.text();
@@ -7666,12 +7691,58 @@
             throw new Error(detail ? `HTTP ${response.status}: ${detail}` : `HTTP ${response.status}`);
           }
           const responsePayload = await response.json();
-          bpPendingRequestId = responsePayload?.request?.request_id ?? responsePayload?.request_id ?? null;
-          // Treat submission as success for UX; allow follow-up adjustments immediately.
+          return responsePayload?.request?.request_id ?? responsePayload?.request_id ?? null;
+        };
+
+        try {
+          if (typeof fetch !== 'function') {
+            throw new Error('fetch 不可用（浏览器环境异常）');
+          }
+
+          setBpAdjustStatus(
+            `提交中：将下发到 ${agentIds.length} 个 VPS（${agentIds.join(', ')}）…`,
+            { stickyMs: 12000 }
+          );
+
+          const results = [];
+          for (const aid of agentIds) {
+            try {
+              const reqId = await submitOne(aid);
+              results.push({ agent_id: aid, ok: true, request_id: reqId });
+            } catch (err) {
+              results.push({ agent_id: aid, ok: false, error: String(err || 'unknown error') });
+            }
+          }
+
+          const okCount = results.filter((r) => r.ok).length;
+          const failCount = results.length - okCount;
+          const reqIds = results.filter((r) => r.ok && r.request_id).map((r) => `${r.agent_id}:${r.request_id}`);
+          const failBrief = results
+            .filter((r) => !r.ok)
+            .map((r) => `${r.agent_id}=${r.error.replace(/\s+/g, ' ').slice(0, 120)}`)
+            .join(' | ');
+
+          // Choose a representative request_id (first success) for legacy UI fields.
+          bpPendingRequestId = results.find((r) => r.ok && r.request_id)?.request_id ?? null;
+
           bpAdjustLocked = false;
           bpAdjustLockedSince = 0;
           updateBpAdjustButtons();
-          setBpAdjustStatus('已提交（无需等待 ACK，可继续下发）', { stickyMs: 12000 });
+
+          if (!failCount) {
+            setBpAdjustStatus(
+              reqIds.length
+                ? `已提交（${reqIds.join(', ')}），无需等待 ACK，可继续下发）`
+                : '已提交（无需等待 ACK，可继续下发）',
+              { stickyMs: 15000 }
+            );
+          } else {
+            setBpAdjustStatus(
+              `部分失败：成功 ${okCount}/${results.length}；失败 ${failCount}。${failBrief ? ` ${failBrief}` : ''}`,
+              { stickyMs: 30_000 }
+            );
+          }
+
           await refreshMetrics();
         } catch (error) {
           bpAdjustLocked = false;
