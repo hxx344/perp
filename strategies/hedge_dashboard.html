@@ -8098,10 +8098,97 @@
         updateBpAdjustButtons();
 
         // Render history (PARA-style grouped rows)
-        const adjustmentRequests = adjustments
+        // Dual-VPS hedge mode makes 2 requests (one per agent_id). For better UX,
+        // group them into a single row when they belong to the same user click.
+        const adjustmentRequestsRaw = adjustments
           .filter((a) => String(a?.action || '').toLowerCase() !== 'transfer_internal');
-        const scopeFor = (adj) => describeSymbolScope(adj?.target_symbols ?? adj?.symbols);
-        renderBpAdjustmentsTableStyle(adjustmentRequests, { scopeFor });
+
+  const scopeFor = (adj) => describeSymbolScope(adj?.target_symbols ?? adj?.symbols);
+
+        const normalizeSymbolsKey = (adj) => {
+          const raw = adj?.target_symbols ?? adj?.symbols;
+          const arr = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+          return arr.map((s) => String(s || '').trim()).filter(Boolean).sort().join(',');
+        };
+
+        // Identify "same click" groups by:
+        // - same action
+        // - same magnitude
+        // - same symbol scope
+        // - created_at within 2 seconds
+        // - same order_mode (from payload)
+        const GROUP_WINDOW_S = 2.0;
+        const groupKeyFor = (adj) => {
+          const created = Number(adj?.created_at);
+          const createdBucket = Number.isFinite(created) ? Math.floor(created / GROUP_WINDOW_S) : 0;
+          const action = String(adj?.action || '').toLowerCase();
+          const magnitude = String(adj?.magnitude ?? '');
+          const symKey = normalizeSymbolsKey(adj);
+          const orderMode = String(adj?.payload?.order_mode || '').toLowerCase();
+          return `${createdBucket}::${action}::${magnitude}::${symKey}::${orderMode}`;
+        };
+
+        const merged = [];
+        const buckets = new Map();
+        for (const adj of adjustmentRequestsRaw) {
+          const key = groupKeyFor(adj);
+          const list = buckets.get(key) || [];
+          list.push(adj);
+          buckets.set(key, list);
+        }
+
+        for (const list of buckets.values()) {
+          // If only 1 request in this group, keep as-is.
+          if (list.length <= 1) {
+            merged.push(list[0]);
+            continue;
+          }
+
+          // Merge multiple per-agent requests into a synthetic grouped entry.
+          // We keep request_id from the newest one (for stable sorting), but merge agents.
+          const sorted = list.slice().sort((a, b) => Number(b?.created_at || 0) - Number(a?.created_at || 0));
+          const base = { ...(sorted[0] || {}) };
+          const baseAgents = Array.isArray(base?.agents) ? base.agents : [];
+          const mergedAgents = [...baseAgents];
+          const seenAgents = new Set(baseAgents.map((a) => String(a?.agent_id || '').trim()).filter(Boolean));
+          for (const item of sorted.slice(1)) {
+            const agents = Array.isArray(item?.agents) ? item.agents : [];
+            for (const a of agents) {
+              const aid = String(a?.agent_id || '').trim();
+              if (!aid) continue;
+              if (seenAgents.has(aid)) continue;
+              seenAgents.add(aid);
+              mergedAgents.push(a);
+            }
+          }
+          base.agents = mergedAgents;
+
+          // Derive an overall_status that prioritizes running/in_progress.
+          const statuses = mergedAgents.map((a) => normalizeStatus(a?.status));
+          if (statuses.some((s) => s === 'running' || s === 'in_progress' || s === 'pending')) {
+            base.overall_status = 'pending';
+            base.status = 'pending';
+          }
+          if (statuses.some((s) => s === 'failed')) {
+            // Keep pending if still running, otherwise failed.
+            const anyActive = statuses.some((s) => s === 'running' || s === 'in_progress' || s === 'pending');
+            if (!anyActive) {
+              base.overall_status = 'failed';
+              base.status = 'failed';
+            }
+          }
+          if (statuses.length && statuses.every((s) => s === 'completed' || s === 'succeeded' || s === 'success')) {
+            base.overall_status = 'completed';
+            base.status = 'completed';
+          }
+
+          merged.push(base);
+        }
+
+        // Keep newest-first ordering.
+        merged.sort((a, b) => Number(b?.created_at || 0) - Number(a?.created_at || 0));
+
+        renderBpAdjustmentsTableStyle(merged, { scopeFor });
       }
 
       function renderBpTransferAdjustments(adjustments) {
