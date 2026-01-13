@@ -7491,9 +7491,11 @@
                 const aid = String(agentId || '').trim();
                 const addr = String(address || '').trim();
                 const label = (agentToLabel(aid) || aid || '').trim();
-                if (addr && label) return `${label} (${addr})`;
+                // Always include both “who” and “where” when possible so From/To look consistent.
+                if (label && addr) return `${label} (${addr})`;
+                if (label) return label;
                 if (addr) return addr;
-                return label || '--';
+                return '--';
               };
 
               for (const t of transfers.slice(0, 10)) {
@@ -7518,9 +7520,12 @@
                 if (fromAgent && fromAddr) fromTitleParts.push(`agent_id=${fromAgent}`);
                 const fromTitle = fromTitleParts.join(' ');
 
+                // If To can't be mapped back to a known agent, we still show the address.
+                // This happens when payload.address isn't the internal_transfer_address of any monitor.
                 const toCellText = formatParty({ agentId: toAgent || '', address: toAgentAddr || toAddrRaw || '' });
                 const toTitleParts = [];
                 if (toAgent) toTitleParts.push(`agent_id=${toAgent}`);
+                if (!toAgent && toAddrRaw) toTitleParts.push('unmapped_address');
                 const toTitle = toTitleParts.join(' ');
 
                 rows.push(`
