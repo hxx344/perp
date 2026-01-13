@@ -464,6 +464,10 @@ FEISHU_WEBHOOK_ENV = "FEISHU_WEBHOOK_URL"
 FEISHU_PARA_PUSH_ENABLED_ENV = "FEISHU_PARA_PUSH_ENABLED"
 FEISHU_PARA_PUSH_INTERVAL_ENV = "FEISHU_PARA_PUSH_INTERVAL"
 
+# Feishu webhook push (Backpack snapshot)
+FEISHU_BP_PUSH_ENABLED_ENV = "FEISHU_BP_PUSH_ENABLED"
+FEISHU_BP_PUSH_INTERVAL_ENV = "FEISHU_BP_PUSH_INTERVAL"
+
 # Keep the buffer logic aligned with hedge_dashboard.html
 RISK_CAPACITY_DEVIATION_THRESHOLD = 0.12
 RISK_CAPACITY_PENDING_TOLERANCE = 0.10
@@ -1209,6 +1213,12 @@ class HedgeCoordinator:
         self._feishu_para_push_enabled = _env_bool(FEISHU_PARA_PUSH_ENABLED_ENV, False)
         self._feishu_para_push_interval = max(_env_float(FEISHU_PARA_PUSH_INTERVAL_ENV, 300.0), 30.0)
         self._feishu_task: Optional[asyncio.Task[Any]] = None
+
+        # Feishu Backpack periodic push
+        self._feishu_bp_push_enabled = _env_bool(FEISHU_BP_PUSH_ENABLED_ENV, False)
+        self._feishu_bp_push_interval = max(_env_float(FEISHU_BP_PUSH_INTERVAL_ENV, 300.0), 30.0)
+        self._feishu_bp_task: Optional[asyncio.Task[Any]] = None
+
         self._feishu_session: Optional[ClientSession] = None
         self._feishu_start_diagnostic_logged = False
         self._para_risk_capacity_buffer = RiskCapacityBufferState()
@@ -1224,37 +1234,68 @@ class HedgeCoordinator:
                 "set" if self._feishu_webhook_url else "missing",
                 "AIOHTTP_ACCESS_LOG",
             )
-        if not self._feishu_webhook_url or not self._feishu_para_push_enabled:
-            # Make misconfiguration obvious in logs.
-            if not self._feishu_webhook_url and self._feishu_para_push_enabled:
+            LOGGER.info(
+                "Feishu Backpack push config: enabled=%s interval=%.0fs url=%s",
+                self._feishu_bp_push_enabled,
+                self._feishu_bp_push_interval,
+                "set" if self._feishu_webhook_url else "missing",
+            )
+
+        if not self._feishu_webhook_url:
+            if self._feishu_para_push_enabled or self._feishu_bp_push_enabled:
                 LOGGER.warning(
-                    "Feishu PARA push enabled but %s is missing/blank; push task will NOT start",
+                    "Feishu push enabled but %s is missing/blank; push task will NOT start",
                     FEISHU_WEBHOOK_ENV,
                 )
-            elif self._feishu_webhook_url and not self._feishu_para_push_enabled:
-                LOGGER.info(
-                    "Feishu PARA push is disabled (%s=%s); webhook is configured but push task will NOT start",
-                    FEISHU_PARA_PUSH_ENABLED_ENV,
-                    os.getenv(FEISHU_PARA_PUSH_ENABLED_ENV),
-                )
             return
-        if self._feishu_task is not None:
-            return
-        self._feishu_session = ClientSession(timeout=ClientTimeout(total=10.0))
-        self._feishu_task = asyncio.create_task(self._run_feishu_para_push_loop())
-        LOGGER.info(
-            "Feishu PARA push enabled: interval=%.0fs url=%s",
-            self._feishu_para_push_interval,
-            "set" if self._feishu_webhook_url else "missing",
-        )
+
+        # Start shared session used by both tasks.
+        if self._feishu_session is None or self._feishu_session.closed:
+            self._feishu_session = ClientSession(timeout=ClientTimeout(total=10.0))
+
+        # PARA push task.
+        if self._feishu_para_push_enabled and self._feishu_task is None:
+            self._feishu_task = asyncio.create_task(self._run_feishu_para_push_loop())
+            LOGGER.info(
+                "Feishu PARA push enabled: interval=%.0fs url=%s",
+                self._feishu_para_push_interval,
+                "set" if self._feishu_webhook_url else "missing",
+            )
+        elif self._feishu_webhook_url and not self._feishu_para_push_enabled:
+            LOGGER.info(
+                "Feishu PARA push is disabled (%s=%s); webhook is configured but push task will NOT start",
+                FEISHU_PARA_PUSH_ENABLED_ENV,
+                os.getenv(FEISHU_PARA_PUSH_ENABLED_ENV),
+            )
+
+        # Backpack push task.
+        if self._feishu_bp_push_enabled and self._feishu_bp_task is None:
+            self._feishu_bp_task = asyncio.create_task(self._run_feishu_bp_push_loop())
+            LOGGER.info(
+                "Feishu Backpack push enabled: interval=%.0fs url=%s",
+                self._feishu_bp_push_interval,
+                "set" if self._feishu_webhook_url else "missing",
+            )
+        elif self._feishu_webhook_url and not self._feishu_bp_push_enabled:
+            LOGGER.info(
+                "Feishu Backpack push is disabled (%s=%s); webhook is configured but push task will NOT start",
+                FEISHU_BP_PUSH_ENABLED_ENV,
+                os.getenv(FEISHU_BP_PUSH_ENABLED_ENV),
+            )
 
     async def stop_background_tasks(self) -> None:
         task = self._feishu_task
         self._feishu_task = None
+        bp_task = self._feishu_bp_task
+        self._feishu_bp_task = None
         if task:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        if bp_task:
+            bp_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await bp_task
         if self._feishu_session and not self._feishu_session.closed:
             await self._feishu_session.close()
         self._feishu_session = None
@@ -1269,6 +1310,16 @@ class HedgeCoordinator:
             raise
         except Exception as exc:  # pragma: no cover
             LOGGER.warning("Feishu PARA push loop stopped: %s", exc)
+
+    async def _run_feishu_bp_push_loop(self) -> None:
+        try:
+            while True:
+                await self._try_send_feishu_bp_snapshot()
+                await asyncio.sleep(self._feishu_bp_push_interval)
+        except asyncio.CancelledError:  # pragma: no cover
+            raise
+        except Exception as exc:  # pragma: no cover
+            LOGGER.warning("Feishu Backpack push loop stopped: %s", exc)
 
     def _build_para_risk_push_text(self, now: Optional[float] = None) -> Optional[str]:
         stats = self._para_risk_stats
@@ -1401,6 +1452,258 @@ class HedgeCoordinator:
             ],
         }
         return {"msg_type": "interactive", "card": card}
+
+    def _compute_bp_authority_values(self) -> Optional[Dict[str, Any]]:
+        """Best-effort Backpack snapshot computed from coordinator state.
+
+        Data source: each agent's HedgeState.backpack_accounts (summary/accounts/positions).
+        We keep it defensive since Backpack monitor payloads can vary.
+        """
+
+        equity_sum = Decimal("0")
+        equity_available_sum = Decimal("0")
+        total_pnl = Decimal("0")
+        worst_pnl: Optional[Decimal] = None
+        worst_agent_id: Optional[str] = None
+        worst_account_label: Optional[str] = None
+        max_initial_margin: Optional[Decimal] = None
+        any_seen = False
+
+        for agent_id, state in self._states.items():
+            bp = state.backpack_accounts
+            if not isinstance(bp, dict):
+                continue
+            any_seen = True
+
+            summary = bp.get("summary") if isinstance(bp.get("summary"), dict) else None
+            collateral = (
+                summary.get("collateral")
+                if isinstance(summary, dict) and isinstance(summary.get("collateral"), dict)
+                else None
+            )
+            if isinstance(collateral, dict):
+                eq = self._decimal_from(collateral.get("netEquity"))
+                eq_avail = self._decimal_from(collateral.get("netEquityAvailable"))
+                if eq is not None:
+                    equity_sum += eq
+                if eq_avail is not None:
+                    equity_available_sum += eq_avail
+
+            # Initial margin: best-effort for dashboard-aligned risk capacity.
+            # Dashboard uses max(IM) across accounts/sources; we approximate by scanning
+            # summary/accounts/positions-ish fields when available.
+            candidate_im: Optional[Decimal] = None
+            if isinstance(summary, dict):
+                margin_block = summary.get("margin")
+                if isinstance(margin_block, dict):
+                    candidate_im = (
+                        self._decimal_from(margin_block.get("initialMargin"))
+                        or self._decimal_from(margin_block.get("initialMarginTotal"))
+                        or self._decimal_from(margin_block.get("initial_margin"))
+                    )
+                if candidate_im is None:
+                    candidate_im = (
+                        self._decimal_from(summary.get("initialMargin"))
+                        or self._decimal_from(summary.get("initialMarginTotal"))
+                        or self._decimal_from(summary.get("initial_margin"))
+                    )
+            if candidate_im is None:
+                accounts = bp.get("accounts")
+                if isinstance(accounts, list) and accounts:
+                    for acc in accounts:
+                        if not isinstance(acc, dict):
+                            continue
+                        im_val = (
+                            self._decimal_from(acc.get("initialMargin"))
+                            or self._decimal_from(acc.get("initialMarginTotal"))
+                            or self._decimal_from(acc.get("initial_margin"))
+                        )
+                        if im_val is None:
+                            continue
+                        if candidate_im is None or im_val > candidate_im:
+                            candidate_im = im_val
+
+            if candidate_im is not None:
+                if max_initial_margin is None or candidate_im > max_initial_margin:
+                    max_initial_margin = candidate_im
+
+            # Account label (best-effort): first account name/id.
+            account_label = "-"
+            accounts = bp.get("accounts")
+            if isinstance(accounts, list) and accounts:
+                first = accounts[0]
+                if isinstance(first, dict):
+                    label_raw = first.get("account") or first.get("name") or first.get("id")
+                    if label_raw is not None:
+                        account_label = str(label_raw)
+
+            agent_pnl = Decimal("0")
+            positions = bp.get("positions")
+            if isinstance(positions, list) and positions:
+                for pos in positions:
+                    if not isinstance(pos, dict):
+                        continue
+                    pnl = (
+                        self._decimal_from(pos.get("pnlRealized"))
+                        or self._decimal_from(pos.get("pnl"))
+                        or self._decimal_from(pos.get("pnlUnrealized"))
+                        or self._decimal_from(pos.get("unrealizedPnl"))
+                        or self._decimal_from(pos.get("unrealized_pnl"))
+                    )
+                    if pnl is not None:
+                        agent_pnl += pnl
+            else:
+                if isinstance(summary, dict):
+                    pnl_fallback = (
+                        self._decimal_from(summary.get("total_pnl"))
+                        or self._decimal_from(summary.get("pnl"))
+                        or self._decimal_from(summary.get("unrealized_pnl"))
+                    )
+                    if pnl_fallback is not None:
+                        agent_pnl += pnl_fallback
+
+            total_pnl += agent_pnl
+            if worst_pnl is None or agent_pnl < worst_pnl:
+                worst_pnl = agent_pnl
+                worst_agent_id = agent_id
+                worst_account_label = account_label
+
+        if not any_seen:
+            return None
+
+        return {
+            "equity_sum": equity_sum,
+            "equity_available_sum": equity_available_sum,
+            "total_pnl": total_pnl,
+            "worst_pnl": worst_pnl if worst_pnl is not None else Decimal("0"),
+            "worst_agent_id": worst_agent_id,
+            "worst_account_label": worst_account_label,
+            "max_initial_margin": max_initial_margin,
+        }
+
+    def _build_bp_risk_push_card(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        values = self._compute_bp_authority_values()
+        if not values:
+            return None
+
+        equity_sum: Decimal = values.get("equity_sum") or Decimal("0")
+        equity_avail: Decimal = values.get("equity_available_sum") or Decimal("0")
+        total_pnl: Decimal = values.get("total_pnl") or Decimal("0")
+        worst_pnl: Decimal = values.get("worst_pnl") or Decimal("0")
+        worst_agent = values.get("worst_agent_id") or "-"
+        worst_label = values.get("worst_account_label") or "-"
+        max_im: Optional[Decimal] = values.get("max_initial_margin")
+
+        # Dashboard-aligned capacity and risk ratio:
+        # capacity = equity_sum - 1.5 * max_initial_margin
+        # ratio = worst_loss / capacity, worst_loss = max(0, -worst_pnl)
+        capacity: Optional[Decimal] = None
+        if max_im is not None and equity_sum > 0 and max_im > 0:
+            try:
+                capacity = equity_sum - (Decimal("1.5") * max_im)
+                if capacity <= 0:
+                    capacity = None
+            except Exception:
+                capacity = None
+
+        ratio: Optional[float] = None
+        try:
+            if capacity is not None and capacity > 0:
+                loss = abs(worst_pnl) if worst_pnl < 0 else Decimal("0")
+                ratio = float(loss / capacity)
+        except Exception:
+            ratio = None
+
+        ratio_text = _format_percent((ratio or 0.0) * 100, 2) if ratio is not None else "-"
+        color = self._feishu_risk_color(ratio)
+
+        fields: List[Dict[str, Any]] = [
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**总权益(netEquity)**\n{_format_decimal(equity_sum, 2)}",
+                },
+            },
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**可用权益(netEquityAvailable)**\n{_format_decimal(equity_avail, 2)}",
+                },
+            },
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**持仓PnL合计**\n{_format_decimal(total_pnl, 2)}",
+                },
+            },
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"**风险裕量(capacity)**\n{_format_decimal(capacity, 2)}"
+                        if capacity is not None
+                        else "**风险裕量(capacity)**\n-"
+                    ),
+                },
+            },
+            {
+                "is_short": False,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**最坏账户(PnL)**\n{worst_label} ({worst_agent}) · {_format_decimal(worst_pnl, 2)}",
+                },
+            },
+        ]
+
+        header_title = f"[Backpack] 风险播报 · RISK LEVEL: {ratio_text}"
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": color,
+                "title": {"tag": "plain_text", "content": header_title},
+            },
+            "elements": [
+                {"tag": "div", "fields": fields},
+                {
+                    "tag": "note",
+                    "elements": [
+                        {
+                            "tag": "plain_text",
+                            "content": f"source: coordinator_state · ts: {int((now or time.time()))}",
+                        }
+                    ],
+                },
+            ],
+        }
+        return {"msg_type": "interactive", "card": card}
+
+    async def _try_send_feishu_bp_snapshot(self) -> None:
+        if not self._feishu_webhook_url or not self._feishu_bp_push_enabled:
+            return
+        session = self._feishu_session
+        if session is None or session.closed:
+            self._feishu_session = ClientSession(timeout=ClientTimeout(total=10.0))
+            session = self._feishu_session
+
+        async with self._lock:
+            payload = self._build_bp_risk_push_card()
+        if not payload:
+            return
+        try:
+            async with session.post(self._feishu_webhook_url, json=payload) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    LOGGER.warning(
+                        "Feishu webhook push failed (Backpack, HTTP %s): %s",
+                        resp.status,
+                        body[:200],
+                    )
+        except Exception as exc:  # pragma: no cover
+            LOGGER.warning("Feishu webhook push error (Backpack): %s", exc)
 
     async def _try_send_feishu_para_snapshot(self) -> None:
         if not self._feishu_webhook_url or not self._feishu_para_push_enabled:

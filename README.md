@@ -141,6 +141,14 @@ Python 版本要求（最佳选项是 Python 3.10 - 3.12）：
    FEISHU_PARA_PUSH_INTERVAL=30
    ```
 
+   飞书 webhook 推送（Backpack 风险快照）常用配置示例：
+
+   ```text
+   FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxxx
+   FEISHU_BP_PUSH_ENABLED=true
+   FEISHU_BP_PUSH_INTERVAL=30
+   ```
+
 5. **Telegram 机器人设置（可选）**：
    如需接收交易通知，请参考 [Telegram 机器人设置指南](docs/telegram-bot-setup.md) 配置 Telegram 机器人。
 
