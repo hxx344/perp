@@ -180,10 +180,16 @@ class BackpackAccountMonitor:
                 auth=self._auth,
             )
         except RequestException as exc:
-            LOGGER.debug("Failed to query coordinator control endpoint: %s", exc)
+            LOGGER.warning("Failed to query coordinator control endpoint: %s", exc)
             return None
         if response.status_code >= 400:
-            LOGGER.debug("Coordinator control query failed: HTTP %s %s", response.status_code, response.text)
+            # Important signal: if this is 401/403, monitor is not authenticated.
+            # If 404, endpoint is missing (wrong coordinator_url).
+            LOGGER.warning(
+                "Coordinator control query failed: HTTP %s %s",
+                response.status_code,
+                (response.text or "").strip()[:300],
+            )
             return None
         try:
             payload = response.json()
