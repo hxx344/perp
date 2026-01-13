@@ -7507,8 +7507,16 @@
                 let st = safeText(rawOverall);
                 try {
                   const resultStatus = String(t?.agents?.[0]?.extra?.result?.status || '').toLowerCase();
-                  if (resultStatus && ['pending', 'initiated', 'processing'].includes(resultStatus)) {
-                    st = 'in_progress';
+                  const overallLower = String(rawOverall || '').toLowerCase();
+                  if (resultStatus) {
+                    if (['completed', 'success', 'succeeded', 'ok'].includes(resultStatus)) {
+                      st = 'completed';
+                    } else if (
+                      !['completed', 'failed'].includes(overallLower) &&
+                      ['pending', 'initiated', 'processing'].includes(resultStatus)
+                    ) {
+                      st = 'in_progress';
+                    }
                   }
                 } catch (_) {
                   // ignore
