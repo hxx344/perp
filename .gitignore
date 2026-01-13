@@ -82,6 +82,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Local one-off tests (not part of upstream suite)
+tests/test_backpack_adjustment_direction.py
+
 # Translations
 *.mo
 *.pot

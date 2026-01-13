@@ -207,7 +207,7 @@ class BackpackAccountMonitor:
         first_req = None
         if isinstance(raw_bp, list) and raw_bp and isinstance(raw_bp[0], dict):
             first_req = raw_bp[0].get("request_id")
-        LOGGER.info(
+        LOGGER.debug(
             "Fetched /control ok agent_id=%s bp_adjustments=%s first_request_id=%s",
             self._cfg.agent_id,
             bp_count,
@@ -435,6 +435,58 @@ class BackpackAccountMonitor:
         if not symbol:
             raise ValueError("Unable to resolve symbol for adjustment request")
 
+        def _normalize_position_symbol(raw: str) -> str:
+            """Normalize symbols for matching against Backpack position payloads.
+
+            Positions may use either `BTC-USDC-PERP` or `BTC_USDC_PERP` depending on
+            endpoint/client. We normalize to a conservative, comparable form.
+            """
+            s = str(raw or "").strip().upper()
+            if not s:
+                return s
+            return s.replace("_", "-")
+
+        def _extract_position_side_and_qty(raw_positions: Any, target_symbol: str) -> Tuple[Optional[str], Optional[Decimal]]:
+            """Return (side, abs_qty) for the current position in `target_symbol`.
+
+            side: 'long' | 'short' | None
+            abs_qty: absolute position size (base units) when available
+            """
+            if not isinstance(raw_positions, list):
+                return (None, None)
+            wanted = _normalize_position_symbol(target_symbol)
+            for pos in raw_positions:
+                if not isinstance(pos, dict):
+                    continue
+                sym = pos.get("symbol") or pos.get("market") or pos.get("marketSymbol")
+                if sym is None:
+                    continue
+                if _normalize_position_symbol(str(sym)) != wanted:
+                    continue
+
+                # Try common fields for signed position size.
+                signed_qty = (
+                    _decimal_from(pos.get("quantity"))
+                    or _decimal_from(pos.get("position"))
+                    or _decimal_from(pos.get("size"))
+                    or _decimal_from(pos.get("positionSize"))
+                    or _decimal_from(pos.get("basePosition"))
+                    or _decimal_from(pos.get("netQuantity"))
+                    or _decimal_from(pos.get("net_position"))
+                )
+                if signed_qty is not None and signed_qty != 0:
+                    return ("long" if signed_qty > 0 else "short", abs(signed_qty))
+
+                # Some payloads provide direction separately + absolute size.
+                direction = str(pos.get("side") or pos.get("direction") or pos.get("positionSide") or "").strip().lower()
+                if direction in {"long", "buy"}:
+                    abs_qty = _decimal_from(pos.get("quantity")) or _decimal_from(pos.get("size"))
+                    return ("long", abs(abs_qty) if abs_qty is not None else None)
+                if direction in {"short", "sell"}:
+                    abs_qty = _decimal_from(pos.get("quantity")) or _decimal_from(pos.get("size"))
+                    return ("short", abs(abs_qty) if abs_qty is not None else None)
+            return (None, None)
+
         def _normalize_bp_perp_symbol(raw: str) -> str:
             """Normalize common dashboard symbols to Backpack Strategy API format.
 
@@ -450,11 +502,23 @@ class BackpackAccountMonitor:
                 return s.upper().replace("-", "_").replace("_PERP", "_PERP")
             return s
 
-        # Side inference: keep it super simple here.
+        # Side inference: follow PARA semantics.
+        # - add: increases existing position direction
+        # - reduce: decreases existing position direction (opposite side), ideally reduce-only
+        raw_positions = None
+        try:
+            raw_positions = self._collect().get("backpack_accounts", {}).get("positions")  # type: ignore[union-attr]
+        except Exception:
+            raw_positions = None
+        pos_side, pos_abs_qty = _extract_position_side_and_qty(raw_positions, symbol)
+
+        if pos_side is None:
+            raise ValueError(f"Unable to infer current position direction for {symbol}; refuse to guess side")
+
         if action == "add":
-            side = "buy"
+            side = "buy" if pos_side == "long" else "sell"
         else:
-            side = "sell"
+            side = "sell" if pos_side == "long" else "buy"
 
         if order_mode in {"market", "mkt"} and not algo_type:
             order_mode = "market"
@@ -817,18 +881,18 @@ class BackpackAccountMonitor:
         return cast(Dict[str, Any], result)
 
     def _process_adjustments(self) -> None:
-        LOGGER.info("Begin processing adjustments agent_id=%s", self._cfg.agent_id)
+        LOGGER.debug("Begin processing adjustments agent_id=%s", self._cfg.agent_id)
         snapshot = self._fetch_agent_control()
         if not snapshot:
             LOGGER.debug("No control snapshot received")
-            LOGGER.info("End processing adjustments agent_id=%s (no snapshot)", self._cfg.agent_id)
+            LOGGER.debug("End processing adjustments agent_id=%s (no snapshot)", self._cfg.agent_id)
             return
         agent_block = snapshot.get("agent")
         if not isinstance(agent_block, dict):
             # Coordinator's /control for our use-case returns agent_id/pending_adjustments at
             # the top-level (and backpack_adjustments as a sibling field). There may be no
             # nested "agent" block at all.
-            LOGGER.info("Control snapshot missing agent block; continuing with top-level fields")
+            LOGGER.debug("Control snapshot missing agent block; continuing with top-level fields")
             agent_block = {}
         # The coordinator exposes Backpack adjustments via the dedicated
         # top-level field `backpack_adjustments` (newer contract) so we don't
@@ -843,7 +907,7 @@ class BackpackAccountMonitor:
         raw_pending = agent_block.get("pending_adjustments")
         bp_count = len(raw_bp) if isinstance(raw_bp, list) else "n/a"
         pending_count = len(raw_pending) if isinstance(raw_pending, list) else "n/a"
-        LOGGER.info(
+        LOGGER.debug(
             "Control poll agent_id=%s backpack_adjustments=%s pending_adjustments=%s",
             self._cfg.agent_id,
             bp_count,
@@ -852,7 +916,7 @@ class BackpackAccountMonitor:
 
         if not isinstance(pending, list) or not pending:
             self._prune_processed_adjustments()
-            LOGGER.info("End processing adjustments agent_id=%s (no pending)", self._cfg.agent_id)
+            LOGGER.debug("End processing adjustments agent_id=%s (no pending)", self._cfg.agent_id)
             return
 
         for entry in pending:
@@ -862,7 +926,11 @@ class BackpackAccountMonitor:
             if not request_id:
                 continue
 
-            LOGGER.info("Picked adjustment request_id=%s provider=%s", request_id, entry.get("provider") or entry.get("exchange"))
+            LOGGER.debug(
+                "Picked adjustment request_id=%s provider=%s",
+                request_id,
+                entry.get("provider") or entry.get("exchange"),
+            )
 
             # Ignore adjustments not meant for Backpack monitor.
             provider = str(entry.get("provider") or entry.get("exchange") or "").strip().lower()
@@ -886,7 +954,7 @@ class BackpackAccountMonitor:
                     note = f"execution error: {exc}"
                     LOGGER.error("Adjustment %s execution failed: %s", req_id, exc)
 
-                LOGGER.info("ACK adjustment request_id=%s status=%s note=%s", req_id, status, note)
+                LOGGER.debug("ACK adjustment request_id=%s status=%s note=%s", req_id, status, note)
 
                 acked = self._acknowledge_adjustment(req_id, status, note, extra)
                 if not acked:
@@ -920,7 +988,11 @@ class BackpackAccountMonitor:
                 }
 
         self._prune_processed_adjustments()
-        LOGGER.info("End processing adjustments agent_id=%s (scheduled=%s)", self._cfg.agent_id, len(pending))
+        LOGGER.debug(
+            "End processing adjustments agent_id=%s (scheduled=%s)",
+            self._cfg.agent_id,
+            len(pending),
+        )
 
     def _prune_processed_adjustments(self, ttl: float = 3600.0) -> None:
         if not self._processed_adjustments:
@@ -931,7 +1003,7 @@ class BackpackAccountMonitor:
                 self._processed_adjustments.pop(request_id, None)
 
     def run_once(self) -> None:
-        LOGGER.info("Monitor cycle start label=%s agent_id=%s", self._cfg.label, self._cfg.agent_id)
+        LOGGER.debug("Monitor cycle start label=%s agent_id=%s", self._cfg.label, self._cfg.agent_id)
         payload = self._collect()
         if payload is None:
             LOGGER.warning("Skipping coordinator update; unable to collect Backpack account data")
@@ -939,7 +1011,7 @@ class BackpackAccountMonitor:
             self._push(payload)
             LOGGER.info("Pushed Backpack monitor snapshot for %s", self._cfg.label)
         self._process_adjustments()
-        LOGGER.info("Monitor cycle end label=%s agent_id=%s", self._cfg.label, self._cfg.agent_id)
+        LOGGER.debug("Monitor cycle end label=%s agent_id=%s", self._cfg.label, self._cfg.agent_id)
 
     def run_forever(self) -> None:
         while True:
