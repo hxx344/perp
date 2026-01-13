@@ -7437,11 +7437,29 @@
                 return text ? text : '--';
               };
               const rows = [];
+
+              const directory =
+                typeof getBpInternalTransferDirectory === 'function'
+                  ? getBpInternalTransferDirectory(latestSnapshot)
+                  : {};
+
+              const agentToAddress = (agentId) => {
+                const key = String(agentId || '').trim();
+                if (!key) {
+                  return null;
+                }
+                const raw = directory?.[key];
+                const addr = raw ? String(raw).trim() : '';
+                return addr || null;
+              };
+
               for (const t of transfers.slice(0, 10)) {
                 const createdText = formatTimestamp(t.created_at) ?? '--';
                 const st = safeText(t.overall_status ?? t.status);
-                const from = safeText(t.agent_id);
-                const toAddr = safeText(t?.payload?.address);
+                const fromAgent = safeText(t.agent_id);
+                const fromAddr = agentToAddress(t.agent_id);
+                const toAddrRaw = t?.payload?.address;
+                const toAddr = safeText(toAddrRaw);
                 const sym = safeText(
                   (Array.isArray(t?.symbols) && t.symbols[0]) ||
                     (Array.isArray(t?.target_symbols) && t.target_symbols[0]) ||
@@ -7449,10 +7467,14 @@
                 );
                 const qty = safeText(t.magnitude);
                 const note = safeText(t.note);
+
+                const fromCellText = fromAddr ? fromAddr : fromAgent;
+                const fromTitle = fromAddr ? `agent_id=${fromAgent}` : '';
+
                 rows.push(`
                   <tr>
                     <td>${escapeHtml(createdText)}</td>
-                    <td>${escapeHtml(from)}</td>
+                    <td title="${escapeHtml(fromTitle)}">${escapeHtml(fromCellText)}</td>
                     <td>${escapeHtml(toAddr)}</td>
                     <td>${escapeHtml(sym)}</td>
                     <td>${escapeHtml(qty)}</td>
