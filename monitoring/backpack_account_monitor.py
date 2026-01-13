@@ -131,6 +131,8 @@ class BackpackMonitorConfig:
     label: str
     coordinator_url: str
     agent_id: str
+    internal_withdraw_address: Optional[str] = None
+    internal_transfer_peer_address: Optional[str] = None
     poll_interval: float = 5.0
     request_timeout: float = 10.0
     coordinator_username: Optional[str] = None
@@ -392,6 +394,9 @@ class BackpackAccountMonitor:
             "instrument": f"BACKPACK {self._cfg.label}",
             "backpack_accounts": {
                 "updated_at": ts,
+                # Expose the monitor's own internal transfer address so the dashboard/coordinator
+                # can build pairwise internal transfers (account1 -> account2).
+                "internal_transfer_address": self._cfg.internal_withdraw_address,
                 "summary": summary,
                 "accounts": [
                     {
@@ -411,7 +416,7 @@ class BackpackAccountMonitor:
     def _execute_adjustment(self, entry: Dict[str, Any]) -> Tuple[str, str, Dict[str, Any]]:
         request_id = str(entry.get("request_id") or "")
         action = str(entry.get("action") or "").strip().lower()
-        if action not in {"add", "reduce"}:
+        if action not in {"add", "reduce", "transfer_internal"}:
             raise ValueError(f"Unsupported adjustment action '{action}'")
         magnitude = _decimal_from(entry.get("magnitude"))
         if magnitude is None or magnitude <= 0:
@@ -434,6 +439,42 @@ class BackpackAccountMonitor:
             symbol = symbols
         if not symbol:
             raise ValueError("Unable to resolve symbol for adjustment request")
+
+        if action == "transfer_internal":
+            # Destination address priority:
+            # 1) payload.address (coordinator/dashboard decides the target)
+            # 2) configured peer address (two-account default mode)
+            # NOTE: self internal address is NOT used as destination.
+            address = str(
+                payload_cfg.get("address")
+                or self._cfg.internal_transfer_peer_address
+                or ""
+            ).strip()
+            auto_borrow = bool(payload_cfg.get("autoBorrow") or payload_cfg.get("auto_borrow") or False)
+            auto_lend_redeem = bool(
+                payload_cfg.get("autoLendRedeem")
+                or payload_cfg.get("auto_lend_redeem")
+                or True
+            )
+            window_ms = int(payload_cfg.get("window_ms") or payload_cfg.get("window") or 5000)
+
+            result = self._internal_transfer(
+                address=address,
+                symbol=str(symbol),
+                quantity=magnitude,
+                auto_borrow=auto_borrow,
+                auto_lend_redeem=auto_lend_redeem,
+                window_ms=window_ms,
+            )
+            extra: Dict[str, Any] = {
+                "transfer_type": "Internal",
+                "address": address,
+                "symbol": str(symbol),
+                "quantity": _decimal_to_str(magnitude) or str(magnitude),
+                "result": result,
+            }
+            note = f"transfer_internal {symbol} qty={_decimal_to_str(magnitude) or magnitude} to={address}"
+            return "succeeded", note, extra
 
         def _normalize_position_symbol(raw: str) -> str:
             """Normalize symbols for matching against Backpack position payloads.
@@ -681,6 +722,59 @@ class BackpackAccountMonitor:
         if not callable(method):
             raise RuntimeError("Backpack client is missing place_market_order")
         return method(symbol=symbol, side=side, quantity=quantity)
+
+    def _internal_transfer(
+        self,
+        *,
+        address: str,
+        symbol: str,
+        quantity: Decimal,
+        auto_borrow: bool = False,
+        auto_lend_redeem: bool = True,
+        window_ms: int = 5000,
+    ) -> Dict[str, Any]:
+        """Backpack internal transfer ("internal withdraw") via REST.
+
+        POST https://api.backpack.exchange/wapi/v1/capital/withdrawals
+
+        Payload:
+            {
+              "address": "1862686-3",
+              "quantity": "1",
+              "symbol": "USDC",
+              "blockchain": "Internal",
+              "autoBorrow": false,
+              "autoLendRedeem": true
+            }
+        """
+        addr = str(address or "").strip()
+        if not addr:
+            raise ValueError("internal transfer address is required")
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            raise ValueError("symbol is required")
+        if quantity <= 0:
+            raise ValueError("quantity must be > 0")
+
+        payload: Dict[str, Any] = {
+            "address": addr,
+            "quantity": _decimal_to_str(quantity) or str(quantity),
+            "symbol": sym,
+            "blockchain": "Internal",
+            "autoBorrow": bool(auto_borrow),
+            "autoLendRedeem": bool(auto_lend_redeem),
+        }
+
+        result = self._bp_request(
+            "withdraw",
+            "POST",
+            "/wapi/v1/capital/withdrawals",
+            body=payload,
+            window_ms=window_ms,
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Unexpected internal transfer response: {result}")
+        return cast(Dict[str, Any], result)
 
     def _bp_private_key(self) -> ed25519.Ed25519PrivateKey:
         secret = os.getenv("BACKPACK_SECRET_KEY") or os.getenv("BACKPACK_API_SECRET")
@@ -1050,6 +1144,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--label", default=os.getenv("BACKPACK_LABEL", "main"))
     parser.add_argument("--coordinator-url", default=os.getenv("COORDINATOR_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--agent-id", default=os.getenv("AGENT_ID", "backpack"))
+    parser.add_argument(
+        "--internal-withdraw-address",
+        default=os.getenv("BACKPACK_INTERNAL_WITHDRAW_ADDRESS"),
+        help="Target address for Backpack internal transfers (used by transfer_internal actions).",
+    )
+    parser.add_argument(
+        "--internal-transfer-peer-address",
+        default=os.getenv("BACKPACK_INTERNAL_TRANSFER_PEER_ADDRESS"),
+        help="Peer address for 2-account internal transfers (destination when payload.address is omitted).",
+    )
     parser.add_argument("--poll-interval", type=float, default=float(os.getenv("POLL_INTERVAL", "5")))
     parser.add_argument("--timeout", type=float, default=float(os.getenv("REQUEST_TIMEOUT", "10")))
     # Backwards-compatible flag name (matches para monitor style).
@@ -1088,6 +1192,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         label=str(args.label),
         coordinator_url=str(args.coordinator_url).rstrip("/"),
         agent_id=str(args.agent_id),
+        internal_withdraw_address=str(args.internal_withdraw_address).strip() if args.internal_withdraw_address else None,
+        internal_transfer_peer_address=str(args.internal_transfer_peer_address).strip() if args.internal_transfer_peer_address else None,
         poll_interval=float(args.poll_interval),
         request_timeout=float(args.timeout),
         coordinator_username=args.coordinator_username,

@@ -3822,8 +3822,8 @@ class CoordinatorApp:
         # Dashboard may broadcast to all backpack monitors; allow agent_id to be optional.
         agent_id = str(body.get("agent_id") or "").strip() or None
         action = str(body.get("action") or "").strip().lower()
-        if action not in {"add", "reduce"}:
-            raise web.HTTPBadRequest(text="action must be 'add' or 'reduce'")
+        if action not in {"add", "reduce", "transfer_internal"}:
+            raise web.HTTPBadRequest(text="action must be 'add', 'reduce', or 'transfer_internal'")
         magnitude = body.get("magnitude")
         symbols_raw = body.get("symbols")
 

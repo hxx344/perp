@@ -2636,6 +2636,39 @@
             </table>
           </div>
         </div>
+
+        <div class="grvt-adjust-panel" id="bp-internal-transfer-panel" style="margin-top: 1rem;">
+          <div class="grvt-adjust-header">
+            <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Backpack 内转</h3>
+            <p class="summary-sub" style="margin: 0;">两个账号内部互转（监控端启动时上报自己的 internal 地址）</p>
+          </div>
+          <div class="grvt-adjust-controls">
+            <label>
+              From (源账号)
+              <select id="bp-transfer-from"></select>
+              <small style="color: #8a94a6;">选择要发起转账的 monitor（对应源账户）</small>
+            </label>
+            <label>
+              To (目标账号)
+              <select id="bp-transfer-to"></select>
+              <small style="color: #8a94a6;">默认选择另一个账号</small>
+            </label>
+            <label>
+              币种
+              <select id="bp-transfer-symbol">
+                <option value="USDC" selected>USDC</option>
+              </select>
+            </label>
+            <label>
+              数量
+              <input type="number" id="bp-transfer-qty" min="0.000001" step="0.000001" value="1" />
+            </label>
+            <div class="grvt-adjust-buttons">
+              <button type="button" id="bp-transfer-submit">发起内转</button>
+            </div>
+            <p class="grvt-adjust-status" id="bp-transfer-status">等待指令…</p>
+          </div>
+        </div>
       </div>
 
       <section class="grid" style="margin-top: 1rem;">
@@ -7041,6 +7074,163 @@
         }
       }
 
+      // --- Backpack Internal Transfer ---
+      const bpTransferFrom = document.getElementById('bp-transfer-from');
+      const bpTransferTo = document.getElementById('bp-transfer-to');
+      const bpTransferSymbol = document.getElementById('bp-transfer-symbol');
+      const bpTransferQty = document.getElementById('bp-transfer-qty');
+      const bpTransferSubmit = document.getElementById('bp-transfer-submit');
+      const bpTransferStatus = document.getElementById('bp-transfer-status');
+
+      function setBpTransferStatus(text, { stickyMs } = {}) {
+        if (!bpTransferStatus) return;
+        bpTransferStatus.textContent = String(text || '');
+        if (stickyMs) {
+          bpTransferStatus.dataset.stickyUntil = String(Date.now() + Number(stickyMs));
+        }
+      }
+
+      function shouldRespectBpTransferSticky() {
+        if (!bpTransferStatus) return false;
+        const until = Number(bpTransferStatus.dataset.stickyUntil || 0);
+        return until && Date.now() < until;
+      }
+
+      function getBpInternalTransferDirectory(rootPayload) {
+        const dir = [];
+        const src = rootPayload?.backpack_accounts;
+        if (!src) return dir;
+
+        // support either {accounts:[...], internal_transfer_address:...} or legacy forms
+        const accounts = Array.isArray(src.accounts) ? src.accounts : [];
+        const topAddr = (src.internal_transfer_address || '').toString().trim();
+        if (topAddr) {
+          dir.push({ agent_id: 'backpack', label: src.instrument || 'backpack', address: topAddr });
+        }
+        for (const a of accounts) {
+          if (!a) continue;
+          const agentId = (a.agent_id || a.agentId || a.name || '').toString().trim();
+          const label = (a.name || a.label || agentId || 'account').toString();
+          const addr = (a.internal_transfer_address || a.internalTransferAddress || a.internal_address || '').toString().trim();
+          if (agentId && addr) {
+            dir.push({ agent_id: agentId, label, address: addr });
+          }
+        }
+        return dir;
+      }
+
+      function renderBpInternalTransferDirectory(rootPayload) {
+        if (!bpTransferFrom || !bpTransferTo) return;
+        const dir = getBpInternalTransferDirectory(rootPayload);
+        const unique = [];
+        const seen = new Set();
+        for (const item of dir) {
+          const key = `${item.agent_id}::${item.address}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          unique.push(item);
+        }
+
+        const buildOptions = (selectEl, selectedAgentId) => {
+          selectEl.innerHTML = '';
+          const placeholder = document.createElement('option');
+          placeholder.value = '';
+          placeholder.textContent = unique.length ? '请选择' : '等待 monitor 上报地址…';
+          selectEl.appendChild(placeholder);
+
+          for (const item of unique) {
+            const opt = document.createElement('option');
+            opt.value = item.agent_id;
+            opt.textContent = `${item.label} (${item.agent_id}) · ${item.address}`;
+            opt.dataset.address = item.address;
+            selectEl.appendChild(opt);
+          }
+          if (selectedAgentId && unique.some((u) => u.agent_id === selectedAgentId)) {
+            selectEl.value = selectedAgentId;
+          }
+        };
+
+        const prevFrom = bpTransferFrom.value;
+        const prevTo = bpTransferTo.value;
+        buildOptions(bpTransferFrom, prevFrom);
+        buildOptions(bpTransferTo, prevTo);
+
+        // Default pairing: if 2 entries exist, keep them opposite.
+        if (unique.length === 2) {
+          if (!bpTransferFrom.value) bpTransferFrom.value = unique[0].agent_id;
+          if (!bpTransferTo.value) bpTransferTo.value = unique[1].agent_id;
+          if (bpTransferFrom.value === bpTransferTo.value) {
+            bpTransferTo.value = unique.find((u) => u.agent_id !== bpTransferFrom.value)?.agent_id || '';
+          }
+        }
+      }
+
+      async function sendBpInternalTransfer() {
+        if (!bpTransferFrom || !bpTransferTo || !bpTransferQty) return;
+        const fromAgent = (bpTransferFrom.value || '').trim();
+        const toAgent = (bpTransferTo.value || '').trim();
+        if (!fromAgent || !toAgent || fromAgent === toAgent) {
+          setBpTransferStatus('请选择不同的 From/To 账号', { stickyMs: 15000 });
+          return;
+        }
+        const fromOpt = bpTransferFrom.selectedOptions?.[0];
+        const toOpt = bpTransferTo.selectedOptions?.[0];
+        const toAddr = (toOpt?.dataset?.address || '').trim();
+        if (!toAddr) {
+          setBpTransferStatus('目标账号地址为空（请确认 monitor 已上报 internal 地址）', { stickyMs: 20000 });
+          return;
+        }
+
+        const qtyRaw = parseFloat(bpTransferQty.value || '0');
+        const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 0;
+        if (qty <= 0) {
+          setBpTransferStatus('数量必须大于 0', { stickyMs: 15000 });
+          return;
+        }
+        const symbol = (bpTransferSymbol?.value || 'USDC').trim() || 'USDC';
+
+        const payload = {
+          agent_id: fromAgent,
+          action: 'transfer_internal',
+          magnitude: qty,
+          symbols: [symbol],
+          payload: {
+            address: toAddr,
+            blockchain: 'Internal',
+            autoBorrow: false,
+            autoLendRedeem: true,
+          }
+        };
+
+        setBpTransferStatus('提交内转请求…', { stickyMs: 10000 });
+        try {
+          const response = await fetch('/backpack/adjust', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: JSON.stringify(payload)
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          setBpTransferStatus('已提交，等待 VPS 执行/ACK…', { stickyMs: 15000 });
+          await refreshMetrics();
+        } catch (err) {
+          setBpTransferStatus(`提交失败：${err}`, { stickyMs: 30000 });
+        }
+      }
+
+      if (bpTransferSubmit) {
+        bpTransferSubmit.addEventListener('click', () => {
+          sendBpInternalTransfer();
+        });
+      }
+
       async function fetchBackpackAdjustments() {
         try {
           const response = await fetch('/backpack/adjustments', {
@@ -9830,6 +10020,13 @@
           }
 
           updateBpSymbolOptions(Array.from(symbolCandidates));
+
+          // Populate internal transfer directory (agent_id -> internal address).
+          try {
+            renderBpInternalTransferDirectory({ backpack_accounts: mergedBpMap });
+          } catch (_) {
+            // ignore
+          }
 
           const sourcesLabel = entries.length === 1 ? 'source' : 'sources';
           const accountLabel = aggregateAccountCount === 1 ? 'account' : 'accounts';
