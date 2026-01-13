@@ -7453,16 +7453,30 @@
               const directory =
                 typeof getBpInternalTransferDirectory === 'function'
                   ? getBpInternalTransferDirectory(latestSnapshot)
-                  : {};
+                  : [];
+
+              const agentToAddressMap = new Map();
+              const addressToAgentMap = new Map();
+              if (Array.isArray(directory)) {
+                for (const item of directory) {
+                  if (!item || typeof item !== 'object') continue;
+                  const aid = String(item.agent_id || '').trim();
+                  const addr = String(item.address || '').trim();
+                  if (aid && addr) {
+                    if (!agentToAddressMap.has(aid)) agentToAddressMap.set(aid, addr);
+                    if (!addressToAgentMap.has(addr)) addressToAgentMap.set(addr, aid);
+                  }
+                }
+              }
 
               const agentToAddress = (agentId) => {
                 const key = String(agentId || '').trim();
-                if (!key) {
-                  return null;
-                }
-                const raw = directory?.[key];
-                const addr = raw ? String(raw).trim() : '';
-                return addr || null;
+                return key ? agentToAddressMap.get(key) || null : null;
+              };
+
+              const addressToAgent = (address) => {
+                const key = String(address || '').trim();
+                return key ? addressToAgentMap.get(key) || null : null;
               };
 
               for (const t of transfers.slice(0, 10)) {
@@ -7472,6 +7486,7 @@
                 const fromAddr = agentToAddress(t.agent_id);
                 const toAddrRaw = t?.payload?.address;
                 const toAddr = safeText(toAddrRaw);
+                const toAgent = toAddrRaw ? addressToAgent(toAddrRaw) : null;
                 const sym = safeText(
                   (Array.isArray(t?.symbols) && t.symbols[0]) ||
                     (Array.isArray(t?.target_symbols) && t.target_symbols[0]) ||
@@ -7482,12 +7497,13 @@
 
                 const fromCellText = fromAddr ? fromAddr : fromAgent;
                 const fromTitle = fromAddr ? `agent_id=${fromAgent}` : '';
+                const toTitle = toAgent ? `agent_id=${toAgent}` : '';
 
                 rows.push(`
                   <tr>
                     <td>${escapeHtml(createdText)}</td>
                     <td title="${escapeHtml(fromTitle)}">${escapeHtml(fromCellText)}</td>
-                    <td>${escapeHtml(toAddr)}</td>
+                    <td title="${escapeHtml(toTitle)}">${escapeHtml(toAddr)}</td>
                     <td>${escapeHtml(sym)}</td>
                     <td>${escapeHtml(qty)}</td>
                     <td>${escapeHtml(st)}</td>
