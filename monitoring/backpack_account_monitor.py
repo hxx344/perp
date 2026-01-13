@@ -782,8 +782,11 @@ class BackpackAccountMonitor:
             return
         agent_block = snapshot.get("agent")
         if not isinstance(agent_block, dict):
-            LOGGER.debug("Control snapshot missing agent block: %s", type(agent_block).__name__)
-            return
+            # Coordinator's /control for our use-case returns agent_id/pending_adjustments at
+            # the top-level (and backpack_adjustments as a sibling field). There may be no
+            # nested "agent" block at all.
+            LOGGER.info("Control snapshot missing agent block; continuing with top-level fields")
+            agent_block = {}
         # The coordinator exposes Backpack adjustments via the dedicated
         # top-level field `backpack_adjustments` (newer contract) so we don't
         # piggyback on the shared `pending_adjustments` queue.
