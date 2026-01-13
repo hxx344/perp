@@ -7457,13 +7457,16 @@
 
               const agentToAddressMap = new Map();
               const addressToAgentMap = new Map();
+              const agentToLabelMap = new Map();
               if (Array.isArray(directory)) {
                 for (const item of directory) {
                   if (!item || typeof item !== 'object') continue;
                   const aid = String(item.agent_id || '').trim();
                   const addr = String(item.address || '').trim();
+                  const label = String(item.label || '').trim();
                   if (aid && addr) {
                     if (!agentToAddressMap.has(aid)) agentToAddressMap.set(aid, addr);
+                    if (label && !agentToLabelMap.has(aid)) agentToLabelMap.set(aid, label);
                     if (!addressToAgentMap.has(addr)) addressToAgentMap.set(addr, aid);
                   }
                 }
@@ -7479,6 +7482,20 @@
                 return key ? addressToAgentMap.get(key) || null : null;
               };
 
+              const agentToLabel = (agentId) => {
+                const key = String(agentId || '').trim();
+                return key ? agentToLabelMap.get(key) || null : null;
+              };
+
+              const formatParty = ({ agentId, address }) => {
+                const aid = String(agentId || '').trim();
+                const addr = String(address || '').trim();
+                const label = (agentToLabel(aid) || aid || '').trim();
+                if (addr && label) return `${label} (${addr})`;
+                if (addr) return addr;
+                return label || '--';
+              };
+
               for (const t of transfers.slice(0, 10)) {
                 const createdText = formatTimestamp(t.created_at) ?? '--';
                 const st = safeText(t.overall_status ?? t.status);
@@ -7487,6 +7504,7 @@
                 const toAddrRaw = t?.payload?.address;
                 const toAddr = safeText(toAddrRaw);
                 const toAgent = toAddrRaw ? addressToAgent(toAddrRaw) : null;
+                const toAgentAddr = toAgent ? agentToAddress(toAgent) : null;
                 const sym = safeText(
                   (Array.isArray(t?.symbols) && t.symbols[0]) ||
                     (Array.isArray(t?.target_symbols) && t.target_symbols[0]) ||
@@ -7495,15 +7513,21 @@
                 const qty = safeText(t.magnitude);
                 const note = safeText(t.note);
 
-                const fromCellText = fromAddr ? fromAddr : fromAgent;
-                const fromTitle = fromAddr ? `agent_id=${fromAgent}` : '';
-                const toTitle = toAgent ? `agent_id=${toAgent}` : '';
+                const fromCellText = formatParty({ agentId: t.agent_id, address: fromAddr || '' });
+                const fromTitleParts = [];
+                if (fromAgent && fromAddr) fromTitleParts.push(`agent_id=${fromAgent}`);
+                const fromTitle = fromTitleParts.join(' ');
+
+                const toCellText = formatParty({ agentId: toAgent || '', address: toAgentAddr || toAddrRaw || '' });
+                const toTitleParts = [];
+                if (toAgent) toTitleParts.push(`agent_id=${toAgent}`);
+                const toTitle = toTitleParts.join(' ');
 
                 rows.push(`
                   <tr>
                     <td>${escapeHtml(createdText)}</td>
                     <td title="${escapeHtml(fromTitle)}">${escapeHtml(fromCellText)}</td>
-                    <td title="${escapeHtml(toTitle)}">${escapeHtml(toAddr)}</td>
+                    <td title="${escapeHtml(toTitle)}">${escapeHtml(toCellText)}</td>
                     <td>${escapeHtml(sym)}</td>
                     <td>${escapeHtml(qty)}</td>
                     <td>${escapeHtml(st)}</td>
