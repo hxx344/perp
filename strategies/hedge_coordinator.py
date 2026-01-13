@@ -4064,6 +4064,24 @@ class CoordinatorApp:
     ) -> None:
         now = time.time()
         try:
+            # Resolve destination internal transfer address from the latest coordinator snapshot.
+            # The Backpack monitor requires a concrete address (or BACKPACK_INTERNAL_TRANSFER_PEER_ADDRESS).
+            dest_address: Optional[str] = None
+            with suppress(Exception):
+                snap = await self._coordinator.snapshot()
+                agents_block = snap.get("agents")
+                if isinstance(agents_block, dict):
+                    target_entry = agents_block.get(measurement.target_agent)
+                    if isinstance(target_entry, dict):
+                        bp_block = target_entry.get("backpack_accounts")
+                        if isinstance(bp_block, dict):
+                            dest_address = str(bp_block.get("internal_transfer_address") or "").strip() or None
+
+            if not dest_address:
+                raise ValueError(
+                    f"Backpack auto balance: missing internal_transfer_address for target agent {measurement.target_agent}"
+                )
+
             # Create a Backpack internal transfer request. The monitor will resolve
             # the destination address via payload.address or BACKPACK_INTERNAL_TRANSFER_PEER_ADDRESS.
             adj = self._backpack_adjustments.create(
@@ -4072,6 +4090,11 @@ class CoordinatorApp:
                 magnitude=float(requested_amount),
                 symbols=[cfg.currency],
                 payload={
+                    # These keys are interpreted by backpack_account_monitor.transfer_internal().
+                    "address": dest_address,
+                    "blockchain": "Internal",
+                    "autoBorrow": False,
+                    "autoLendRedeem": True,
                     "auto_balance": {
                         "venue": "backpack",
                         "ratio": measurement.ratio,
