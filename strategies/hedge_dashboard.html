@@ -7614,10 +7614,12 @@
 
   const rawMagnitude = parseFloat(bpAdjustSizeInput?.value ?? '1');
         const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : 1;
-  bpAdjustLocked = true;
-  bpAdjustLockedSince = Date.now();
-        updateBpAdjustButtons();
-        setBpAdjustStatus(`提交${describeAdjustmentAction(action)}请求…`, { stickyMs: 8000 });
+    // Per request UX: don't block further actions while waiting for VPS ACK.
+    // We'll rely on "same symbol" anti-concurrency check instead.
+    bpAdjustLocked = false;
+    bpAdjustLockedSince = 0;
+    updateBpAdjustButtons();
+    setBpAdjustStatus(`提交${describeAdjustmentAction(action)}请求…`, { stickyMs: 8000 });
 
         const payload = { action, magnitude };
         const symbols = selectedSymbols;
@@ -7669,7 +7671,11 @@
           }
           const responsePayload = await response.json();
           bpPendingRequestId = responsePayload?.request?.request_id ?? responsePayload?.request_id ?? null;
-          setBpAdjustStatus('已提交，等待 VPS ACK…', { stickyMs: 8000 });
+          // Treat submission as success for UX; allow follow-up adjustments immediately.
+          bpAdjustLocked = false;
+          bpAdjustLockedSince = 0;
+          updateBpAdjustButtons();
+          setBpAdjustStatus('已提交（无需等待 ACK，可继续下发）', { stickyMs: 12000 });
           await refreshMetrics();
         } catch (error) {
           bpAdjustLocked = false;
