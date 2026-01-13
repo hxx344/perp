@@ -194,9 +194,25 @@ class BackpackAccountMonitor:
         try:
             payload = response.json()
         except ValueError:
+            LOGGER.warning("Coordinator control response is not JSON")
             return None
         if not isinstance(payload, dict):
+            LOGGER.warning("Coordinator control response is not an object: %s", type(payload).__name__)
             return None
+
+        # Print a minimal success marker (INFO) so operators can confirm the monitor
+        # is actually polling /control and what it got back.
+        raw_bp = payload.get("backpack_adjustments")
+        bp_count = len(raw_bp) if isinstance(raw_bp, list) else 0
+        first_req = None
+        if isinstance(raw_bp, list) and raw_bp and isinstance(raw_bp[0], dict):
+            first_req = raw_bp[0].get("request_id")
+        LOGGER.info(
+            "Fetched /control ok agent_id=%s bp_adjustments=%s first_request_id=%s",
+            self._cfg.agent_id,
+            bp_count,
+            first_req,
+        )
         return payload
 
     def _acknowledge_adjustment(
@@ -758,9 +774,11 @@ class BackpackAccountMonitor:
         return cast(Dict[str, Any], result)
 
     def _process_adjustments(self) -> None:
+        LOGGER.info("Begin processing adjustments agent_id=%s", self._cfg.agent_id)
         snapshot = self._fetch_agent_control()
         if not snapshot:
             LOGGER.debug("No control snapshot received")
+            LOGGER.info("End processing adjustments agent_id=%s (no snapshot)", self._cfg.agent_id)
             return
         agent_block = snapshot.get("agent")
         if not isinstance(agent_block, dict):
@@ -788,6 +806,7 @@ class BackpackAccountMonitor:
 
         if not isinstance(pending, list) or not pending:
             self._prune_processed_adjustments()
+            LOGGER.info("End processing adjustments agent_id=%s (no pending)", self._cfg.agent_id)
             return
 
         for entry in pending:
@@ -855,6 +874,7 @@ class BackpackAccountMonitor:
                 }
 
         self._prune_processed_adjustments()
+        LOGGER.info("End processing adjustments agent_id=%s (scheduled=%s)", self._cfg.agent_id, len(pending))
 
     def _prune_processed_adjustments(self, ttl: float = 3600.0) -> None:
         if not self._processed_adjustments:
@@ -865,6 +885,7 @@ class BackpackAccountMonitor:
                 self._processed_adjustments.pop(request_id, None)
 
     def run_once(self) -> None:
+        LOGGER.info("Monitor cycle start label=%s agent_id=%s", self._cfg.label, self._cfg.agent_id)
         payload = self._collect()
         if payload is None:
             LOGGER.warning("Skipping coordinator update; unable to collect Backpack account data")
@@ -872,6 +893,7 @@ class BackpackAccountMonitor:
             self._push(payload)
             LOGGER.info("Pushed Backpack monitor snapshot for %s", self._cfg.label)
         self._process_adjustments()
+        LOGGER.info("Monitor cycle end label=%s agent_id=%s", self._cfg.label, self._cfg.agent_id)
 
     def run_forever(self) -> None:
         while True:
