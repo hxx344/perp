@@ -754,9 +754,11 @@ class BackpackAccountMonitor:
     def _process_adjustments(self) -> None:
         snapshot = self._fetch_agent_control()
         if not snapshot:
+            LOGGER.debug("No control snapshot received")
             return
         agent_block = snapshot.get("agent")
         if not isinstance(agent_block, dict):
+            LOGGER.debug("Control snapshot missing agent block: %s", type(agent_block).__name__)
             return
         # The coordinator exposes Backpack adjustments via the dedicated
         # top-level field `backpack_adjustments` (newer contract) so we don't
@@ -766,6 +768,17 @@ class BackpackAccountMonitor:
             # Backwards compatibility: older coordinator versions only provide
             # the generic per-agent pending queue.
             pending = agent_block.get("pending_adjustments")
+
+        raw_bp = snapshot.get("backpack_adjustments")
+        raw_pending = agent_block.get("pending_adjustments")
+        bp_count = len(raw_bp) if isinstance(raw_bp, list) else "n/a"
+        pending_count = len(raw_pending) if isinstance(raw_pending, list) else "n/a"
+        LOGGER.info(
+            "Control poll agent_id=%s backpack_adjustments=%s pending_adjustments=%s",
+            self._cfg.agent_id,
+            bp_count,
+            pending_count,
+        )
 
         if not isinstance(pending, list) or not pending:
             self._prune_processed_adjustments()
@@ -777,6 +790,8 @@ class BackpackAccountMonitor:
             request_id = entry.get("request_id")
             if not request_id:
                 continue
+
+            LOGGER.info("Picked adjustment request_id=%s provider=%s", request_id, entry.get("provider") or entry.get("exchange"))
 
             # Ignore adjustments not meant for Backpack monitor.
             provider = str(entry.get("provider") or entry.get("exchange") or "").strip().lower()
@@ -800,7 +815,11 @@ class BackpackAccountMonitor:
                     note = f"execution error: {exc}"
                     LOGGER.error("Adjustment %s execution failed: %s", req_id, exc)
 
+                LOGGER.info("ACK adjustment request_id=%s status=%s note=%s", req_id, status, note)
+
                 acked = self._acknowledge_adjustment(req_id, status, note, extra)
+                if not acked:
+                    LOGGER.warning("ACK rejected/failed for request_id=%s status=%s", req_id, status)
                 self._processed_adjustments[req_id] = {
                     "status": status,
                     "note": note,
