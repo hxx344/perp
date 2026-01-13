@@ -1184,6 +1184,29 @@
         color: #9ff3c9;
       }
 
+      .adjust-badge.status-running {
+        background: rgba(56, 189, 248, 0.18);
+        color: #b7ebff;
+      }
+
+      .adjust-badge.status-in_progress {
+        background: rgba(56, 189, 248, 0.14);
+        color: #b7ebff;
+      }
+
+      .adjust-badge.status-completed,
+      .adjust-badge.status-succeeded {
+        background: rgba(45, 206, 137, 0.15);
+        color: #9ff3c9;
+      }
+
+      .adjust-badge.status-cancelled,
+      .adjust-badge.status-terminated,
+      .adjust-badge.status-timedout {
+        background: rgba(255, 193, 7, 0.18);
+        color: #ffe8a3;
+      }
+
       .adjust-badge.status-failed {
         background: rgba(239, 71, 111, 0.18);
         color: #ffb3c1;
@@ -3755,6 +3778,11 @@
   let bpAdjustLocked = false;
   let bpPendingRequestId = null;
   let bpAdjustStatusStickyUntil = 0;
+
+  // Allow concurrent TWAPs on the same agent as long as they are for different symbols.
+  // We track which symbols are currently active (pending/running/in_progress) for the
+  // current agent, based on /backpack/adjustments history.
+  const bpActiveSymbolsForAgent = new Set();
 
   // If an ACK is lost (e.g. monitor crash/restart) the UI might stay locked.
   // Keep a conservative timeout to auto-unlock so operators can re-issue orders.
@@ -7568,6 +7596,14 @@
           return;
         }
 
+        // Disallow same-symbol concurrent TWAP on the same agent.
+        const selectedSymbols = getSelectedBpSymbols() || [];
+        const selectedSymbol = selectedSymbols.length ? String(selectedSymbols[0] || '').trim() : '';
+        if (selectedSymbol && bpActiveSymbolsForAgent.has(selectedSymbol)) {
+          setBpAdjustStatus(`该币种 ${selectedSymbol} 的 TWAP 正在运行中（同 agent 不允许同 symbol 并发）`, { stickyMs: 15_000 });
+          return;
+        }
+
         // Ensure we always provide immediate UI feedback that survives the 2s refresh loop.
         setBpAdjustStatus(`已点击：${describeAdjustmentAction(action)}，准备提交…`, { stickyMs: 8000 });
         try {
@@ -7584,8 +7620,8 @@
         setBpAdjustStatus(`提交${describeAdjustmentAction(action)}请求…`, { stickyMs: 8000 });
 
         const payload = { action, magnitude };
-        const symbols = getSelectedBpSymbols();
-        if (symbols) {
+        const symbols = selectedSymbols;
+        if (symbols && symbols.length) {
           payload.symbols = symbols;
         }
 
@@ -7857,9 +7893,54 @@
         const adjustments = Array.isArray(payload?.adjustments) ? payload.adjustments : [];
         const normalizeStatus = (value) => String(value || '').toLowerCase();
 
+        // Prefer a per-agent lock (like PARA monitor behavior): allow multiple TWAPs to
+        // exist concurrently as long as *this* VPS (agent) isn't already running one.
+        // The dashboard doesn't always know the viewer's agent_id; we can usually infer it
+        // from the metrics snapshot (selectedStrategyAgent) and fall back to "all".
+        const currentAgentId = String(selectedStrategyAgent?.agent || selectedStrategyAgent?.agent_id || selectedStrategyAgent?.id || '').trim();
+        const shouldLockForAgent = (agentRow) => {
+          if (!agentRow || typeof agentRow !== 'object') return true;
+          const aid = String(agentRow.agent_id || agentRow.agent || agentRow.id || '').trim();
+          if (!currentAgentId) return true; // safest fallback
+          return aid === currentAgentId;
+        };
+
+        // Rebuild active-symbol set for current agent on every refresh.
+        bpActiveSymbolsForAgent.clear();
+        const addActiveSymbols = (adj) => {
+          const rawSymbols = adj?.target_symbols ?? adj?.symbols;
+          if (Array.isArray(rawSymbols)) {
+            for (const s of rawSymbols) {
+              const sym = String(s || '').trim();
+              if (sym) bpActiveSymbolsForAgent.add(sym);
+            }
+          } else if (typeof rawSymbols === 'string') {
+            const sym = String(rawSymbols || '').trim();
+            if (sym) bpActiveSymbolsForAgent.add(sym);
+          }
+        };
+
+        // Build a set of active symbols for this agent by scanning all adjustments.
+        // Active criteria: any scoped agent row is active (pending/in_progress/running/progress),
+        // OR fallback (no agent info) with overall pending/in_progress.
+        for (const adj of adjustments) {
+          if (String(adj?.action || '').toLowerCase() === 'transfer_internal') {
+            continue;
+          }
+          const st = normalizeStatus(adj?.overall_status ?? adj?.status);
+          const agents = Array.isArray(adj?.agents) ? adj.agents : [];
+          const scopedAgents = agents.filter(shouldLockForAgent);
+          const hasActiveAgent = scopedAgents.some(isActiveAgent);
+          const hasTerminalAgent = agents.some((a) => isTerminal(normalizeStatus(a?.status)));
+          const isFallbackActive = (['pending', 'in_progress'].includes(st) && !hasTerminalAgent);
+          if (hasActiveAgent || isFallbackActive) {
+            addActiveSymbols(adj);
+          }
+        }
+
         // transfer_internal has its own panel/history fetch; don‘t mix it into adjust history.
 
-        // Determine lock state
+  // Determine lock state
         // Coordinator/monitor semantics refresher:
         // - coordinator may keep adj.status == 'pending' for broadcast requests until finalization
         // - monitor may send interim updates (e.g. status='running' with extra.progress)
@@ -7877,12 +7958,16 @@
           return false;
         };
 
-        let locked = false;
+  // New behavior: do NOT globally lock the agent when it already has an active TWAP.
+  // We only prevent same-symbol concurrency (checked in sendBpAdjustment).
+  let locked = false;
         let active = null;
         for (const adj of adjustments) {
           const st = normalizeStatus(adj?.overall_status ?? adj?.status);
           const agents = Array.isArray(adj?.agents) ? adj.agents : [];
-          const hasActiveAgent = agents.some(isActiveAgent);
+          // Per-agent locking: only care about the current agent's active state.
+          const scopedAgents = agents.filter(shouldLockForAgent);
+          const hasActiveAgent = scopedAgents.some(isActiveAgent);
           const hasTerminalAgent = agents.some((a) => isTerminal(normalizeStatus(a?.status)));
 
           // Primary: if any agent is still active, this request is active.
@@ -7899,13 +7984,19 @@
           }
         }
         if (active) {
-          locked = true;
+          locked = false;
           bpPendingRequestId = active.request_id || null;
           const agents = Array.isArray(active.agents) ? active.agents : [];
           const pendingAgents = agents.filter((a) => ['pending', 'in_progress', 'running'].includes(normalizeStatus(a?.status)));
           const scopeText = describeSymbolScope(active?.target_symbols ?? active?.symbols);
           if (!shouldRespectBpAdjustSticky()) {
-            setBpAdjustStatus(`等待 ${pendingAgents.length}/${agents.length || '-'} 个 VPS ACK（${scopeText}）`);
+            // If we have per-agent info and progress is flowing, show it as "运行中".
+            const anyRunning = agents.some((a) => normalizeStatus(a?.status) === 'running' || (a?.extra && typeof a.extra === 'object' && a.extra.progress));
+            if (anyRunning) {
+              setBpAdjustStatus(`TWAP 运行中 · ${pendingAgents.length}/${agents.length || '-'} 个 VPS 未完成（${scopeText}）`);
+            } else {
+              setBpAdjustStatus(`等待 ${pendingAgents.length}/${agents.length || '-'} 个 VPS ACK（${scopeText}）`);
+            }
           }
         } else if (adjustments.length) {
           const latest = adjustments[0];
@@ -7933,77 +8024,11 @@
         }
         updateBpAdjustButtons();
 
-        // Render history (compact)
-        if (!adjustments.length) {
-          bpAdjustHistoryBody.innerHTML = '<tr><td colspan="9">暂无广播记录</td></tr>';
-          return;
-        }
-
-        const safeText = (value) => {
-          if (value === undefined || value === null) {
-            return '--';
-          }
-          const text = String(value).trim();
-          return text ? text : '--';
-        };
+        // Render history (PARA-style grouped rows)
+        const adjustmentRequests = adjustments
+          .filter((a) => String(a?.action || '').toLowerCase() !== 'transfer_internal');
         const scopeFor = (adj) => describeSymbolScope(adj?.target_symbols ?? adj?.symbols);
-
-        const rows = [];
-        for (const adj of adjustments
-          .filter((a) => String(a?.action || '').toLowerCase() !== 'transfer_internal')
-          .slice(0, 20)) {
-          const createdText = formatTimestamp(adj.created_at) ?? '--';
-          const statusText = safeText(adj.overall_status ?? adj.status ?? 'pending');
-          const scopeText = scopeFor(adj);
-          const agents = Array.isArray(adj.agents) ? adj.agents : [];
-          const sortedAgents = agents
-            .filter((a) => a && typeof a === 'object')
-            .slice()
-            .sort((a, b) => String(a.agent_id || '').localeCompare(String(b.agent_id || '')))
-            .slice(0, 2);
-
-          const pickExtra = (agent, key) => {
-            const extra = agent?.extra;
-            if (!extra || typeof extra !== 'object') {
-              return '--';
-            }
-            return safeText(extra[key]);
-          };
-          const left = sortedAgents[0] || null;
-          const right = sortedAgents[1] || null;
-          const leftOrder = pickExtra(left, 'order_type');
-          const leftAvg = pickExtra(left, 'avg_price');
-          const leftFill = pickExtra(left, 'filled_qty');
-          const rightOrder = pickExtra(right, 'order_type');
-          const rightAvg = pickExtra(right, 'avg_price');
-          const rightFill = pickExtra(right, 'filled_qty');
-
-          rows.push(`
-            <tr class="adjust-group-top">
-              <td>${escapeHtml(createdText)}</td>
-              <td>${escapeHtml(describeAdjustmentAction(adj.action))}</td>
-              <td>${escapeHtml(String(adj.magnitude ?? '--'))}</td>
-              <td>${escapeHtml(scopeText)}</td>
-              <td>${escapeHtml(statusText)}</td>
-              <td>${escapeHtml(safeText(left?.agent_id))}</td>
-              <td>${escapeHtml(leftOrder)}</td>
-              <td>${escapeHtml(leftAvg)}</td>
-              <td>${escapeHtml(leftFill)}</td>
-            </tr>
-          `);
-          if (right) {
-            rows.push(`
-              <tr class="adjust-group-sub">
-                <td colspan="5"></td>
-                <td>${escapeHtml(safeText(right?.agent_id))}</td>
-                <td>${escapeHtml(rightOrder)}</td>
-                <td>${escapeHtml(rightAvg)}</td>
-                <td>${escapeHtml(rightFill)}</td>
-              </tr>
-            `);
-          }
-        }
-        bpAdjustHistoryBody.innerHTML = rows.join('');
+        renderBpAdjustmentsTableStyle(adjustmentRequests, { scopeFor });
       }
 
       function renderBpTransferAdjustments(adjustments) {
@@ -8787,6 +8812,294 @@
           grvtAdjustHistoryBody.innerHTML = historyRows.join('');
         }
         renderGrvtTransferHistory(summary);
+      }
+
+      // Backpack: match PARA-style adjustment history layout (grouped summary + VPS details).
+      function renderBpAdjustmentsTableStyle(adjustmentRequests, { scopeFor }) {
+        if (!bpAdjustHistoryBody) {
+          return;
+        }
+        if (!adjustmentRequests.length) {
+          bpAdjustHistoryBody.innerHTML = '<tr><td colspan="9">暂无广播记录</td></tr>';
+          return;
+        }
+
+        const normalizeStatus = (value) => String(value || '').toLowerCase();
+        const safeText = (value) => {
+          if (value === undefined || value === null) {
+            return '--';
+          }
+          const text = String(value).trim();
+          return text ? text : '--';
+        };
+        const pickExtraField = (extra, key) => {
+          if (!extra || typeof extra !== 'object') {
+            return '--';
+          }
+          return safeText(extra[key]);
+        };
+        const formatMaybeNumber = (value, decimals = 4) => {
+          if (value === undefined || value === null) {
+            return '--';
+          }
+          const raw = String(value).trim();
+          if (!raw) {
+            return '--';
+          }
+          const parsed = Number(raw);
+          if (!Number.isFinite(parsed)) {
+            return raw;
+          }
+          const fixed = parsed.toFixed(Math.min(6, Math.max(0, decimals)));
+          return fixed.replace(/\.0+$/, '').replace(/(\.[0-9]*?)0+$/, '$1');
+        };
+
+        const normalizeEpochMs = (value) => {
+          if (value === undefined || value === null) {
+            return null;
+          }
+          const n = Number(value);
+          if (!Number.isFinite(n) || n <= 0) {
+            return null;
+          }
+          return n < 10_000_000_000 ? Math.round(n * 1000) : Math.round(n);
+        };
+        const formatDuration = (ms) => {
+          if (!Number.isFinite(ms) || ms < 0) {
+            return '--';
+          }
+          const totalSeconds = Math.round(ms / 1000);
+          const minutes = Math.floor(totalSeconds / 60);
+          const seconds = totalSeconds % 60;
+          if (minutes <= 0) {
+            return `${seconds}s`;
+          }
+          return `${minutes}m${String(seconds).padStart(2, '0')}s`;
+        };
+
+        const parseMaybeNumber = (value) => {
+          if (value === undefined || value === null) {
+            return null;
+          }
+          const n = Number(String(value).trim());
+          return Number.isFinite(n) ? n : null;
+        };
+
+        const computeFrontendWearSummary = (a, b) => {
+          const aExtra = a?.extra;
+          const bExtra = b?.extra;
+          const aAvg = parseMaybeNumber(aExtra?.avg_price);
+          const bAvg = parseMaybeNumber(bExtra?.avg_price);
+          const aFilled = parseMaybeNumber(aExtra?.filled_qty);
+          const bFilled = parseMaybeNumber(bExtra?.filled_qty);
+          if (!Number.isFinite(aAvg) || !Number.isFinite(bAvg)) {
+            return null;
+          }
+          const priceDiff = Math.abs(aAvg - bAvg);
+          const filledA = Number.isFinite(aFilled) ? aFilled : 0;
+          const filledB = Number.isFinite(bFilled) ? bFilled : 0;
+          const filledTotal = filledA + filledB;
+          if (!Number.isFinite(filledTotal) || filledTotal <= 0) {
+            return null;
+          }
+          const notional = (aAvg * filledA * 2) + (bAvg * filledB * 2);
+          if (!Number.isFinite(notional) || notional <= 0) {
+            return null;
+          }
+          const wear = priceDiff * filledTotal;
+          if (!Number.isFinite(wear)) {
+            return null;
+          }
+          const per10k = (wear / notional) * 10000;
+          return { priceDiff, filledTotal, notional, wear, per10k };
+        };
+
+        const resolveReportedTotalQty = (agent) => {
+          const extra = agent?.extra;
+          if (!extra || typeof extra !== 'object') {
+            return null;
+          }
+          const explicitSize = extra.algo_size ?? extra.algo_expected_size ?? extra.total_qty ?? extra.target_qty;
+          if (explicitSize !== undefined && explicitSize !== null && String(explicitSize).trim() !== '') {
+            return explicitSize;
+          }
+          const filledRaw = extra.filled_qty;
+          const remainingRaw = extra.algo_remaining_size;
+          const filledNum = Number(String(filledRaw ?? '').trim());
+          const remainingNum = Number(String(remainingRaw ?? '').trim());
+          if (Number.isFinite(filledNum) && Number.isFinite(remainingNum)) {
+            const totalNum = filledNum + remainingNum;
+            if (Number.isFinite(totalNum)) {
+              return formatMaybeNumber(totalNum, 6);
+            }
+          }
+          return null;
+        };
+
+        const filledDisplay = (filled, total) => {
+          const f = safeText(filled);
+          const t = safeText(total);
+          if (f === '--' && t === '--') {
+            return '--';
+          }
+          return `${f}/${t}`;
+        };
+
+        const renderAgentDetailFields = (agent) => {
+          const extra = agent?.extra;
+          const progress = extra?.progress;
+          // Backpack monitor uses extra.progress for TWAP progress; keep it compact.
+          const executed = progress?.executedQuantity ?? progress?.executed_qty ?? extra?.executed_qty;
+          const expected = progress?.expectedQuantity ?? progress?.expected_qty ?? extra?.algo_expected_size ?? extra?.algo_size ?? extra?.total_qty;
+          const elapsed = progress?.elapsed_s ?? progress?.elapsedSec;
+
+          let progressText = '--';
+          if (executed !== undefined || expected !== undefined || elapsed !== undefined) {
+            const execText = (executed === undefined || executed === null || String(executed).trim() === '') ? '--' : formatMaybeNumber(executed, 6);
+            const expText = (expected === undefined || expected === null || String(expected).trim() === '') ? '--' : formatMaybeNumber(expected, 6);
+            const pct = (() => {
+              const eN = parseMaybeNumber(executed);
+              const xN = parseMaybeNumber(expected);
+              if (Number.isFinite(eN) && Number.isFinite(xN) && xN > 0) {
+                return Math.max(0, Math.min(100, (eN / xN) * 100));
+              }
+              return null;
+            })();
+            const pctText = pct === null ? '' : ` · ${formatMaybeNumber(pct, 1)}%`;
+            const elapsedText = elapsed === undefined || elapsed === null ? '' : ` · ${formatMaybeNumber(elapsed, 0)}s`;
+            progressText = `${execText}/${expText}${pctText}${elapsedText}`;
+          }
+
+          return {
+            agentId: safeText(agent?.agent_id),
+            status: safeText(agent?.status),
+            orderType: pickExtraField(extra, 'order_type'),
+            avgPrice: formatMaybeNumber(extra?.avg_price, 5),
+            filledQty: pickExtraField(extra, 'filled_qty'),
+            progressText,
+          };
+        };
+
+        const renderDetailCard = (agentDetail, agentRaw) => {
+          const totalQty = resolveReportedTotalQty(agentRaw);
+          return `
+            <div style="padding:0.1rem 0;">
+              <div style="display:flex; justify-content:space-between; gap:0.5rem; align-items:baseline;">
+                <div><strong>${escapeHtml(agentDetail.agentId)}</strong></div>
+                <div style="color:#8a94a6; font-size:0.72rem;">${escapeHtml(agentDetail.status)}</div>
+              </div>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.35rem 0.75rem; margin-top:0.25rem; font-variant-numeric:tabular-nums;">
+                <div><span style="color:#8a94a6;">均价</span> ${escapeHtml(agentDetail.avgPrice)}</div>
+                <div><span style="color:#8a94a6;">成交</span> ${escapeHtml(filledDisplay(agentDetail.filledQty, totalQty))}</div>
+              </div>
+              <div style="margin-top:0.2rem; font-variant-numeric:tabular-nums;">
+                <span style="color:#8a94a6;">进度</span> <span style="color:#c9d1d9;">${escapeHtml(agentDetail.progressText)}</span>
+              </div>
+            </div>
+          `;
+        };
+
+        const historyRows = [];
+        for (const request of adjustmentRequests.slice(0, 20)) {
+          const createdText = formatTimestamp(request.created_at) ?? '--';
+          const agents = Array.isArray(request.agents) ? request.agents : [];
+          const scopeText = scopeFor(request);
+          const statusText = normalizeStatus(request.overall_status || request.status || 'pending');
+
+          const pendingAgents = agents.filter((agent) => ['pending', 'in_progress', 'running'].includes(normalizeStatus(agent?.status)));
+          const failedAgents = agents.filter((agent) => normalizeStatus(agent?.status) === 'failed');
+          const statusMeta = [];
+          if (pendingAgents.length) statusMeta.push(`未完成 ${pendingAgents.length}`);
+          if (failedAgents.length) statusMeta.push(`失败 ${failedAgents.length}`);
+          const statusCombined = statusMeta.length ? `${statusText}（${statusMeta.join(' / ')}）` : statusText;
+
+          const sortedAgents = agents
+            .filter((agent) => agent && typeof agent === 'object')
+            .slice()
+            .sort((a, b) => String(a.agent_id || '').localeCompare(String(b.agent_id || '')));
+
+          const leftAgent = sortedAgents[0] || null;
+          const rightAgent = sortedAgents[1] || null;
+          const left = leftAgent ? renderAgentDetailFields(leftAgent) : null;
+          const right = rightAgent ? renderAgentDetailFields(rightAgent) : null;
+
+          const orderModes = sortedAgents
+            .map((agent) => pickExtraField(agent?.extra, 'order_type'))
+            .filter((v) => v && v !== '--')
+            .map((v) => String(v).toUpperCase());
+          const orderModeText = orderModes.includes('TWAP')
+            ? 'TWAP'
+            : orderModes.length
+              ? orderModes[0]
+              : '市价';
+
+          const findFirstTimestamp = (keys) => {
+            for (const agent of agents) {
+              const extra = agent?.extra;
+              if (!extra || typeof extra !== 'object') {
+                continue;
+              }
+              for (const key of keys) {
+                const v = normalizeEpochMs(extra[key]);
+                if (v) {
+                  return v;
+                }
+              }
+            }
+            return null;
+          };
+          const createdAtMs = findFirstTimestamp(['created_at']);
+          const lastUpdatedAtMs = findFirstTimestamp(['last_updated_at', 'updated_at']);
+          const endAtMs = findFirstTimestamp(['end_at']);
+          const deltaUpdated = (createdAtMs && lastUpdatedAtMs) ? (lastUpdatedAtMs - createdAtMs) : null;
+          const deltaEnd = (createdAtMs && endAtMs) ? (endAtMs - createdAtMs) : null;
+          const timeText = deltaUpdated === null ? '--' : formatDuration(deltaUpdated);
+          const durationText = deltaEnd === null ? '--' : formatDuration(deltaEnd);
+
+          historyRows.push(`
+            <tr class="adjust-group-top">
+              <td>${escapeHtml(createdText)}</td>
+              <td>${escapeHtml(describeAdjustmentAction(request.action))}</td>
+              <td>${escapeHtml(String(request.magnitude ?? '--'))}</td>
+              <td>${escapeHtml(scopeText)}</td>
+              <td>${escapeHtml(statusCombined)}</td>
+              <td colspan="4" style="text-align:center;">
+                <span style="color:#8a94a6; margin-right:0.5rem;">${escapeHtml(orderModeText)}</span>
+                <span style="color:#8a94a6; margin-right:0.5rem;">时间</span>
+                <span style="margin-right:0.75rem; font-variant-numeric:tabular-nums;">${escapeHtml(timeText)}</span>
+                <span style="color:#8a94a6; margin-right:0.5rem;">持续时间</span>
+                <span style="margin-right:0.75rem; font-variant-numeric:tabular-nums;">${escapeHtml(durationText)}</span>
+              </td>
+            </tr>
+          `);
+
+          const wearSummary = computeFrontendWearSummary(leftAgent, rightAgent);
+          const wearText = wearSummary ? `${formatMaybeNumber(wearSummary.per10k, 4)}/万 (合计)` : '--';
+
+          const leftCard = left ? renderDetailCard(left, leftAgent) : '<div style="color:#8a94a6;">--</div>';
+          const rightCard = right ? renderDetailCard(right, rightAgent) : '<div style="color:#8a94a6;">--</div>';
+
+          historyRows.push(`
+            <tr class="adjust-group-bottom">
+              <td>↳</td>
+              <td colspan="4" style="color:#8a94a6;">
+                <span>VPS 详情</span>
+                <span style="margin-left:0.6rem; font-variant-numeric:tabular-nums;">
+                  <span style="margin-right:0.25rem;">磨损</span>
+                  <span style="color:#c9d1d9;">${escapeHtml(wearText)}</span>
+                </span>
+              </td>
+              <td colspan="4">
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem;">
+                  <div style="border-right:1px solid rgba(255,255,255,0.05); padding-right:0.75rem;">${leftCard}</div>
+                  <div style="padding-left:0.25rem;">${rightCard}</div>
+                </div>
+              </td>
+            </tr>
+          `);
+        }
+
+        bpAdjustHistoryBody.innerHTML = historyRows.join('');
       }
 
       function normalizeRiskCapacitySeries(history, limit = 720) {
