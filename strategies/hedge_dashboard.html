@@ -10834,12 +10834,19 @@
                 <div class="grvt-account-badges">${freshnessBadge}</div>
                 <span class="grvt-account-updated">${escapeHtml(updatedText)}</span>
               </header>
-              <dl class="grvt-account-metrics">
-                <div><dt>Total</dt><dd>${escapeHtml(totalText)}</dd></div>
-                <div><dt>Equity</dt><dd>${escapeHtml(equityText)}</dd></div>
-                <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
-              </dl>
             `;
+
+            // Backpack cards previously only showed 3 metrics. Add the shared metric strip so
+            // we can surface Maint. (maintenance margin ratio) consistently.
+            const metrics = document.createElement('dl');
+            metrics.className = 'grvt-account-metrics';
+            metrics.innerHTML = `
+              <div><dt>Total</dt><dd>${escapeHtml(totalText)}</dd></div>
+              <div><dt>Equity</dt><dd>${escapeHtml(equityText)}</dd></div>
+              <div><dt>Balance</dt><dd>${escapeHtml(walletText)}</dd></div>
+              <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
+            `;
+            card.appendChild(metrics);
 
             // Positions table (best-effort). Expect monitor-side normalized keys, but
             // also tolerate raw Backpack keys.
