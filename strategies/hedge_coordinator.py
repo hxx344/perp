@@ -2843,6 +2843,7 @@ class CoordinatorApp:
 
                 # Backpack adjustments (monitor-executed)
                 web.get("/backpack/adjustments", self.handle_backpack_adjustments_list),
+                web.post("/backpack/adjustments/clear", self.handle_backpack_adjustments_clear),
                 web.post("/backpack/adjust", self.handle_backpack_adjust_create),
                 web.post("/backpack/adjust/ack", self.handle_backpack_adjust_ack),
 
@@ -4225,6 +4226,21 @@ class CoordinatorApp:
         limit = max(1, min(200, limit))
         payload = list(self._bp_adjustments_history[:limit])
         return web.json_response({"adjustments": payload, "limit": limit, "source": "persisted"})
+
+    async def handle_backpack_adjustments_clear(self, request: web.Request) -> web.Response:
+        """Clear persisted Backpack adjustment history.
+
+        This deletes all locally persisted backpack adjust/transfer history entries
+        (backed by `.bp_adjustments_history.json`). Used by the dashboard "clear history"
+        button so operators can reset the panel.
+        """
+        self._enforce_dashboard_auth(request)
+        try:
+            self._bp_adjustments_history = []
+            _atomic_write_json(BP_ADJUSTMENTS_HISTORY_FILE, self._bp_adjustments_history)
+        except Exception as exc:
+            raise web.HTTPInternalServerError(text=f"failed to clear history: {exc}")
+        return web.json_response({"ok": True})
 
     async def handle_backpack_adjust_create(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)

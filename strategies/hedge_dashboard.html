@@ -2621,6 +2621,9 @@
           <div class="grvt-adjust-header">
             <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Backpack Position Adjustments</h3>
             <p class="summary-sub" style="margin: 0;">广播加/减仓指令到 Backpack VPS</p>
+            <div class="grvt-adjust-header-actions" style="margin-left:auto; display:flex; gap:0.5rem; align-items:center;">
+              <button type="button" class="button-secondary" id="bp-adjust-clear-history">清除历史</button>
+            </div>
           </div>
           <div class="grvt-adjust-controls">
             <label for="bp-adjust-symbols" class="grvt-adjust-symbols">
@@ -3502,6 +3505,7 @@
   const bpAdjustStatus = document.getElementById('bp-adjust-status');
   const bpAdjustHistoryBody = document.getElementById('bp-adjust-history');
   const bpTransferHistoryBody = document.getElementById('bp-transfer-history');
+  const bpAdjustClearHistoryButton = document.getElementById('bp-adjust-clear-history');
 
   const paraAccountCount = document.getElementById('para-account-count');
   const paraEmpty = document.getElementById('para-empty');
@@ -3818,6 +3822,40 @@
     }
     return true;
   }
+
+  async function clearBpAdjustHistory() {
+    if (!bpAdjustClearHistoryButton) return;
+    const ok = confirm('确认清除 Backpack 加/减仓历史？这会删除本地持久化记录（不可恢复）。');
+    if (!ok) return;
+    bpAdjustClearHistoryButton.disabled = true;
+    setBpAdjustStatus('正在清除历史…', { stickyMs: 2000 });
+    try {
+      await fetch('/backpack/adjustments/clear', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({})
+      });
+      // Force-refresh history tables.
+      try {
+        await refreshMetrics();
+      } catch (_) {
+        // ignore
+      }
+      setBpAdjustStatus('历史已清除', { stickyMs: 2500 });
+    } catch (e) {
+      console.warn('clearBpAdjustHistory failed', e);
+      setBpAdjustStatus('清除失败（见 console）', { stickyMs: 4000 });
+    } finally {
+      bpAdjustClearHistoryButton.disabled = false;
+    }
+  }
+
+  bpAdjustClearHistoryButton && bpAdjustClearHistoryButton.addEventListener('click', () => {
+    clearBpAdjustHistory();
+  });
 
   // NOTE: We intentionally removed the old Backpack adjust debug hooks.
   // They used capture-phase listeners and also called sendBpAdjustment(),
