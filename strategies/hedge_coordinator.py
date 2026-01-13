@@ -1514,7 +1514,11 @@ class HedgeCoordinator:
                         if not isinstance(acc, dict):
                             continue
                         im_val = (
-                            self._decimal_from(acc.get("initialMargin"))
+                            # Align with dashboard: accountObj.initial_margin_requirement
+                            self._decimal_from(acc.get("initial_margin_requirement"))
+                            or self._decimal_from(acc.get("initialMarginRequirement"))
+                            or self._decimal_from(acc.get("initialMarginReq"))
+                            or self._decimal_from(acc.get("initialMargin"))
                             or self._decimal_from(acc.get("initialMarginTotal"))
                             or self._decimal_from(acc.get("initial_margin"))
                         )
@@ -1522,6 +1526,14 @@ class HedgeCoordinator:
                             continue
                         if candidate_im is None or im_val > candidate_im:
                             candidate_im = im_val
+
+            # Dashboard also supports summary.initial_margin_requirement as a fallback.
+            if candidate_im is None and isinstance(summary, dict):
+                candidate_im = (
+                    self._decimal_from(summary.get("initial_margin_requirement"))
+                    or self._decimal_from(summary.get("initialMarginRequirement"))
+                    or self._decimal_from(summary.get("initialMarginReq"))
+                )
 
             if candidate_im is not None:
                 if max_initial_margin is None or candidate_im > max_initial_margin:
