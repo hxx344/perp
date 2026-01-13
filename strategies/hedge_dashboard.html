@@ -7101,21 +7101,32 @@
         const src = rootPayload?.backpack_accounts;
         if (!src) return dir;
 
-        // support either {accounts:[...], internal_transfer_address:...} or legacy forms
-        const accounts = Array.isArray(src.accounts) ? src.accounts : [];
-        const topAddr = (src.internal_transfer_address || '').toString().trim();
-        if (topAddr) {
-          dir.push({ agent_id: 'backpack', label: src.instrument || 'backpack', address: topAddr });
-        }
-        for (const a of accounts) {
-          if (!a) continue;
-          const agentId = (a.agent_id || a.agentId || a.name || '').toString().trim();
-          const label = (a.name || a.label || agentId || 'account').toString();
-          const addr = (a.internal_transfer_address || a.internalTransferAddress || a.internal_address || '').toString().trim();
-          if (agentId && addr) {
-            dir.push({ agent_id: agentId, label, address: addr });
+        // The caller passes either:
+        // 1) a single snapshot object (rare), or
+        // 2) a map: { [agentId]: snapshot }
+        const snapshots = (src && typeof src === 'object' && !Array.isArray(src) && !('accounts' in src))
+          ? Object.entries(src)
+          : [[(rootPayload?.agent_id || 'backpack'), src]];
+
+        for (const [agentId, snap] of snapshots) {
+          if (!snap || typeof snap !== 'object') continue;
+          const accounts = Array.isArray(snap.accounts) ? snap.accounts : [];
+          const topAddr = (snap.internal_transfer_address || '').toString().trim();
+          const labelFromSnap = (snap.instrument || snap.label || agentId || 'backpack').toString();
+          if (topAddr) {
+            dir.push({ agent_id: String(agentId), label: labelFromSnap, address: topAddr });
+          }
+          for (const a of accounts) {
+            if (!a) continue;
+            const aAgentId = (a.agent_id || a.agentId || agentId || a.name || '').toString().trim();
+            const aLabel = (a.name || a.label || aAgentId || labelFromSnap || 'account').toString();
+            const addr = (a.internal_transfer_address || a.internalTransferAddress || a.internal_address || '').toString().trim();
+            if (aAgentId && addr) {
+              dir.push({ agent_id: aAgentId, label: aLabel, address: addr });
+            }
           }
         }
+
         return dir;
       }
 

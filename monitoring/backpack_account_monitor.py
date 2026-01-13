@@ -401,6 +401,8 @@ class BackpackAccountMonitor:
                 "accounts": [
                     {
                         "name": self._cfg.label,
+                        "agent_id": self._cfg.agent_id,
+                        "internal_transfer_address": self._cfg.internal_withdraw_address,
                         # Common field names the dashboard renderer understands.
                         "balance": _decimal_to_str(balance_total) or _decimal_to_str(balance_available),
                         "available_balance": _decimal_to_str(balance_available),
