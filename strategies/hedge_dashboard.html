@@ -7268,6 +7268,23 @@
 
       async function fetchBackpackAdjustments() {
         try {
+          // Keep adjustment history reasonably long.
+          const response = await fetch('/backpack/adjustments?limit=200', {
+            method: 'GET',
+            credentials: 'same-origin',
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            return null;
+          }
+          return await response.json();
+        } catch (_) {
+          return null;
+        }
+      }
+
+      async function fetchBackpackTransferHistory() {
+        try {
           const response = await fetch('/backpack/adjustments?limit=10', {
             method: 'GET',
             credentials: 'same-origin',
@@ -7290,14 +7307,7 @@
         const adjustments = Array.isArray(payload?.adjustments) ? payload.adjustments : [];
         const normalizeStatus = (value) => String(value || '').toLowerCase();
 
-        // Also surface transfer_internal status in the dedicated panel.
-        try {
-          if (typeof renderBpTransferAdjustments === 'function') {
-            renderBpTransferAdjustments(adjustments);
-          }
-        } catch (_) {
-          // ignore
-        }
+        // transfer_internal has its own panel/history fetch; don‘t mix it into adjust history.
 
         // Determine lock state
         let locked = false;
@@ -7359,7 +7369,9 @@
         const scopeFor = (adj) => describeSymbolScope(adj?.target_symbols ?? adj?.symbols);
 
         const rows = [];
-        for (const adj of adjustments.slice(0, 20)) {
+        for (const adj of adjustments
+          .filter((a) => String(a?.action || '').toLowerCase() !== 'transfer_internal')
+          .slice(0, 20)) {
           const createdText = formatTimestamp(adj.created_at) ?? '--';
           const statusText = safeText(adj.overall_status ?? adj.status ?? 'pending');
           const scopeText = scopeFor(adj);
@@ -10682,6 +10694,12 @@
           renderGrvtAdjustments(data?.grvt_adjustments);
           const bpAdjPayload = await fetchBackpackAdjustments();
           renderBackpackAdjustments(bpAdjPayload);
+
+          const bpTransferPayload = await fetchBackpackTransferHistory();
+          if (bpTransferPayload && typeof renderBpTransferAdjustments === 'function') {
+            const adj = Array.isArray(bpTransferPayload?.adjustments) ? bpTransferPayload.adjustments : [];
+            renderBpTransferAdjustments(adj);
+          }
           renderAutoBalance(data?.auto_balance, data?.agents);
           renderParaAutoBalance(data?.para_auto_balance, data?.paradex_accounts || data?.agents);
           maybeRefreshRiskHistory();
