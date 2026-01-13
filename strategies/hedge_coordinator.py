@@ -3977,6 +3977,22 @@ class CoordinatorApp:
         summary_block = summary if isinstance(summary, dict) else None
         if summary_block is None:
             return None
+        # Backpack monitors currently report equity information primarily under
+        # summary.collateral, e.g. netEquity / netEquityAvailable.
+        collateral = summary_block.get("collateral")
+        collateral_block = collateral if isinstance(collateral, dict) else None
+        if collateral_block is not None:
+            preferred = (
+                ("netEquityAvailable", "netEquity", "assetsValue")
+                if prefer_available
+                else ("netEquity", "netEquityAvailable", "assetsValue")
+            )
+            for field in preferred:
+                value = HedgeCoordinator._decimal_from(collateral_block.get(field))
+                if value is not None:
+                    return value
+
+        # Fallback: accept any legacy summary-level fields.
         fields_available = ("available_equity", "available_balance", "equity", "balance")
         fields_equity_first = ("equity", "balance", "available_equity", "available_balance")
         fields = fields_available if prefer_available else fields_equity_first
@@ -3984,6 +4000,19 @@ class CoordinatorApp:
             value = HedgeCoordinator._decimal_from(summary_block.get(field))
             if value is not None:
                 return value
+
+        # Final fallback: some payloads also include an accounts list with equity.
+        accounts = bp_block.get("accounts")
+        if isinstance(accounts, list) and accounts:
+            first = accounts[0]
+            if isinstance(first, dict):
+                fields_accounts_available = ("available_equity", "available_balance", "equity", "balance")
+                fields_accounts_equity_first = ("equity", "balance", "available_equity", "available_balance")
+                fields_accounts = fields_accounts_available if prefer_available else fields_accounts_equity_first
+                for field in fields_accounts:
+                    value = HedgeCoordinator._decimal_from(first.get(field))
+                    if value is not None:
+                        return value
         return None
 
     def _compute_bp_auto_balance_measurement(self, snapshot: Dict[str, Any]) -> Optional[AutoBalanceMeasurement]:
