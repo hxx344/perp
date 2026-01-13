@@ -7500,7 +7500,19 @@
 
               for (const t of transfers.slice(0, 10)) {
                 const createdText = formatTimestamp(t.created_at) ?? '--';
-                const st = safeText(t.overall_status ?? t.status);
+                // NOTE: internal transfer API may return a withdrawal object with status=pending
+                // even when the monitor ack is "succeeded" (it only means the request was accepted).
+                // Prefer showing "in_progress" when we can detect that backend status.
+                const rawOverall = t.overall_status ?? t.status;
+                let st = safeText(rawOverall);
+                try {
+                  const resultStatus = String(t?.agents?.[0]?.extra?.result?.status || '').toLowerCase();
+                  if (resultStatus && ['pending', 'initiated', 'processing'].includes(resultStatus)) {
+                    st = 'in_progress';
+                  }
+                } catch (_) {
+                  // ignore
+                }
                 const fromAgent = safeText(t.agent_id);
                 const fromAddr = agentToAddress(t.agent_id);
                 const toAddrRaw = t?.payload?.address;

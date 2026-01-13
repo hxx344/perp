@@ -3935,8 +3935,8 @@ class CoordinatorApp:
             "target_symbols": symbols,
             "symbols": symbols,
             "agent_id": agent_id or "all",
-            "overall_status": "queued",
-            "status": "queued",
+            "overall_status": "pending",
+            "status": "pending",
             "agents": [],
             "payload": payload_dict,
         }
@@ -4005,11 +4005,15 @@ class CoordinatorApp:
 
                 # recompute overall status (best-effort)
                 statuses = [str(a.get("status") or "").lower() for a in agents if isinstance(a, dict)]
-                if statuses and all(s in {"completed", "succeeded", "success", "ok"} for s in statuses):
+                success_set = {"completed", "succeeded", "success", "ok"}
+                pending_set = {"pending", "in_progress", "queued"}
+                failed_set = {"failed", "error"}
+
+                if statuses and all(s in success_set for s in statuses):
                     overall = "completed"
-                elif any(s in {"failed", "error"} for s in statuses):
+                elif any(s in failed_set for s in statuses):
                     overall = "failed"
-                elif any(s in {"pending", "in_progress", "queued"} for s in statuses):
+                elif any(s in pending_set for s in statuses):
                     overall = "in_progress"
                 else:
                     overall = item.get("overall_status") or item.get("status") or "in_progress"
