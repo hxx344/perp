@@ -7229,7 +7229,12 @@
             const text = await response.text();
             throw new Error(text || `HTTP ${response.status}`);
           }
-          setBpTransferStatus('已提交，等待 VPS 执行/ACK…', { stickyMs: 15000 });
+          const respPayload = await response.json();
+          const reqId = respPayload?.request?.request_id ?? respPayload?.request_id ?? null;
+          setBpTransferStatus(
+            reqId ? `已提交（request_id=${reqId}），等待 VPS 执行/ACK…` : '已提交，等待 VPS 执行/ACK…',
+            { stickyMs: 15000 }
+          );
           await refreshMetrics();
         } catch (err) {
           setBpTransferStatus(`提交失败：${err}`, { stickyMs: 30000 });
@@ -7265,6 +7270,15 @@
 
         const adjustments = Array.isArray(payload?.adjustments) ? payload.adjustments : [];
         const normalizeStatus = (value) => String(value || '').toLowerCase();
+
+        // Also surface transfer_internal status in the dedicated panel.
+        try {
+          if (typeof renderBpTransferAdjustments === 'function') {
+            renderBpTransferAdjustments(adjustments);
+          }
+        } catch (_) {
+          // ignore
+        }
 
         // Determine lock state
         let locked = false;
@@ -7379,6 +7393,29 @@
           }
         }
         bpAdjustHistoryBody.innerHTML = rows.join('');
+      }
+
+      function renderBpTransferAdjustments(adjustments) {
+        if (!bpTransferStatus || shouldRespectBpTransferSticky()) {
+          return;
+        }
+        const normalizeStatus = (value) => String(value || '').toLowerCase();
+        const transfers = (Array.isArray(adjustments) ? adjustments : []).filter((a) => {
+          return String(a?.action || '').toLowerCase() === 'transfer_internal';
+        });
+        if (!transfers.length) {
+          setBpTransferStatus('等待指令…');
+          return;
+        }
+        const latest = transfers[0];
+        const st = normalizeStatus(latest?.overall_status ?? latest?.status);
+        if (st === 'completed' || st === 'succeeded' || st === 'success') {
+          setBpTransferStatus('最近一次内转已完成');
+        } else if (st === 'failed' || st === 'error') {
+          setBpTransferStatus(`最近一次内转失败：${latest?.note || '--'}`);
+        } else {
+          setBpTransferStatus(`内转状态：${st || '--'}`);
+        }
       }
 
       function updateParaAdjustButtons() {
