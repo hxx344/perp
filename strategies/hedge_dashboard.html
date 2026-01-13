@@ -7452,7 +7452,7 @@
 
               const directory =
                 typeof getBpInternalTransferDirectory === 'function'
-                  ? getBpInternalTransferDirectory(latestSnapshot)
+                  ? getBpInternalTransferDirectory(lastMetricsSnapshot)
                   : [];
 
               const agentToAddressMap = new Map();
