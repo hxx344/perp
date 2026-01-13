@@ -2559,9 +2559,29 @@
             <div class="value" id="bp-total-pnl">--</div>
           </article>
           <article class="card grvt-summary-card">
+            <h3>Max IM Req</h3>
+            <div class="value" id="bp-max-im-req">--</div>
+            <p class="summary-sub">max(init margin)</p>
+          </article>
+          <article class="card grvt-summary-card">
             <h3>Net Equity</h3>
             <div class="value" id="bp-total-equity">--</div>
             <p class="summary-sub" id="bp-wallet-balance">Wallet --</p>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>风险裕量</h3>
+            <div class="value" id="bp-transfer-total">--</div>
+            <p class="summary-sub" id="bp-transfer-note">Equity - 1.5×max(IM)</p>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Risk Level</h3>
+            <div class="value risk-pill risk-pill-summary" id="bp-risk-level">--</div>
+            <p class="grvt-risk-detail" id="bp-risk-detail">Awaiting data…</p>
+          </article>
+          <article class="card grvt-summary-card">
+            <h3>Avg Maint</h3>
+            <div class="value" id="bp-avg-maint">--</div>
+            <p class="summary-sub">(Σ maint req / Σ equity)</p>
           </article>
           <article class="card grvt-summary-card">
             <h3>Last Update</h3>
@@ -10592,8 +10612,14 @@
         const bpEmpty = document.getElementById('bp-empty');
         const bpCard = document.getElementById('bp-card');
         const bpTotalPnl = document.getElementById('bp-total-pnl');
+        const bpMaxImReq = document.getElementById('bp-max-im-req');
         const bpTotalEquity = document.getElementById('bp-total-equity');
         const bpWalletBalance = document.getElementById('bp-wallet-balance');
+        const bpTransferTotal = document.getElementById('bp-transfer-total');
+        const bpTransferNote = document.getElementById('bp-transfer-note');
+        const bpRiskLevel = document.getElementById('bp-risk-level');
+        const bpRiskDetail = document.getElementById('bp-risk-detail');
+        const bpAvgMaint = document.getElementById('bp-avg-maint');
         const bpSummaryTime = document.getElementById('bp-summary-time');
         const bpSummaryUpdated = document.getElementById('bp-summary-updated');
         const bpAccountGrid = document.getElementById('bp-account-grid');
@@ -10631,8 +10657,17 @@
             bpEmpty.classList.remove('hidden');
             bpAccountCount.textContent = '0 accounts';
             if (bpTotalPnl) bpTotalPnl.textContent = '--';
+            if (bpMaxImReq) bpMaxImReq.textContent = '--';
             if (bpTotalEquity) bpTotalEquity.textContent = '--';
             if (bpWalletBalance) bpWalletBalance.textContent = 'Wallet --';
+            if (bpTransferTotal) bpTransferTotal.textContent = '--';
+            if (bpTransferNote) bpTransferNote.textContent = '等待风险基数数据…';
+            if (bpAvgMaint) bpAvgMaint.textContent = '--';
+            if (bpRiskLevel) {
+              bpRiskLevel.textContent = '--';
+              applyRiskTone(bpRiskLevel, null, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
+            }
+            if (bpRiskDetail) bpRiskDetail.textContent = 'Awaiting data…';
             if (bpSummaryTime) bpSummaryTime.textContent = '--';
             if (bpSummaryUpdated) bpSummaryUpdated.textContent = 'Updated —';
             if (bpAccountGrid) bpAccountGrid.innerHTML = '';
@@ -10654,6 +10689,13 @@
           const flattenedAccounts = [];
           let sawAnyPositions = false;
           const symbolCandidates = new Set();
+
+          // Summary risk metrics
+          let aggregateInitialMargin = 0;
+          let maxInitialMargin = null;
+          let aggregateMaintRequirement = 0;
+          let aggregateMaintBase = 0;
+          let worstLossAccount = null;
 
           for (const [agentId, snapshot] of entries) {
             if (!snapshot || typeof snapshot !== 'object') {
@@ -10740,6 +10782,63 @@
             }
           }
 
+          // Compute summary metrics based on flattened accounts and their positions.
+          for (const entry of flattenedAccounts) {
+            const equityValue = Number(entry.equity);
+            const walletValue = Number(entry.wallet);
+
+            // Aggregate base values
+            if (Number.isFinite(equityValue)) {
+              // already aggregated below for display, but keep local for ratios
+            }
+
+            // Worst loss (negative pnl) against capacity.
+            const totalValue = Number(entry.total);
+            if (Number.isFinite(totalValue) && totalValue < 0) {
+              const absLoss = Math.abs(totalValue);
+              if (!worstLossAccount || absLoss > worstLossAccount.lossValue) {
+                worstLossAccount = {
+                  lossValue: absLoss,
+                  accountName: entry.name ? String(entry.name) : null,
+                  agentId: entry.agentId ?? 'Source',
+                };
+              }
+            }
+
+            // Per-account: sum IM/MM requirement from positions.
+            const positions = Array.isArray(entry.positions) ? entry.positions : [];
+            let initialMarginTotal = 0;
+            let maintenanceRequirementTotal = 0;
+            for (const position of positions) {
+              const notional = parseDecimal(position?.netExposureNotional ?? position?.notional ?? position?.net_exposure_notional ?? position?.n);
+              const imf = parseDecimal(position?.imf ?? position?.initialMarginFraction ?? position?.f);
+              const mmf = parseDecimal(position?.mmf ?? position?.maintenanceMarginFraction ?? position?.m);
+              if (Number.isFinite(notional) && Number.isFinite(imf)) {
+                initialMarginTotal += Math.abs(notional * imf);
+              }
+              if (Number.isFinite(notional) && Number.isFinite(mmf)) {
+                maintenanceRequirementTotal += Math.abs(notional * mmf);
+              }
+            }
+
+            if (Number.isFinite(initialMarginTotal)) {
+              aggregateInitialMargin += initialMarginTotal;
+              if (maxInitialMargin === null || initialMarginTotal > maxInitialMargin) {
+                maxInitialMargin = initialMarginTotal;
+              }
+            }
+
+            const ratioBaseValue = Number.isFinite(equityValue) && equityValue > 0
+              ? equityValue
+              : Number.isFinite(walletValue) && walletValue > 0
+                ? walletValue
+                : null;
+            if (ratioBaseValue && Number.isFinite(maintenanceRequirementTotal) && maintenanceRequirementTotal >= 0) {
+              aggregateMaintRequirement += maintenanceRequirementTotal;
+              aggregateMaintBase += ratioBaseValue;
+            }
+          }
+
           // Symbols for broadcast-adjust dropdown (best-effort based on current positions).
           for (const entry of flattenedAccounts) {
             const positions = Array.isArray(entry?.positions) ? entry.positions : [];
@@ -10765,8 +10864,61 @@
           bpAccountCount.textContent = `${aggregateAccountCount} ${accountLabel} across ${entries.length} ${sourcesLabel}`;
 
           if (bpTotalPnl) bpTotalPnl.textContent = hasTotal ? numberFormatter.format(aggregateTotalPnl) : '--';
+          if (bpMaxImReq) bpMaxImReq.textContent = Number.isFinite(maxInitialMargin) ? numberFormatter.format(maxInitialMargin) : '--';
           if (bpTotalEquity) bpTotalEquity.textContent = hasEquity ? numberFormatter.format(aggregateEquity) : '--';
           if (bpWalletBalance) bpWalletBalance.textContent = hasWallet ? `Wallet ${numberFormatter.format(aggregateWallet)}` : 'Wallet --';
+
+          // Risk capacity & risk level (PARA-like): capacity = equity - 1.5×max(IM)
+          // (see PARA implementation around para-transfer-note).
+          if (bpTransferTotal || bpTransferNote || bpRiskLevel || bpRiskDetail) {
+            const maxInitialMarginValue = Number.isFinite(maxInitialMargin) ? maxInitialMargin : 0;
+            const rawCapacity = hasEquity && maxInitialMarginValue > 0
+              ? (aggregateEquity - 1.5 * maxInitialMarginValue)
+              : null;
+            const hasCapacity = Number.isFinite(rawCapacity) && rawCapacity > 0;
+            if (bpTransferTotal) {
+              bpTransferTotal.textContent = hasCapacity ? numberFormatter.format(rawCapacity) : '--';
+            }
+            if (bpTransferNote) {
+              bpTransferNote.textContent = hasCapacity
+                ? `覆盖 ${aggregateAccountCount} 个账户 · 风险裕量 = Equity - 1.5×max(IM ${numberFormatter.format(maxInitialMarginValue)})`
+                : '缺少风险裕量数据';
+            }
+
+            if (bpAvgMaint) {
+              const avgMaintPercent = computePercent(aggregateMaintRequirement, aggregateMaintBase);
+              if (Number.isFinite(avgMaintPercent)) {
+                bpAvgMaint.textContent = formatPercent(avgMaintPercent, 2);
+                bpAvgMaint.title = `Maint req ${numberFormatter.format(aggregateMaintRequirement)} / Base ${numberFormatter.format(aggregateMaintBase)}`;
+              } else {
+                bpAvgMaint.textContent = '--';
+                bpAvgMaint.removeAttribute('title');
+              }
+            }
+
+            if (bpRiskLevel) {
+              let riskRatio = null;
+              if (worstLossAccount && hasCapacity) {
+                riskRatio = worstLossAccount.lossValue / rawCapacity;
+                bpRiskLevel.textContent = formatPercent(riskRatio * 100, 2);
+              } else {
+                bpRiskLevel.textContent = '—';
+              }
+              applyRiskTone(bpRiskLevel, riskRatio, { variant: 'summary', bands: GLOBAL_RISK_GRADIENTS });
+              if (bpRiskDetail) {
+                if (worstLossAccount && hasCapacity) {
+                  const who = worstLossAccount.accountName
+                    ? `${worstLossAccount.accountName} (${worstLossAccount.agentId})`
+                    : worstLossAccount.agentId;
+                  bpRiskDetail.textContent = `${who}亏损 ${numberFormatter.format(worstLossAccount.lossValue)} / 基数 ${numberFormatter.format(rawCapacity)} · ${getRiskThresholdSummary()}`;
+                } else if (worstLossAccount && !hasCapacity) {
+                  bpRiskDetail.textContent = '缺少风险基数数据，无法计算 RISK';
+                } else {
+                  bpRiskDetail.textContent = '无亏损或缺少盈亏数据';
+                }
+              }
+            }
+          }
 
           const updatedText = formatTimestamp(latestUpdate);
           if (bpSummaryTime) bpSummaryTime.textContent = updatedText ?? '--';
