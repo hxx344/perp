@@ -140,6 +140,7 @@ def _bp_env_diagnostics() -> Dict[str, Any]:
     }
 
 PERSISTED_PARA_AUTO_BALANCE_FILE = Path(__file__).with_name(".para_auto_balance_config.json")
+PERSISTED_BP_AUTO_BALANCE_FILE = Path(__file__).with_name(".bp_auto_balance_config.json")
 BP_VOLUME_HISTORY_FILE = Path(__file__).with_name(".bp_volume_history.json")
 BP_ADJUSTMENTS_HISTORY_FILE = Path(__file__).with_name(".bp_adjustments_history.json")
 DASHBOARD_PATH = Path(__file__).with_name("hedge_dashboard.html")
@@ -2765,6 +2766,24 @@ class CoordinatorApp:
             "measurement": None,
         }
         self._para_auto_balance_task: Optional[asyncio.Task] = None
+
+        # Backpack auto balance (equity equalization via internal transfer)
+        self._bp_auto_balance_cfg: Optional[AutoBalanceConfig] = None
+        self._bp_auto_balance_lock = asyncio.Lock()
+        self._bp_auto_balance_cooldown_until: Optional[float] = None
+        self._bp_auto_balance_status: Dict[str, Any] = {
+            "enabled": False,
+            "cooldown_until": None,
+            "cooldown_active": False,
+            "measurement": None,
+            "last_error": None,
+            "last_request_id": None,
+            "last_action_at": None,
+            "last_transfer_amount": None,
+            "last_direction": None,
+            "pending": False,
+        }
+        self._bp_auto_balance_task: Optional[asyncio.Task] = None
         # PARA adjustment history should stick around longer than the default
         # so the dashboard doesn't “forget” after an hour.
         self._para_adjustments = GrvtAdjustmentManager(
@@ -2786,8 +2805,9 @@ class CoordinatorApp:
             with suppress(Exception):
                 self._bp_bbo_ws = BackpackBookTickerWS()
 
-        # Load persisted PARA auto balance config (if any)
+        # Load persisted auto balance configs (if any)
         self._load_persisted_para_auto_balance_config()
+        self._load_persisted_bp_auto_balance_config()
         self._app = web.Application()
         self._app.add_routes(
             [
@@ -2804,6 +2824,8 @@ class CoordinatorApp:
                 web.post("/auto_balance/config", self.handle_auto_balance_update),
                 web.get("/para/auto_balance/config", self.handle_para_auto_balance_get),
                 web.post("/para/auto_balance/config", self.handle_para_auto_balance_update),
+                web.get("/backpack/auto_balance/config", self.handle_bp_auto_balance_get),
+                web.post("/backpack/auto_balance/config", self.handle_bp_auto_balance_update),
                 web.get("/risk_alert/settings", self.handle_risk_alert_settings),
                 web.post("/risk_alert/settings", self.handle_risk_alert_update),
                 web.get("/para/risk_alert/settings", self.handle_para_risk_alert_settings),
@@ -3771,6 +3793,7 @@ class CoordinatorApp:
         payload["grvt_adjustments"] = await self._adjustments.summary()
         payload["para_adjustments"] = await self._para_adjustments.summary()
         payload["auto_balance"] = self._auto_balance_status_snapshot()
+        payload["bp_auto_balance"] = self._bp_auto_balance_status_snapshot()
         return web.json_response(payload)
 
     def _build_range_payload(self, points: Sequence[Mapping[str, float]]) -> Optional[Dict[str, Any]]:
@@ -3832,7 +3855,307 @@ class CoordinatorApp:
         snapshot["para_adjustments"] = await self._para_adjustments.summary()
         snapshot["auto_balance"] = self._auto_balance_status_snapshot()
         snapshot["para_auto_balance"] = self._para_auto_balance_status_snapshot()
+        snapshot["bp_auto_balance"] = self._bp_auto_balance_status_snapshot()
+
+        # Trigger backpack auto balance evaluation in the background.
+        # We intentionally do this post-update so it uses the freshest snapshot.
+        with suppress(Exception):
+            await self._maybe_bp_auto_balance(snapshot)
         return web.json_response(snapshot)
+
+    # -----------------------------
+    # Backpack auto balance
+    # -----------------------------
+
+    def _bp_auto_balance_config_as_payload(self) -> Optional[Dict[str, Any]]:
+        return self._auto_balance_config_as_payload(self._bp_auto_balance_cfg)
+
+    def _bp_auto_balance_status_snapshot(self) -> Dict[str, Any]:
+        snapshot = copy.deepcopy(self._bp_auto_balance_status)
+        snapshot["enabled"] = bool(self._bp_auto_balance_cfg)
+        snapshot["config"] = self._bp_auto_balance_config_as_payload()
+        snapshot["pending"] = bool(self._bp_auto_balance_task)
+        return snapshot
+
+    def _update_bp_auto_balance_config(self, config: Optional[AutoBalanceConfig]) -> None:
+        self._bp_auto_balance_cfg = config
+        self._bp_auto_balance_cooldown_until = None
+        self._bp_auto_balance_status["enabled"] = bool(config)
+        self._bp_auto_balance_status["config"] = self._bp_auto_balance_config_as_payload()
+        self._bp_auto_balance_status["cooldown_until"] = None
+        self._bp_auto_balance_status["cooldown_active"] = False
+        self._bp_auto_balance_status["measurement"] = None
+        self._bp_auto_balance_status["last_error"] = None
+        self._bp_auto_balance_status["last_request_id"] = None
+        self._bp_auto_balance_status["last_action_at"] = None
+        self._bp_auto_balance_status["last_transfer_amount"] = None
+        self._bp_auto_balance_status["last_direction"] = None
+        self._bp_auto_balance_status["pending"] = False
+        self._bp_auto_balance_task = None
+        if not config:
+            LOGGER.info("Backpack auto balance disabled via dashboard")
+        else:
+            LOGGER.info(
+                "Backpack auto balance configured via dashboard: %s ↔ %s (threshold %.2f%%, min %s %s)",
+                config.agent_a,
+                config.agent_b,
+                config.threshold_ratio * 100,
+                self._decimal_to_str(config.min_transfer),
+                config.currency,
+            )
+
+    def _load_persisted_bp_auto_balance_config(self) -> None:
+        path = PERSISTED_BP_AUTO_BALANCE_FILE
+        raw = _load_json_file(path, default=None)
+        if not isinstance(raw, dict) or not raw:
+            return
+        enabled = bool(raw.get("enabled"))
+        cfg_raw = raw.get("config")
+        if not enabled:
+            self._update_bp_auto_balance_config(None)
+            return
+        if not isinstance(cfg_raw, dict):
+            return
+        try:
+            cfg = self._parse_auto_balance_config(cfg_raw, default_currency="USDC")
+        except Exception:
+            return
+        self._update_bp_auto_balance_config(cfg)
+
+    def _persist_bp_auto_balance_config(self) -> None:
+        path = PERSISTED_BP_AUTO_BALANCE_FILE
+        payload = {
+            "enabled": bool(self._bp_auto_balance_cfg),
+            "config": self._bp_auto_balance_config_as_payload(),
+        }
+        _atomic_write_json(path, payload)
+
+    async def handle_bp_auto_balance_get(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        return web.json_response({
+            "config": self._bp_auto_balance_config_as_payload(),
+            "status": self._bp_auto_balance_status_snapshot(),
+        })
+
+    async def handle_bp_auto_balance_update(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="auto balance payload must be JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="auto balance payload must be an object")
+
+        action_raw = body.get("action")
+        action = str(action_raw).strip().lower() if isinstance(action_raw, str) else None
+        enabled_flag = body.get("enabled")
+        if enabled_flag is False or action == "disable":
+            self._update_bp_auto_balance_config(None)
+            self._persist_bp_auto_balance_config()
+            return web.json_response({
+                "config": None,
+                "status": self._bp_auto_balance_status_snapshot(),
+            })
+
+        try:
+            config = self._parse_auto_balance_config(body, default_currency="USDC")
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+
+        self._update_bp_auto_balance_config(config)
+        self._persist_bp_auto_balance_config()
+        return web.json_response({
+            "config": self._bp_auto_balance_config_as_payload(),
+            "status": self._bp_auto_balance_status_snapshot(),
+        })
+
+    def _extract_bp_equity_from_agent(self, agent_payload: Dict[str, Any], *, prefer_available: bool) -> Optional[Decimal]:
+        bp_block = agent_payload.get("backpack_accounts")
+        if not isinstance(bp_block, dict):
+            return None
+        summary = bp_block.get("summary")
+        summary_block = summary if isinstance(summary, dict) else None
+        if summary_block is None:
+            return None
+        fields_available = ("available_equity", "available_balance", "equity", "balance")
+        fields_equity_first = ("equity", "balance", "available_equity", "available_balance")
+        fields = fields_available if prefer_available else fields_equity_first
+        for field in fields:
+            value = HedgeCoordinator._decimal_from(summary_block.get(field))
+            if value is not None:
+                return value
+        return None
+
+    def _compute_bp_auto_balance_measurement(self, snapshot: Dict[str, Any]) -> Optional[AutoBalanceMeasurement]:
+        if not self._bp_auto_balance_cfg:
+            return None
+        agents_block = snapshot.get("agents")
+        if not isinstance(agents_block, dict):
+            return None
+        entry_a = agents_block.get(self._bp_auto_balance_cfg.agent_a)
+        entry_b = agents_block.get(self._bp_auto_balance_cfg.agent_b)
+        if not isinstance(entry_a, dict) or not isinstance(entry_b, dict):
+            return None
+        equity_a = self._extract_bp_equity_from_agent(entry_a, prefer_available=self._bp_auto_balance_cfg.use_available_equity)
+        equity_b = self._extract_bp_equity_from_agent(entry_b, prefer_available=self._bp_auto_balance_cfg.use_available_equity)
+        if equity_a is None or equity_b is None:
+            return None
+        if equity_a <= 0 or equity_b <= 0:
+            return None
+        difference = abs(equity_a - equity_b)
+        if difference <= 0:
+            return None
+        max_equity = equity_a if equity_a >= equity_b else equity_b
+        if max_equity <= 0:
+            return None
+        ratio = float(difference / max_equity)
+        source_agent = self._bp_auto_balance_cfg.agent_a if equity_a >= equity_b else self._bp_auto_balance_cfg.agent_b
+        target_agent = self._bp_auto_balance_cfg.agent_b if source_agent == self._bp_auto_balance_cfg.agent_a else self._bp_auto_balance_cfg.agent_a
+        transfer_amount = difference / Decimal("2")
+        if transfer_amount <= 0:
+            return None
+        return AutoBalanceMeasurement(
+            agent_a=self._bp_auto_balance_cfg.agent_a,
+            agent_b=self._bp_auto_balance_cfg.agent_b,
+            equity_a=equity_a,
+            equity_b=equity_b,
+            difference=difference,
+            ratio=ratio,
+            source_agent=source_agent,
+            target_agent=target_agent,
+            transfer_amount=transfer_amount,
+        )
+
+    async def _run_bp_auto_balance_transfer(
+        self,
+        *,
+        measurement: AutoBalanceMeasurement,
+        cfg: AutoBalanceConfig,
+        requested_amount: Decimal,
+    ) -> None:
+        now = time.time()
+        try:
+            # Create a Backpack internal transfer request. The monitor will resolve
+            # the destination address via payload.address or BACKPACK_INTERNAL_TRANSFER_PEER_ADDRESS.
+            adj = self._backpack_adjustments.create(
+                agent_id=measurement.source_agent,
+                action="transfer_internal",
+                magnitude=float(requested_amount),
+                symbols=[cfg.currency],
+                payload={
+                    "auto_balance": {
+                        "venue": "backpack",
+                        "ratio": measurement.ratio,
+                        "threshold": cfg.threshold_ratio,
+                        "difference": self._decimal_to_str(measurement.difference),
+                        "agent_a_equity": self._decimal_to_str(measurement.equity_a),
+                        "agent_b_equity": self._decimal_to_str(measurement.equity_b),
+                        "computed_amount": self._decimal_to_str(measurement.transfer_amount),
+                        "requested_amount": self._decimal_to_str(requested_amount),
+                        "currency": cfg.currency,
+                        "source_agent": measurement.source_agent,
+                        "target_agent": measurement.target_agent,
+                        "snapshot_ts": now,
+                    },
+                },
+            )
+
+            # Persist to local history for visibility (align with dashboard-created adjustments).
+            entry: Dict[str, Any] = {
+                "request_id": adj.request_id,
+                "created_at": getattr(adj, "created_at", None),
+                "action": "transfer_internal",
+                "magnitude": float(requested_amount),
+                "target_symbols": [cfg.currency],
+                "symbols": [cfg.currency],
+                "agent_id": measurement.source_agent,
+                "overall_status": "pending",
+                "status": "pending",
+                "agents": [],
+                "payload": {
+                    "auto_balance": {
+                        "source_agent": measurement.source_agent,
+                        "target_agent": measurement.target_agent,
+                        "currency": cfg.currency,
+                        "requested_amount": self._decimal_to_str(requested_amount),
+                        "snapshot_ts": now,
+                    }
+                },
+            }
+            self._bp_adjustments_history.insert(0, entry)
+            if len(self._bp_adjustments_history) > self._bp_adjustments_history_limit:
+                self._bp_adjustments_history = self._bp_adjustments_history[: self._bp_adjustments_history_limit]
+            _atomic_write_json(BP_ADJUSTMENTS_HISTORY_FILE, self._bp_adjustments_history)
+
+            self._bp_auto_balance_status["last_error"] = None
+            self._bp_auto_balance_status["last_request_id"] = adj.request_id
+            self._bp_auto_balance_status["last_action_at"] = now
+            self._bp_auto_balance_status["last_transfer_amount"] = self._decimal_to_str(requested_amount)
+            self._bp_auto_balance_status["last_direction"] = {
+                "from": measurement.source_agent,
+                "to": measurement.target_agent,
+            }
+        except Exception as exc:
+            error_text = getattr(exc, "text", None) or str(exc)
+            self._bp_auto_balance_status["last_error"] = error_text
+            LOGGER.warning("Backpack auto balance transfer failed: %s", error_text)
+        finally:
+            if cfg.cooldown_seconds > 0:
+                self._bp_auto_balance_cooldown_until = now + cfg.cooldown_seconds
+            else:
+                self._bp_auto_balance_cooldown_until = None
+            self._bp_auto_balance_status["cooldown_until"] = self._bp_auto_balance_cooldown_until
+            self._bp_auto_balance_status["cooldown_active"] = (
+                self._bp_auto_balance_cooldown_until is not None and now < self._bp_auto_balance_cooldown_until
+            )
+            self._bp_auto_balance_status["pending"] = False
+            self._bp_auto_balance_task = None
+
+    async def _maybe_bp_auto_balance(self, snapshot: Dict[str, Any]) -> None:
+        if not self._bp_auto_balance_cfg:
+            return
+        # Observe existing background task and clear if finished.
+        if self._bp_auto_balance_task is not None:
+            if self._bp_auto_balance_task.done():
+                with suppress(Exception):
+                    self._bp_auto_balance_task.result()
+                self._bp_auto_balance_task = None
+            else:
+                self._bp_auto_balance_status["pending"] = True
+                return
+        async with self._bp_auto_balance_lock:
+            cfg = self._bp_auto_balance_cfg
+            measurement = self._compute_bp_auto_balance_measurement(snapshot)
+            self._bp_auto_balance_status["measurement"] = measurement.as_payload() if measurement else None
+            now = time.time()
+            cooldown_until = self._bp_auto_balance_cooldown_until
+            if cooldown_until is not None and now < cooldown_until:
+                self._bp_auto_balance_status["cooldown_until"] = cooldown_until
+                self._bp_auto_balance_status["cooldown_active"] = True
+                return
+            self._bp_auto_balance_status["cooldown_active"] = False
+            self._bp_auto_balance_status["cooldown_until"] = cooldown_until
+            if not measurement:
+                return
+            if measurement.ratio < cfg.threshold_ratio:
+                return
+            requested_amount = measurement.transfer_amount
+            if requested_amount < cfg.min_transfer:
+                return
+            if cfg.max_transfer is not None and requested_amount > cfg.max_transfer:
+                requested_amount = cfg.max_transfer
+            if requested_amount < cfg.min_transfer:
+                return
+
+            self._bp_auto_balance_status["pending"] = True
+            self._bp_auto_balance_task = asyncio.create_task(
+                self._run_bp_auto_balance_transfer(
+                    measurement=measurement,
+                    cfg=cfg,
+                    requested_amount=requested_amount,
+                )
+            )
+            return
 
     async def handle_backpack_adjustments_list(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
