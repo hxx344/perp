@@ -11334,6 +11334,7 @@
                     <th>Symbol</th>
                     <th>Side</th>
                     <th>Size</th>
+                    <th>Value</th>
                     <th>Entry</th>
                     <th>Mark</th>
                     <th>PnL</th>
@@ -11357,6 +11358,10 @@
                   ?? position?.unrealizedPnl
                   ?? position?.P
                 );
+                const positionValue = (Number.isFinite(netQty) && Number.isFinite(markPx))
+                  ? Math.abs(netQty) * markPx
+                  : null;
+                const pnlClass = percentClass(pnl);
                 const side = Number.isFinite(netQty)
                   ? (netQty >= 0 ? 'LONG' : 'SHORT')
                   : (position?.side ? String(position.side).toUpperCase() : '—');
@@ -11375,9 +11380,10 @@
                   <td>${escapeHtml(String(symbol))}</td>
                   <td>${escapeHtml(String(side))}</td>
                   <td>${escapeHtml(Number.isFinite(netQty) ? formatDecimal(Math.abs(netQty), 4) : '--')}</td>
+                  <td>${escapeHtml(Number.isFinite(positionValue) ? numberFormatter.format(positionValue) : '--')}</td>
                   <td>${escapeHtml(Number.isFinite(entryPx) ? formatDecimal(entryPx, 4) : '--')}</td>
                   <td>${escapeHtml(Number.isFinite(markPx) ? formatDecimal(markPx, 4) : '--')}</td>
-                  <td>${escapeHtml(Number.isFinite(pnl) ? formatDecimal(pnl, 6) : '--')}</td>
+                  <td class="${pnlClass}">${escapeHtml(Number.isFinite(pnl) ? formatDecimal(pnl, 6) : '--')}</td>
                   <td>${escapeHtml(Number.isFinite(bpInitialMargin) ? numberFormatter.format(bpInitialMargin) : '--')}</td>
                 `;
                 body.appendChild(row);
