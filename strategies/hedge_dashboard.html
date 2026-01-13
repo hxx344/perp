@@ -3756,6 +3756,11 @@
   let bpPendingRequestId = null;
   let bpAdjustStatusStickyUntil = 0;
 
+  // If an ACK is lost (e.g. monitor crash/restart) the UI might stay locked.
+  // Keep a conservative timeout to auto-unlock so operators can re-issue orders.
+  let bpAdjustLockedSince = 0;
+  const BP_ADJUST_LOCK_TIMEOUT_MS = 10 * 60 * 1000;
+
   const DEBUG_UI = new URLSearchParams(window.location.search).get('debug') === '1';
 
   function setBpAdjustStatus(text, { stickyMs = 0 } = {}) {
@@ -7521,6 +7526,14 @@
       }
 
       function updateBpAdjustButtons() {
+        if (bpAdjustLocked && bpAdjustLockedSince && Date.now() - bpAdjustLockedSince > BP_ADJUST_LOCK_TIMEOUT_MS) {
+          bpAdjustLocked = false;
+          bpPendingRequestId = null;
+          bpAdjustLockedSince = 0;
+          if (!shouldRespectBpAdjustSticky()) {
+            setBpAdjustStatus('等待 VPS ACK 超时，已自动解锁（可重新下发）', { stickyMs: 30_000 });
+          }
+        }
         const disabled = bpAdjustLocked;
         [bpAdjustAddButton, bpAdjustReduceButton].forEach((button) => {
           if (button) {
@@ -7565,7 +7578,8 @@
 
   const rawMagnitude = parseFloat(bpAdjustSizeInput?.value ?? '1');
         const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : 1;
-        bpAdjustLocked = true;
+  bpAdjustLocked = true;
+  bpAdjustLockedSince = Date.now();
         updateBpAdjustButtons();
         setBpAdjustStatus(`提交${describeAdjustmentAction(action)}请求…`, { stickyMs: 8000 });
 
@@ -7623,6 +7637,7 @@
           await refreshMetrics();
         } catch (error) {
           bpAdjustLocked = false;
+          bpAdjustLockedSince = 0;
           updateBpAdjustButtons();
           setBpAdjustStatus(`请求失败：${error}`, { stickyMs: 30_000 });
         }
@@ -7845,11 +7860,40 @@
         // transfer_internal has its own panel/history fetch; don‘t mix it into adjust history.
 
         // Determine lock state
+        // Coordinator/monitor semantics refresher:
+        // - coordinator may keep adj.status == 'pending' for broadcast requests until finalization
+        // - monitor may send interim updates (e.g. status='running' with extra.progress)
+        // So we consider an adjustment "active" when it hasn't reached a terminal state.
+        const isTerminal = (st) => ['completed', 'succeeded', 'success', 'failed', 'cancelled', 'canceled', 'terminated', 'timedout', 'timeout'].includes(st);
+        const isActiveAgent = (agent) => {
+          if (!agent || typeof agent !== 'object') return false;
+          const st = normalizeStatus(agent.status);
+          if (!st) return false;
+          if (st === 'running') return true;
+          if (st === 'in_progress' || st === 'pending') return true;
+          // If progress payload exists, it's definitely in-flight.
+          const extra = agent.extra;
+          if (extra && typeof extra === 'object' && extra.progress) return true;
+          return false;
+        };
+
         let locked = false;
         let active = null;
         for (const adj of adjustments) {
           const st = normalizeStatus(adj?.overall_status ?? adj?.status);
-          if (['pending', 'in_progress'].includes(st)) {
+          const agents = Array.isArray(adj?.agents) ? adj.agents : [];
+          const hasActiveAgent = agents.some(isActiveAgent);
+          const hasTerminalAgent = agents.some((a) => isTerminal(normalizeStatus(a?.status)));
+
+          // Primary: if any agent is still active, this request is active.
+          if (hasActiveAgent) {
+            active = adj;
+            break;
+          }
+
+          // Fallback: when status says pending/in_progress but we have no agent detail,
+          // treat it as active (classic behavior).
+          if (['pending', 'in_progress'].includes(st) && !hasTerminalAgent) {
             active = adj;
             break;
           }
@@ -7858,7 +7902,7 @@
           locked = true;
           bpPendingRequestId = active.request_id || null;
           const agents = Array.isArray(active.agents) ? active.agents : [];
-          const pendingAgents = agents.filter((a) => normalizeStatus(a?.status) === 'pending');
+          const pendingAgents = agents.filter((a) => ['pending', 'in_progress', 'running'].includes(normalizeStatus(a?.status)));
           const scopeText = describeSymbolScope(active?.target_symbols ?? active?.symbols);
           if (!shouldRespectBpAdjustSticky()) {
             setBpAdjustStatus(`等待 ${pendingAgents.length}/${agents.length || '-'} 个 VPS ACK（${scopeText}）`);
@@ -7885,6 +7929,7 @@
         bpAdjustLocked = locked;
         if (!locked) {
           bpPendingRequestId = null;
+          bpAdjustLockedSince = 0;
         }
         updateBpAdjustButtons();
 
