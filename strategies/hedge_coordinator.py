@@ -141,9 +141,28 @@ def _bp_env_diagnostics() -> Dict[str, Any]:
 
 PERSISTED_PARA_AUTO_BALANCE_FILE = Path(__file__).with_name(".para_auto_balance_config.json")
 BP_VOLUME_HISTORY_FILE = Path(__file__).with_name(".bp_volume_history.json")
+BP_ADJUSTMENTS_HISTORY_FILE = Path(__file__).with_name(".bp_adjustments_history.json")
 DASHBOARD_PATH = Path(__file__).with_name("hedge_dashboard.html")
 SERVER_PID = os.getpid()
 SERVER_INSTANCE_ID = secrets.token_hex(8)
+
+
+def _load_json_file(path: Path, *, default: Any) -> Any:
+    try:
+        if not path.exists():
+            return default
+        raw = path.read_text(encoding="utf-8")
+        if not raw.strip():
+            return default
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 # HistoricalPriceFetcher removed (Binance klines dependency removed).
 LOGIN_TEMPLATE = """<!DOCTYPE html>
@@ -2700,6 +2719,16 @@ class CoordinatorApp:
         # Para/global alert scopes are controlled by CLI; do not force inheritance here.
         self._adjustments = GrvtAdjustmentManager()
         self._backpack_adjustments = BackpackAdjustmentManager()
+
+        # Persisted Backpack history (adjust + internal transfer). We keep a small
+        # server-side list so the dashboard can show history even after restart.
+        self._bp_adjustments_history_limit: int = 500
+        loaded_history = _load_json_file(BP_ADJUSTMENTS_HISTORY_FILE, default=[])
+        self._bp_adjustments_history: List[Dict[str, Any]] = (
+            loaded_history if isinstance(loaded_history, list) else []
+        )
+        if len(self._bp_adjustments_history) > self._bp_adjustments_history_limit:
+            self._bp_adjustments_history = self._bp_adjustments_history[: self._bp_adjustments_history_limit]
         self._dashboard_username = (dashboard_username or "").strip()
         self._dashboard_password = (dashboard_password or "").strip()
         self._session_cookie: str = "hedge_session"
@@ -3807,8 +3836,16 @@ class CoordinatorApp:
 
     async def handle_backpack_adjustments_list(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
-        payload = await self._backpack_adjustments.list_all()
-        return web.json_response({"adjustments": payload})
+        limit_raw = request.query.get("limit")
+        limit = 10
+        if limit_raw is not None and str(limit_raw).strip():
+            try:
+                limit = int(str(limit_raw).strip())
+            except (TypeError, ValueError):
+                raise web.HTTPBadRequest(text="limit must be an integer")
+        limit = max(1, min(200, limit))
+        payload = list(self._bp_adjustments_history[:limit])
+        return web.json_response({"adjustments": payload, "limit": limit, "source": "persisted"})
 
     async def handle_backpack_adjust_create(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
@@ -3888,6 +3925,26 @@ class CoordinatorApp:
             symbols=symbols,
             payload=payload_dict,
         )
+
+        # Persist to local history immediately (status will be updated on ack).
+        entry: Dict[str, Any] = {
+            "request_id": adj.request_id,
+            "created_at": getattr(adj, "created_at", None),
+            "action": action,
+            "magnitude": magnitude,
+            "target_symbols": symbols,
+            "symbols": symbols,
+            "agent_id": agent_id or "all",
+            "overall_status": "queued",
+            "status": "queued",
+            "agents": [],
+            "payload": payload_dict,
+        }
+        self._bp_adjustments_history.insert(0, entry)
+        if len(self._bp_adjustments_history) > self._bp_adjustments_history_limit:
+            self._bp_adjustments_history = self._bp_adjustments_history[: self._bp_adjustments_history_limit]
+        _atomic_write_json(BP_ADJUSTMENTS_HISTORY_FILE, self._bp_adjustments_history)
+
         # Align response shape with PARA/GRVT adjustments.
         return web.json_response({"request": {"request_id": adj.request_id, "status": "queued"}})
 
@@ -3921,6 +3978,48 @@ class CoordinatorApp:
         )
         if not ok:
             raise web.HTTPNotFound(text="unknown request_id")
+
+        # Update persisted history entry.
+        try:
+            for item in self._bp_adjustments_history:
+                if str(item.get("request_id") or "") != request_id:
+                    continue
+                agents = item.get("agents")
+                if not isinstance(agents, list):
+                    agents = []
+                # upsert agent ack
+                found: Optional[Dict[str, Any]] = None
+                for row in agents:
+                    if isinstance(row, dict) and str(row.get("agent_id") or "") == agent_id:
+                        found = row  # type: ignore[assignment]
+                        break
+                if found is None:
+                    found = {"agent_id": agent_id}
+                    agents.append(found)
+                found["status"] = status
+                if note is not None:
+                    found["note"] = note
+                if extra:
+                    found["extra"] = {str(k): v for k, v in extra.items()}
+                item["agents"] = agents
+
+                # recompute overall status (best-effort)
+                statuses = [str(a.get("status") or "").lower() for a in agents if isinstance(a, dict)]
+                if statuses and all(s in {"completed", "succeeded", "success", "ok"} for s in statuses):
+                    overall = "completed"
+                elif any(s in {"failed", "error"} for s in statuses):
+                    overall = "failed"
+                elif any(s in {"pending", "in_progress", "queued"} for s in statuses):
+                    overall = "in_progress"
+                else:
+                    overall = item.get("overall_status") or item.get("status") or "in_progress"
+                item["overall_status"] = overall
+                item["status"] = overall
+                break
+            _atomic_write_json(BP_ADJUSTMENTS_HISTORY_FILE, self._bp_adjustments_history)
+        except Exception:
+            # Keep ack path resilient; history persistence is best-effort.
+            pass
         return web.json_response({"ok": True})
 
     async def handle_control_update(self, request: web.Request) -> web.Response:

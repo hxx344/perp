@@ -2668,6 +2668,24 @@
             </div>
             <p class="grvt-adjust-status" id="bp-transfer-status">等待指令…</p>
           </div>
+
+          <div class="grvt-adjust-history" style="margin-top: 0.5rem;">
+            <h4 style="margin: 0 0 0.5rem; font-size: 0.95rem;">内转历史（最新 10 条）</h4>
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>From</th>
+                  <th>To</th>
+                  <th>币种</th>
+                  <th>数量</th>
+                  <th>状态</th>
+                  <th>备注</th>
+                </tr>
+              </thead>
+              <tbody id="bp-transfer-history"><tr><td colspan="7">暂无记录</td></tr></tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -3370,6 +3388,7 @@
   const bpAdjustReduceButton = document.getElementById('bp-adjust-reduce');
   const bpAdjustStatus = document.getElementById('bp-adjust-status');
   const bpAdjustHistoryBody = document.getElementById('bp-adjust-history');
+  const bpTransferHistoryBody = document.getElementById('bp-transfer-history');
 
   const paraAccountCount = document.getElementById('para-account-count');
   const paraEmpty = document.getElementById('para-empty');
@@ -7249,7 +7268,7 @@
 
       async function fetchBackpackAdjustments() {
         try {
-          const response = await fetch('/backpack/adjustments', {
+          const response = await fetch('/backpack/adjustments?limit=10', {
             method: 'GET',
             credentials: 'same-origin',
           });
@@ -7403,6 +7422,52 @@
         const transfers = (Array.isArray(adjustments) ? adjustments : []).filter((a) => {
           return String(a?.action || '').toLowerCase() === 'transfer_internal';
         });
+
+        // Render history table (latest 10)
+        try {
+          if (bpTransferHistoryBody) {
+            if (!transfers.length) {
+              bpTransferHistoryBody.innerHTML = '<tr><td colspan="7">暂无记录</td></tr>';
+            } else {
+              const safeText = (value) => {
+                if (value === undefined || value === null) {
+                  return '--';
+                }
+                const text = String(value).trim();
+                return text ? text : '--';
+              };
+              const rows = [];
+              for (const t of transfers.slice(0, 10)) {
+                const createdText = formatTimestamp(t.created_at) ?? '--';
+                const st = safeText(t.overall_status ?? t.status);
+                const from = safeText(t.agent_id);
+                const toAddr = safeText(t?.payload?.address);
+                const sym = safeText(
+                  (Array.isArray(t?.symbols) && t.symbols[0]) ||
+                    (Array.isArray(t?.target_symbols) && t.target_symbols[0]) ||
+                    t?.symbol
+                );
+                const qty = safeText(t.magnitude);
+                const note = safeText(t.note);
+                rows.push(`
+                  <tr>
+                    <td>${escapeHtml(createdText)}</td>
+                    <td>${escapeHtml(from)}</td>
+                    <td>${escapeHtml(toAddr)}</td>
+                    <td>${escapeHtml(sym)}</td>
+                    <td>${escapeHtml(qty)}</td>
+                    <td>${escapeHtml(st)}</td>
+                    <td>${escapeHtml(note)}</td>
+                  </tr>
+                `);
+              }
+              bpTransferHistoryBody.innerHTML = rows.join('');
+            }
+          }
+        } catch (_) {
+          // ignore
+        }
+
         if (!transfers.length) {
           setBpTransferStatus('等待指令…');
           return;
