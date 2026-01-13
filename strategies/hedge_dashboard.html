@@ -6693,6 +6693,53 @@
             }
           }
 
+          function renderBpRiskHistory(entries) {
+            if (!bpRiskHistoryBody || !bpRiskHistoryEmpty) {
+              return;
+            }
+            const filtered = Array.isArray(entries)
+              ? entries.filter((entry) => String(entry?.kind || '').toLowerCase() === 'bp_risk')
+              : [];
+
+            bpRiskHistoryBody.innerHTML = '';
+            if (!filtered.length) {
+              bpRiskHistoryEmpty.classList.remove('hidden');
+              if (bpRiskHistoryStatus) {
+                bpRiskHistoryStatus.textContent = '暂无告警';
+              }
+              return;
+            }
+            bpRiskHistoryEmpty.classList.add('hidden');
+
+            const fragment = document.createDocumentFragment();
+            for (const entry of filtered) {
+              const row = document.createElement('tr');
+              const timeText = entry?.timestamp ? formatTimestamp(entry.timestamp) : '--';
+              const sourceText = String(entry?.source || '--');
+              const accountLabel = String(entry?.account_label || '--');
+              const agentId = String(entry?.agent_id || '');
+              const agentLabel = agentId ? ` (${agentId})` : '';
+              const ratioText = Number.isFinite(Number(entry?.ratio_percent))
+                ? `${Number(entry.ratio_percent).toFixed(1)}%`
+                : (Number.isFinite(Number(entry?.ratio)) ? `${(Number(entry.ratio) * 100).toFixed(1)}%` : '--%');
+              const baseLabel = String(entry?.base_label || '--');
+              const baseText = String(entry?.base_value || '--');
+              const lossText = `${String(entry?.loss_value || '--')} / ${baseLabel} ${baseText}`;
+              row.innerHTML = `
+                <td>${escapeHtml(timeText)}</td>
+                <td>${escapeHtml(sourceText)}</td>
+                <td>${escapeHtml(accountLabel + agentLabel)}</td>
+                <td>${escapeHtml(ratioText)}</td>
+                <td style="white-space: pre-line;">${escapeHtml(lossText)}</td>
+              `;
+              fragment.appendChild(row);
+            }
+            bpRiskHistoryBody.appendChild(fragment);
+            if (bpRiskHistoryStatus) {
+              bpRiskHistoryStatus.textContent = `已加载 ${filtered.length} 条告警（Backpack）`;
+            }
+          }
+
       async function loadRiskHistory({ silent = false } = {}) {
         if (riskHistoryBusy) {
           return;
@@ -6717,6 +6764,8 @@
           renderRiskHistory(riskHistoryEntries);
           paraRiskHistoryEntries = riskHistoryEntries;
           renderParaRiskHistory(paraRiskHistoryEntries);
+          bpRiskHistoryEntries = riskHistoryEntries;
+          renderBpRiskHistory(bpRiskHistoryEntries);
           lastRiskHistoryFetch = performance.now();
           if (riskHistoryStatus) {
             riskHistoryStatus.textContent = `已加载 ${riskHistoryEntries.length} 条告警`;
@@ -6732,12 +6781,23 @@
               ? `已加载 ${paraCount} 条告警（PARA）`
               : '暂无告警';
           }
+          if (bpRiskHistoryStatus) {
+            const bpCount = Array.isArray(bpRiskHistoryEntries)
+              ? bpRiskHistoryEntries.filter((entry) => String(entry?.kind || '').toLowerCase() === 'bp_risk').length
+              : 0;
+            bpRiskHistoryStatus.textContent = bpCount
+              ? `已加载 ${bpCount} 条告警（Backpack）`
+              : '暂无告警';
+          }
         } catch (error) {
           if (riskHistoryStatus) {
             riskHistoryStatus.textContent = `读取失败：${error}`;
           }
           if (paraRiskHistoryStatus) {
             paraRiskHistoryStatus.textContent = `读取失败：${error}`;
+          }
+          if (bpRiskHistoryStatus) {
+            bpRiskHistoryStatus.textContent = `读取失败：${error}`;
           }
         } finally {
           riskHistoryBusy = false;
