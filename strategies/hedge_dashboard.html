@@ -10856,11 +10856,15 @@
                     <th>Entry</th>
                     <th>Mark</th>
                     <th>PnL</th>
+                    <th>Init Margin</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
               `;
               const body = table.querySelector('tbody');
+              // Maintain per-account totals for a maintenance ratio badge.
+              // Per openapi_bp.json: positions can include imf/mmf and netExposureNotional.
+              let bpMaintenanceRequirementTotal = 0;
               for (const position of positionsList) {
                 const symbol = position?.symbol ?? position?.s ?? '--';
                 const netQty = parseDecimal(position?.net_size ?? position?.netQuantity ?? position?.q);
@@ -10870,6 +10874,16 @@
                 const side = Number.isFinite(netQty)
                   ? (netQty >= 0 ? 'LONG' : 'SHORT')
                   : (position?.side ? String(position.side).toUpperCase() : '—');
+
+                // Initial margin (absolute) = notional * imf (openapi: FuturePositionWithMargin.imf)
+                const bpNotional = parseDecimal(position?.netExposureNotional ?? position?.notional ?? position?.net_exposure_notional ?? position?.n);
+                const bpImf = parseDecimal(position?.imf ?? position?.initialMarginFraction ?? position?.f);
+                const bpMmf = parseDecimal(position?.mmf ?? position?.maintenanceMarginFraction ?? position?.m);
+                const bpInitialMargin = (Number.isFinite(bpNotional) && Number.isFinite(bpImf)) ? Math.abs(bpNotional * bpImf) : null;
+                if (Number.isFinite(bpNotional) && Number.isFinite(bpMmf)) {
+                  bpMaintenanceRequirementTotal += Math.abs(bpNotional * bpMmf);
+                }
+
                 const row = document.createElement('tr');
                 row.innerHTML = `
                   <td>${escapeHtml(String(symbol))}</td>
@@ -10878,10 +10892,33 @@
                   <td>${escapeHtml(Number.isFinite(entryPx) ? formatDecimal(entryPx, 4) : '--')}</td>
                   <td>${escapeHtml(Number.isFinite(markPx) ? formatDecimal(markPx, 4) : '--')}</td>
                   <td>${escapeHtml(Number.isFinite(pnl) ? formatDecimal(pnl, 6) : '--')}</td>
+                  <td>${escapeHtml(Number.isFinite(bpInitialMargin) ? numberFormatter.format(bpInitialMargin) : '--')}</td>
                 `;
                 body.appendChild(row);
               }
               card.appendChild(table);
+
+              // Update maintenance ratio badge for Backpack cards.
+              try {
+                const maintenanceBadge = card.querySelector('[data-metric="maintenance"] .maintenance-ratio');
+                if (maintenanceBadge) {
+                  const ratioBaseValue = Number.isFinite(entry.equity) && entry.equity > 0
+                    ? entry.equity
+                    : Number.isFinite(entry.wallet) && entry.wallet > 0
+                      ? entry.wallet
+                      : null;
+                  if (ratioBaseValue && Number.isFinite(bpMaintenanceRequirementTotal) && bpMaintenanceRequirementTotal >= 0) {
+                    const ratio = bpMaintenanceRequirementTotal / ratioBaseValue;
+                    maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
+                    maintenanceBadge.title = `Σ(Maint req) ${numberFormatter.format(bpMaintenanceRequirementTotal)} / Base ${numberFormatter.format(ratioBaseValue)}`;
+                  } else {
+                    maintenanceBadge.textContent = '—';
+                    maintenanceBadge.removeAttribute('title');
+                  }
+                }
+              } catch (_) {
+                // ignore
+              }
             }
 
             bpAccountGrid.appendChild(card);
