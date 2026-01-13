@@ -435,6 +435,21 @@ class BackpackAccountMonitor:
         if not symbol:
             raise ValueError("Unable to resolve symbol for adjustment request")
 
+        def _normalize_bp_perp_symbol(raw: str) -> str:
+            """Normalize common dashboard symbols to Backpack Strategy API format.
+
+            Dashboard often uses e.g. BTC-USDC-PERP, while StrategyCreate expects
+            BTC_USDC_PERP (underscores). Keep this conservative and only convert
+            obvious PERP patterns.
+            """
+            s = str(raw or "").strip()
+            if not s:
+                return s
+            if "-" in s and s.upper().endswith("-PERP"):
+                # BTC-USDC-PERP -> BTC_USDC_PERP
+                return s.upper().replace("-", "_").replace("_PERP", "_PERP")
+            return s
+
         # Side inference: keep it super simple here.
         if action == "add":
             side = "buy"
@@ -457,6 +472,9 @@ class BackpackAccountMonitor:
 
         # Native TWAP via Strategy API (Scheduled strategy).
         if order_mode == "twap" or algo_type == "TWAP":
+            # Strategy API uses a different MarketSymbol format for PERP markets.
+            # Example: BTC-USDC-PERP (dashboard) -> BTC_USDC_PERP (strategy).
+            strategy_symbol = _normalize_bp_perp_symbol(symbol)
             duration_ms = int(payload_cfg.get("duration") or payload_cfg.get("duration_ms") or 0)
             interval_ms = int(payload_cfg.get("interval") or payload_cfg.get("interval_ms") or 0)
             if duration_ms <= 0:
@@ -474,18 +492,43 @@ class BackpackAccountMonitor:
             broker_id = payload_cfg.get("brokerId")
             window_ms = int(payload_cfg.get("window_ms") or payload_cfg.get("window") or 5000)
 
-            created = self._place_twap_strategy(
-                symbol=symbol,
-                side=side,
-                quantity=magnitude,
-                duration_ms=duration_ms,
-                interval_ms=interval_ms,
-                reduce_only=reduce_only,
-                randomized_interval_quantity=randomized,
-                client_strategy_id=int(client_strategy_id) if client_strategy_id is not None else None,
-                window_ms=window_ms,
-                broker_id=int(broker_id) if broker_id is not None else None,
-            )
+            try:
+                created = self._place_twap_strategy(
+                    symbol=strategy_symbol,
+                    side=side,
+                    quantity=magnitude,
+                    duration_ms=duration_ms,
+                    interval_ms=interval_ms,
+                    reduce_only=reduce_only,
+                    randomized_interval_quantity=randomized,
+                    client_strategy_id=int(client_strategy_id) if client_strategy_id is not None else None,
+                    window_ms=window_ms,
+                    broker_id=int(broker_id) if broker_id is not None else None,
+                )
+            except Exception as exc:
+                # Some Backpack deployments reject PERP symbols on StrategyCreate (MarketSymbol parsing).
+                # To keep the adjustment path functional, fall back to a MARKET order and surface
+                # a clear note so operators can decide whether to change symbol mapping or disable TWAP.
+                msg = str(exc)
+                if "Invalid market symbol" in msg or "MarketSymbol" in msg or "strategyCreate" in msg:
+                    order = self._place_market_order(symbol, side, magnitude)
+                    order_id = None
+                    if isinstance(order, dict):
+                        order_id = order.get("id") or order.get("order_id")
+                    extra_fb: Dict[str, Any] = {
+                        "order_type": "MARKET",
+                        "fallback": "twap_strategy_rejected",
+                        "duration_ms": duration_ms,
+                        "interval_ms": interval_ms,
+                    }
+                    if order_id is not None:
+                        extra_fb["order_id"] = str(order_id)
+                    note_fb = (
+                        f"TWAP strategy rejected; fallback MARKET. {action} {symbol} {side} qty={_decimal_to_str(magnitude) or magnitude}; "
+                        f"duration_ms={duration_ms} interval_ms={interval_ms}; err={msg}"
+                    )
+                    return "succeeded", note_fb, extra_fb
+                raise
 
             # Strategy id can be nested depending on discriminator; keep it defensive.
             strategy_id = created.get("id")
