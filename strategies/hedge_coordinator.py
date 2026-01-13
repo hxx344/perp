@@ -1468,6 +1468,7 @@ class HedgeCoordinator:
         worst_agent_id: Optional[str] = None
         worst_account_label: Optional[str] = None
         max_initial_margin: Optional[Decimal] = None
+        im_source: Optional[str] = None
         any_seen = False
         latest_update: Optional[float] = None
 
@@ -1519,6 +1520,7 @@ class HedgeCoordinator:
             # Dashboard uses max(IM) across accounts/sources; we approximate by scanning
             # summary/accounts/positions-ish fields when available.
             candidate_im: Optional[Decimal] = None
+            candidate_im_source: Optional[str] = None
             if isinstance(summary, dict):
                 margin_block = summary.get("margin")
                 if isinstance(margin_block, dict):
@@ -1527,12 +1529,16 @@ class HedgeCoordinator:
                         or self._decimal_from(margin_block.get("initialMarginTotal"))
                         or self._decimal_from(margin_block.get("initial_margin"))
                     )
+                    if candidate_im is not None:
+                        candidate_im_source = "summary.margin"
                 if candidate_im is None:
                     candidate_im = (
                         self._decimal_from(summary.get("initialMargin"))
                         or self._decimal_from(summary.get("initialMarginTotal"))
                         or self._decimal_from(summary.get("initial_margin"))
                     )
+                    if candidate_im is not None:
+                        candidate_im_source = "summary"
             if candidate_im is None:
                 accounts = bp.get("accounts")
                 if isinstance(accounts, list) and accounts:
@@ -1552,6 +1558,7 @@ class HedgeCoordinator:
                             continue
                         if candidate_im is None or im_val > candidate_im:
                             candidate_im = im_val
+                            candidate_im_source = "accounts"
 
             # Dashboard also supports summary.initial_margin_requirement as a fallback.
             if candidate_im is None and isinstance(summary, dict):
@@ -1560,10 +1567,20 @@ class HedgeCoordinator:
                     or self._decimal_from(summary.get("initialMarginRequirement"))
                     or self._decimal_from(summary.get("initialMarginReq"))
                 )
+                if candidate_im is not None:
+                    candidate_im_source = "summary.initial_margin_requirement"
+
+            # Backpack monitor payload: user-confirmed IM stored as collateral.netEquityLocked.
+            # When available, treat it as IM for Feishu risk push consumption.
+            if candidate_im is None and isinstance(collateral, dict):
+                candidate_im = self._decimal_from(collateral.get("netEquityLocked"))
+                if candidate_im is not None:
+                    candidate_im_source = "collateral.netEquityLocked"
 
             if candidate_im is not None:
                 if max_initial_margin is None or candidate_im > max_initial_margin:
                     max_initial_margin = candidate_im
+                    im_source = candidate_im_source
 
             # Account label (best-effort): first account name/id.
             account_label = "-"
@@ -1633,6 +1650,7 @@ class HedgeCoordinator:
             "worst_agent_id": worst_agent_id,
             "worst_account_label": worst_account_label,
             "max_initial_margin": max_initial_margin,
+            "im_source": im_source,
             "risk_capacity_raw": raw_capacity if raw_capacity is not None and raw_capacity > 0 else None,
             "risk_capacity_buffered": effective_capacity if effective_capacity is not None and effective_capacity > 0 else None,
             "buffer_note": buffer_note,
