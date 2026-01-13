@@ -7896,6 +7896,23 @@
         const adjustments = Array.isArray(payload?.adjustments) ? payload.adjustments : [];
         const normalizeStatus = (value) => String(value || '').toLowerCase();
 
+        // Coordinator/monitor semantics refresher:
+        // - coordinator may keep adj.status == 'pending' for broadcast requests until finalization
+        // - monitor may send interim updates (e.g. status='running' with extra.progress)
+        // So we consider an adjustment "active" when it hasn't reached a terminal state.
+        const isTerminal = (st) => ['completed', 'succeeded', 'success', 'failed', 'cancelled', 'canceled', 'terminated', 'timedout', 'timeout'].includes(st);
+        const isActiveAgent = (agent) => {
+          if (!agent || typeof agent !== 'object') return false;
+          const st = normalizeStatus(agent.status);
+          if (!st) return false;
+          if (st === 'running') return true;
+          if (st === 'in_progress' || st === 'pending') return true;
+          // If progress payload exists, it's definitely in-flight.
+          const extra = agent.extra;
+          if (extra && typeof extra === 'object' && extra.progress) return true;
+          return false;
+        };
+
         // Prefer a per-agent lock (like PARA monitor behavior): allow multiple TWAPs to
         // exist concurrently as long as *this* VPS (agent) isn't already running one.
         // The dashboard doesn't always know the viewer's agent_id; we can usually infer it
@@ -7943,27 +7960,10 @@
 
         // transfer_internal has its own panel/history fetch; don‘t mix it into adjust history.
 
-  // Determine lock state
-        // Coordinator/monitor semantics refresher:
-        // - coordinator may keep adj.status == 'pending' for broadcast requests until finalization
-        // - monitor may send interim updates (e.g. status='running' with extra.progress)
-        // So we consider an adjustment "active" when it hasn't reached a terminal state.
-        const isTerminal = (st) => ['completed', 'succeeded', 'success', 'failed', 'cancelled', 'canceled', 'terminated', 'timedout', 'timeout'].includes(st);
-        const isActiveAgent = (agent) => {
-          if (!agent || typeof agent !== 'object') return false;
-          const st = normalizeStatus(agent.status);
-          if (!st) return false;
-          if (st === 'running') return true;
-          if (st === 'in_progress' || st === 'pending') return true;
-          // If progress payload exists, it's definitely in-flight.
-          const extra = agent.extra;
-          if (extra && typeof extra === 'object' && extra.progress) return true;
-          return false;
-        };
-
-  // New behavior: do NOT globally lock the agent when it already has an active TWAP.
-  // We only prevent same-symbol concurrency (checked in sendBpAdjustment).
-  let locked = false;
+        // Determine lock state
+        // New behavior: do NOT globally lock the agent when it already has an active TWAP.
+        // We only prevent same-symbol concurrency (checked in sendBpAdjustment).
+        let locked = false;
         let active = null;
         for (const adj of adjustments) {
           const st = normalizeStatus(adj?.overall_status ?? adj?.status);
