@@ -4235,7 +4235,10 @@ class CoordinatorApp:
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="adjust payload must be an object")
 
-        # Dashboard may broadcast to all backpack monitors; allow agent_id to be optional.
+        # Dashboard may broadcast to all backpack monitors, but for safety we should NOT
+        # default to "all" when agent_id is omitted. The dashboard UI (PARA-style)
+        # typically operates on a selected agent context; auto-broadcast leads to
+        # duplicate requests and repeated TWAP creation across VPS.
         agent_id = str(body.get("agent_id") or "").strip() or None
         action = str(body.get("action") or "").strip().lower()
         if action not in {"add", "reduce", "transfer_internal"}:
@@ -4297,8 +4300,36 @@ class CoordinatorApp:
         if "duration_ms" in payload_dict and "interval_ms" not in payload_dict:
             payload_dict.setdefault("interval_ms", 5_000)
 
+        # If agent_id is not provided, attempt to infer the current agent from
+        # query param (used by some dashboards) or from the latest coordinator snapshot.
+        resolved_agent_id = agent_id
+        if not resolved_agent_id:
+            with suppress(Exception):
+                qp_agent = (request.rel_url.query.get("agent_id") or "").strip()
+                if qp_agent:
+                    resolved_agent_id = qp_agent
+        if not resolved_agent_id:
+            with suppress(Exception):
+                snap = await self._coordinator.snapshot()
+                agents_block = snap.get("agents")
+                if isinstance(agents_block, dict):
+                    # Prefer a single Backpack agent if we can unambiguously pick one.
+                    candidate_ids = []
+                    for k, v in agents_block.items():
+                        if not isinstance(k, str):
+                            continue
+                        if not isinstance(v, dict):
+                            continue
+                        if "backpack_accounts" in v:
+                            candidate_ids.append(k)
+                    if len(candidate_ids) == 1:
+                        resolved_agent_id = candidate_ids[0]
+
+        if not resolved_agent_id:
+            raise web.HTTPBadRequest(text="agent_id is required (refuse to default to broadcast 'all')")
+
         adj = self._backpack_adjustments.create(
-            agent_id=agent_id or "all",
+            agent_id=resolved_agent_id,
             action=action,
             magnitude=magnitude,
             symbols=symbols,
@@ -4313,7 +4344,7 @@ class CoordinatorApp:
             "magnitude": magnitude,
             "target_symbols": symbols,
             "symbols": symbols,
-            "agent_id": agent_id or "all",
+            "agent_id": resolved_agent_id,
             "overall_status": "pending",
             "status": "pending",
             "agents": [],

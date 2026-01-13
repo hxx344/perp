@@ -3819,49 +3819,10 @@
     return true;
   }
 
-  function attachBpAdjustDebugHooks() {
-    // Capture-phase click hooks so we can detect clicks even if something
-    // prevents later bubbling handlers.
-    const bind = (button, actionLabel) => {
-      if (!button) {
-        return;
-      }
-      button.addEventListener(
-        'click',
-        (event) => {
-          // Immediate, observable feedback.
-          const disabled = !!button.disabled;
-          const locked = !!bpAdjustLocked;
-          setBpAdjustStatus(
-            `点击已捕获(${actionLabel}) · disabled=${disabled} · locked=${locked} · 将尝试发送请求…`,
-            { stickyMs: 15000 }
-          );
-          if (DEBUG_UI) {
-            // eslint-disable-next-line no-alert
-            alert(`bp-adjust click captured: ${actionLabel}\ndisabled=${disabled}\nlocked=${locked}`);
-          }
-
-          // Best-effort ensure the request is sent.
-          // If the normal handler is also attached, sendBpAdjustment will see
-          // bpAdjustLocked and no-op, so it's safe.
-          try {
-            const promise = sendBpAdjustment(actionLabel);
-            if (promise && typeof promise.catch === 'function') {
-              promise.catch((e) => {
-                setBpAdjustStatus(`sendBpAdjustment 异步异常：${e}`, { stickyMs: 30000 });
-              });
-            }
-          } catch (e) {
-            setBpAdjustStatus(`sendBpAdjustment 同步异常：${e}`, { stickyMs: 30000 });
-          }
-        },
-        true
-      );
-    };
-
-    bind(bpAdjustAddButton, 'add');
-    bind(bpAdjustReduceButton, 'reduce');
-  }
+  // NOTE: We intentionally removed the old Backpack adjust debug hooks.
+  // They used capture-phase listeners and also called sendBpAdjustment(),
+  // which caused duplicate submissions (one click => two POSTs) once we
+  // switched to "submit success unlock" semantics.
   let grvtTransferLocked = false;
   let grvtTransferOptionsKey = '';
   const grvtTransferDefaults = new Map();
@@ -11909,7 +11870,6 @@
 
       // Backpack adjust UI sanity check (ensures clicks are observable).
       validateBpAdjustDom();
-      attachBpAdjustDebugHooks();
       const selectAlternativeTarget = () => {
         if (!grvtTransferTargetSelect || !grvtTransferSourceSelect) {
           return;
