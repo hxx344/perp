@@ -42,7 +42,7 @@ from datetime import datetime, timezone
 from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.parse import quote_plus
@@ -4191,12 +4191,16 @@ class CoordinatorApp:
                 return
             if measurement.ratio < cfg.threshold_ratio:
                 return
-            requested_amount = measurement.transfer_amount
+            # Internal transfer amount: keep 2 decimal places (USDC cents) for predictability.
+            # We round down to avoid requesting more than computed/available.
+            requested_amount = measurement.transfer_amount.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
             if requested_amount < cfg.min_transfer:
                 return
             if cfg.max_transfer is not None and requested_amount > cfg.max_transfer:
-                requested_amount = cfg.max_transfer
+                requested_amount = cfg.max_transfer.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
             if requested_amount < cfg.min_transfer:
+                return
+            if requested_amount <= 0:
                 return
 
             self._bp_auto_balance_status["pending"] = True
