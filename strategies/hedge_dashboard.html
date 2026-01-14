@@ -2606,6 +2606,11 @@
             <div class="value" id="bp-avg-maint">--</div>
             <p class="summary-sub">(Σ maint req / Σ equity)</p>
           </article>
+          <article class="card grvt-summary-card" id="bp-reduce-suggestion-card">
+            <h3>减仓建议</h3>
+            <div class="value" id="bp-reduce-suggestion-main">--</div>
+            <p class="summary-sub" id="bp-reduce-suggestion-detail">等待账户与持仓数据…</p>
+          </article>
           <article class="card grvt-summary-card">
             <h3>Last Update</h3>
             <div class="value" id="bp-summary-time">--</div>
@@ -3092,6 +3097,114 @@
 
     function bpNormalizeSymbol(sym) {
       return String(sym || '').trim().toUpperCase();
+    }
+
+    // ---- Reduce suggestion (PARA/BP) ----
+    // The PARA panel historically shows a minimal paired-reduce hint.
+    // We reuse the same math for Backpack to keep the UX consistent.
+    //
+    // Contract (matches tests/test_para_reduce_suggestion_algorithm.py):
+    // - Exactly 2 accounts
+    // - worst account by nonFF total (total - ff_pnl)
+    // - L = abs(nonFFTotalWorst) if worst is losing else 0
+    // - allocate L across allowed symbols by negative pnl abs
+    // - reduceSize = absPosSize * (allocation / abs(symbolNegPnl))
+    // - headline: choose the symbol with max suggested size
+    function computeReduceSuggestionFromAccounts(accounts, {
+      allowedSymbols = ['BTC', 'ETH'],
+      ffSymbol = 'FF-USD',
+      messagePrefix = '',
+    } = {}) {
+      const baseRes = { ok: false, message: '' };
+      if (!Array.isArray(accounts) || accounts.length !== 2) {
+        return { ...baseRes, message: '需要恰好 2 个账户' };
+      }
+
+      const coerceNumber = (v) => {
+        if (v === null || v === undefined) return 0;
+        const n = Number(String(v).replace(/,/g, '').trim());
+        return Number.isFinite(n) ? n : 0;
+      };
+
+      const pack = (acct) => {
+        const totalRaw = coerceNumber(acct?.total);
+        const ffPnl = coerceNumber(acct?.ff_pnl);
+        const nonFfTotal = totalRaw - ffPnl;
+        const symbolPnl = (acct?.symbol_pnl && typeof acct.symbol_pnl === 'object') ? acct.symbol_pnl : {};
+        const symbolCap = (acct?.symbol_cap && typeof acct.symbol_cap === 'object') ? acct.symbol_cap : {};
+        return {
+          name: acct?.name || acct?.label || 'Account',
+          totalRaw,
+          ffPnl,
+          nonFfTotal,
+          symbolPnl,
+          symbolCap,
+        };
+      };
+
+      const a = pack(accounts[0]);
+      const b = pack(accounts[1]);
+      const worst = a.nonFfTotal <= b.nonFfTotal ? a : b;
+      if (worst.nonFfTotal >= 0) {
+        return { ok: true, message: '无需减仓' };
+      }
+
+      const L = Math.abs(worst.nonFfTotal);
+      const allowed = new Set((allowedSymbols || []).map((s) => String(s || '').trim().toUpperCase()).filter(Boolean));
+
+      const rows = [];
+      for (const [symRaw, pnlRaw] of Object.entries(worst.symbolPnl || {})) {
+        const sym = String(symRaw || '').trim().toUpperCase();
+        if (!sym) continue;
+        if (sym === String(ffSymbol || '').trim().toUpperCase()) continue;
+        if (allowed.size && !allowed.has(sym)) continue;
+
+        const pnl = coerceNumber(pnlRaw);
+        if (pnl >= 0) continue;
+        const cap = coerceNumber(worst.symbolCap?.[symRaw] ?? worst.symbolCap?.[sym]);
+        if (cap <= 0) continue;
+        rows.push({ symbol: sym, negAbs: Math.abs(pnl), cap });
+      }
+
+      if (!rows.length) {
+        return { ...baseRes, message: '缺少可计算的减仓候选（仅 BTC/ETH）' };
+      }
+
+      const totalNegAbs = rows.reduce((acc, r) => acc + r.negAbs, 0);
+      if (!(totalNegAbs > 0)) {
+        return { ...baseRes, message: '减仓候选数据异常' };
+      }
+
+      const computed = rows.map((r) => {
+        const allocation = L * r.negAbs / totalNegAbs;
+        const ratio = allocation / r.negAbs;
+        const size = Math.min(Math.max(r.cap * ratio, 0), r.cap);
+        return { ...r, allocation, size };
+      });
+
+      computed.sort((x, y) => y.size - x.size);
+      const best = computed[0];
+      const prefix = messagePrefix ? `${messagePrefix} ` : '';
+      const sizeText = bpFormatAtMost4(best.size);
+      return {
+        ok: true,
+        symbol: best.symbol,
+        size: best.size,
+        message: `${prefix}${best.symbol} 双边减仓 ${sizeText}${best.symbol}`,
+      };
+    }
+
+    // Backward-compatible wrapper referenced by older dashboard code.
+    function computeParaReduceSuggestion(accounts) {
+      return computeReduceSuggestionFromAccounts(accounts, { allowedSymbols: ['BTC', 'ETH'], ffSymbol: 'FF-USD' });
+    }
+
+    function computeBpReduceSuggestion(accounts) {
+      // Backpack follows PARA UX: only propose BTC/ETH paired reduce.
+      return computeReduceSuggestionFromAccounts(accounts, {
+        allowedSymbols: ['BTC', 'ETH'],
+        ffSymbol: 'FF-USD',
+      });
     }
     function bpResetMetricsUI() {
       bpVolumeBase.textContent = '--';
@@ -11470,6 +11583,8 @@
         const bpRiskLevel = document.getElementById('bp-risk-level');
         const bpRiskDetail = document.getElementById('bp-risk-detail');
         const bpAvgMaint = document.getElementById('bp-avg-maint');
+        const bpReduceSuggestionMain = document.getElementById('bp-reduce-suggestion-main');
+        const bpReduceSuggestionDetail = document.getElementById('bp-reduce-suggestion-detail');
         const bpSummaryTime = document.getElementById('bp-summary-time');
         const bpSummaryUpdated = document.getElementById('bp-summary-updated');
         const bpAccountGrid = document.getElementById('bp-account-grid');
@@ -11872,6 +11987,22 @@
             bpSummaryUpdated.textContent = (!sawAnyPositions && flattenedAccounts.length)
               ? `${baseText} · 未收到 positions（请确认已运行 backpack_account_monitor 并上报持仓）`
               : baseText;
+          }
+
+          // ---- Backpack reduce suggestion (BTC/ETH) ----
+          if (bpReduceSuggestionMain && bpReduceSuggestionDetail) {
+            const meaningfulAccounts = flattenedAccounts.filter((acc) => Array.isArray(acc.positions) && acc.positions.length);
+            const suggestion = computeBpReduceSuggestion(meaningfulAccounts.length ? meaningfulAccounts : flattenedAccounts);
+            if (suggestion?.ok) {
+              bpReduceSuggestionMain.textContent = suggestion.message || '--';
+              // Keep it minimal (single line), same as PARA.
+              bpReduceSuggestionDetail.textContent = '';
+              bpReduceSuggestionDetail.style.display = 'none';
+            } else {
+              bpReduceSuggestionMain.textContent = '—';
+              bpReduceSuggestionDetail.textContent = '';
+              bpReduceSuggestionDetail.style.display = 'none';
+            }
           }
 
           if (!bpAccountGrid) {
