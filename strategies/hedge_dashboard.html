@@ -11701,7 +11701,8 @@
               // already aggregated below for display, but keep local for ratios
             }
 
-            // Worst loss (negative pnl) against capacity.
+            // Worst loss numerator for Backpack Risk Level:
+            // use the worst per-account TOTAL (only if total < 0), i.e. max(abs(total)).
             const totalValue = Number(entry.total);
             if (Number.isFinite(totalValue) && totalValue < 0) {
               const absLoss = Math.abs(totalValue);
@@ -11994,16 +11995,15 @@
               }
               card.appendChild(table);
 
-              // Patch the displayed TOTAL to exactly match the table PnL sum.
+              // Keep data-layer total and displayed TOTAL consistent with the table PnL sum.
+              // This ensures Risk Level numerator (worst account total) matches what the user sees.
               try {
-                const totalDd = card.querySelector('.grvt-account-metrics > div:first-child dd');
-                if (totalDd) {
-                  if (bpTablePnlHasAny) {
+                if (bpTablePnlHasAny) {
+                  entry.total = bpTablePnlTotal;
+                  const totalDd = card.querySelector('.grvt-account-metrics > div:first-child dd');
+                  if (totalDd) {
                     totalDd.textContent = numberFormatter.format(bpTablePnlTotal);
                     totalDd.title = 'sum(PnL rows)';
-                  } else {
-                    totalDd.textContent = '--';
-                    totalDd.removeAttribute('title');
                   }
                 }
               } catch (_) {
