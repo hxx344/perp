@@ -3130,15 +3130,52 @@
         const totalRaw = coerceNumber(acct?.total);
         const ffPnl = coerceNumber(acct?.ff_pnl);
         const nonFfTotal = totalRaw - ffPnl;
+        // These maps are optional; Backpack snapshots typically don't provide them.
         const symbolPnl = (acct?.symbol_pnl && typeof acct.symbol_pnl === 'object') ? acct.symbol_pnl : {};
         const symbolCap = (acct?.symbol_cap && typeof acct.symbol_cap === 'object') ? acct.symbol_cap : {};
+
+        // Also accept per-position inputs and derive symbolCap from current exposure.
+        const positions = Array.isArray(acct?.positions) ? acct.positions : [];
+
+        const normalizeBaseAsset = (rawSymbol) => {
+          // Convert exchange-specific instrument to a base asset label.
+          // Examples:
+          // - "BTC-PERP" / "BTC-USDC" / "BTC_USDC" / "BTCUSDC" -> BTC
+          // - "XBT" -> BTC
+          // - "ETH-PERP" -> ETH
+          const text = normalizeSymbolLabel(rawSymbol);
+          if (!text) return '';
+          const upper = text.toUpperCase();
+          if (upper === 'XBT') return 'BTC';
+          // Split by common separators and take the first token.
+          const token = upper.split(/[-:\/]/)[0] || '';
+          // Handle concatenated forms like BTCUSDC / ETHUSDT.
+          if (token.length > 3) {
+            if (token.startsWith('BTC')) return 'BTC';
+            if (token.startsWith('ETH')) return 'ETH';
+          }
+          return token;
+        };
+
+        const derivedSymbolCap = {};
+        for (const pos of positions) {
+          const base = normalizeBaseAsset(pos?.symbol ?? pos?.s ?? pos?.instrument ?? pos?.market);
+          if (!base) continue;
+          const qtyRaw = pos?.netQuantity ?? pos?.netExposureQuantity ?? pos?.positionSize ?? pos?.size ?? pos?.qty ?? pos?.quantity ?? pos?.q;
+          const qty = coerceNumber(qtyRaw);
+          if (!Number.isFinite(qty) || qty === 0) continue;
+          const absQty = Math.abs(qty);
+          // If multiple instruments map to same base, sum abs to get a conservative cap.
+          derivedSymbolCap[base] = (derivedSymbolCap[base] || 0) + absQty;
+        }
+
         return {
           name: acct?.name || acct?.label || 'Account',
           totalRaw,
           ffPnl,
           nonFfTotal,
           symbolPnl,
-          symbolCap,
+          symbolCap: { ...derivedSymbolCap, ...symbolCap },
         };
       };
 
@@ -3152,9 +3189,25 @@
       const L = Math.abs(worst.nonFfTotal);
       const allowed = new Set((allowedSymbols || []).map((s) => String(s || '').trim().toUpperCase()).filter(Boolean));
 
+      const normalizeCandidateSymbol = (raw) => {
+        const base = (() => {
+          const text = normalizeSymbolLabel(raw);
+          if (!text) return '';
+          const upper = text.toUpperCase();
+          if (upper === 'XBT') return 'BTC';
+          const token = upper.split(/[-:\/]/)[0] || '';
+          if (token.length > 3) {
+            if (token.startsWith('BTC')) return 'BTC';
+            if (token.startsWith('ETH')) return 'ETH';
+          }
+          return token;
+        })();
+        return base;
+      };
+
       const rows = [];
       for (const [symRaw, pnlRaw] of Object.entries(worst.symbolPnl || {})) {
-        const sym = String(symRaw || '').trim().toUpperCase();
+        const sym = normalizeCandidateSymbol(symRaw);
         if (!sym) continue;
         if (sym === String(ffSymbol || '').trim().toUpperCase()) continue;
         if (allowed.size && !allowed.has(sym)) continue;
