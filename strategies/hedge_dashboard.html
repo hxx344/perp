@@ -11573,22 +11573,27 @@
                 const wallet = parseDecimal(obj.balance ?? obj.available_balance ?? obj.cash_balance);
 
                 // Per requirement: Backpack account total should be computed as sum(PnL) across positions.
-                // We treat pnlRealized as pnl when available (consistent with position table UX).
+                // Align with position table UX: prefer computed PnL = size*(mark-entry), fall back to upstream pnl.
                 const positionsForTotal = Array.isArray(obj.positions)
                   ? obj.positions
                   : snapshotPositions;
                 let computedTotal = 0;
                 let hasComputedTotal = false;
                 for (const p of (Array.isArray(positionsForTotal) ? positionsForTotal : [])) {
-                  const pnl = parseDecimal(
-                    p?.pnl
-                      ?? p?.pnlRealized
-                      ?? p?.pnl_realized
-                      ?? p?.realizedPnl
-                      ?? p?.unrealizedPnl
-                      ?? p?.pnlUnrealized
-                      ?? p?.pnl_unrealized
-                  );
+                  const size = parseDecimal(p?.size ?? p?.positionSize ?? p?.qty ?? p?.quantity);
+                  const entry = parseDecimal(p?.entryPrice ?? p?.avgEntryPrice ?? p?.avgEntry ?? p?.entry);
+                  const mark = parseDecimal(p?.markPrice ?? p?.mark ?? p?.indexPrice ?? p?.lastPrice ?? p?.price);
+                  const pnl = (Number.isFinite(size) && Number.isFinite(entry) && Number.isFinite(mark))
+                    ? (size * (mark - entry))
+                    : parseDecimal(
+                      p?.pnl
+                        ?? p?.pnlRealized
+                        ?? p?.pnl_realized
+                        ?? p?.realizedPnl
+                        ?? p?.unrealizedPnl
+                        ?? p?.pnlUnrealized
+                        ?? p?.pnl_unrealized
+                    );
                   if (Number.isFinite(pnl)) {
                     computedTotal += pnl;
                     hasComputedTotal = true;
@@ -11628,15 +11633,20 @@
               let computedTotal = 0;
               let hasComputedTotal = false;
               for (const p of snapshotPositions) {
-                const pnl = parseDecimal(
-                  p?.pnl
-                    ?? p?.pnlRealized
-                    ?? p?.pnl_realized
-                    ?? p?.realizedPnl
-                    ?? p?.unrealizedPnl
-                    ?? p?.pnlUnrealized
-                    ?? p?.pnl_unrealized
-                );
+                const size = parseDecimal(p?.size ?? p?.positionSize ?? p?.qty ?? p?.quantity);
+                const entry = parseDecimal(p?.entryPrice ?? p?.avgEntryPrice ?? p?.avgEntry ?? p?.entry);
+                const mark = parseDecimal(p?.markPrice ?? p?.mark ?? p?.indexPrice ?? p?.lastPrice ?? p?.price);
+                const pnl = (Number.isFinite(size) && Number.isFinite(entry) && Number.isFinite(mark))
+                  ? (size * (mark - entry))
+                  : parseDecimal(
+                    p?.pnl
+                      ?? p?.pnlRealized
+                      ?? p?.pnl_realized
+                      ?? p?.realizedPnl
+                      ?? p?.unrealizedPnl
+                      ?? p?.pnlUnrealized
+                      ?? p?.pnl_unrealized
+                  );
                 if (Number.isFinite(pnl)) {
                   computedTotal += pnl;
                   hasComputedTotal = true;

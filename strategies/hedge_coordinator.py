@@ -1715,8 +1715,66 @@ class HedgeCoordinator:
         worst_agent = values.get("worst_agent_id") or "-"
         worst_label = values.get("worst_account_label") or "-"
         max_im: Optional[Decimal] = values.get("max_initial_margin")
+        im_source: Optional[str] = values.get("im_source")
         capacity_note = values.get("buffer_note")
         capacity_status = values.get("buffer_status")
+
+        # Debug: inspect whether worst account PnL likely used computed(size*(mark-entry)).
+        # This helps validate that Feishu is using the new PnL basis and whether upstream
+        # snapshots contain the required fields.
+        debug_info: Optional[str] = None
+        try:
+            computed_cnt = 0
+            fallback_cnt = 0
+            pos_cnt = 0
+            sample_keys: List[str] = []
+            worst_positions: List[Dict[str, Any]] = []
+            worst_state = self._states.get(worst_agent) if isinstance(worst_agent, str) else None
+            if worst_state is not None:
+                bp = worst_state.backpack_accounts
+                if isinstance(bp, dict):
+                    positions = bp.get("positions")
+                    if isinstance(positions, list):
+                        worst_positions = [p for p in positions if isinstance(p, dict)]
+
+            for pos in worst_positions:
+                pos_cnt += 1
+                if not sample_keys:
+                    try:
+                        sample_keys = sorted([str(k) for k in pos.keys()])[:20]
+                    except Exception:
+                        sample_keys = []
+
+                size = (
+                    self._decimal_from(pos.get("size"))
+                    or self._decimal_from(pos.get("positionSize"))
+                    or self._decimal_from(pos.get("qty"))
+                    or self._decimal_from(pos.get("quantity"))
+                )
+                entry = (
+                    self._decimal_from(pos.get("entryPrice"))
+                    or self._decimal_from(pos.get("avgEntryPrice"))
+                    or self._decimal_from(pos.get("avgEntry"))
+                    or self._decimal_from(pos.get("entry"))
+                )
+                mark = (
+                    self._decimal_from(pos.get("markPrice"))
+                    or self._decimal_from(pos.get("mark"))
+                    or self._decimal_from(pos.get("indexPrice"))
+                    or self._decimal_from(pos.get("lastPrice"))
+                    or self._decimal_from(pos.get("price"))
+                )
+                if size is not None and entry is not None and mark is not None:
+                    computed_cnt += 1
+                else:
+                    fallback_cnt += 1
+
+            debug_info = (
+                f"worst_agent={worst_agent}; positions={pos_cnt}; computed={computed_cnt}; "
+                f"fallback={fallback_cnt}; sample_keys={','.join(sample_keys) if sample_keys else '-'}"
+            )
+        except Exception:
+            debug_info = None
 
         # Dashboard-aligned capacity and risk ratio:
         # capacity = equity_sum - 1.5 * max_initial_margin
@@ -1779,7 +1837,38 @@ class HedgeCoordinator:
                     "content": f"**最坏账户(PnL)**\n{worst_label} ({worst_agent}) · {_format_decimal(worst_pnl, 2)}",
                 },
             },
+            {
+                "is_short": False,
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        "**PnL口径**\nposition: size×(mark-entry)；缺字段回退到 pnl/unrealizedPnl 等上游字段"
+                    ),
+                },
+            },
         ]
+
+        if im_source:
+            fields.append(
+                {
+                    "is_short": False,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**IM来源**\n{im_source}",
+                    },
+                }
+            )
+
+        if debug_info:
+            fields.append(
+                {
+                    "is_short": False,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**Debug(PnL字段覆盖)**\n{debug_info}",
+                    },
+                }
+            )
 
         if capacity_note:
             fields.append(
