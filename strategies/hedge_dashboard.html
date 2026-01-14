@@ -11692,6 +11692,40 @@
           }
 
           // Compute summary metrics based on flattened accounts and their positions.
+          // IMPORTANT: compute per-account total from positions first, so Risk Level numerator
+          // does not depend on later DOM rendering order.
+          for (const entry of flattenedAccounts) {
+            const positionsForTotal = Array.isArray(entry.positions) ? entry.positions : [];
+            let pnlTotal = 0;
+            let hasAnyPnl = false;
+            for (const p of positionsForTotal) {
+              const netQty = parseDecimal(p?.net_size ?? p?.netQuantity ?? p?.q ?? p?.size ?? p?.positionSize ?? p?.qty ?? p?.quantity);
+              const entryPx = parseDecimal(p?.entry_price ?? p?.entryPrice ?? p?.avgEntryPrice ?? p?.avgEntry ?? p?.entry ?? p?.B);
+              const markPx = parseDecimal(p?.mark_price ?? p?.markPrice ?? p?.mark ?? p?.indexPrice ?? p?.lastPrice ?? p?.price ?? p?.M);
+              const computedPnl = (Number.isFinite(netQty) && Number.isFinite(entryPx) && Number.isFinite(markPx))
+                ? (netQty * (markPx - entryPx))
+                : null;
+              const rawPnl = parseDecimal(
+                p?.pnl
+                ?? p?.pnlRealized
+                ?? p?.unrealizedPnl
+                ?? p?.pnlUnrealized
+                ?? p?.pnl_unrealized
+                ?? p?.unrealized_pnl
+                ?? p?.P
+              );
+              const pnl = Number.isFinite(computedPnl) ? computedPnl : rawPnl;
+              if (!Number.isFinite(pnl)) {
+                continue;
+              }
+              pnlTotal += pnl;
+              hasAnyPnl = true;
+            }
+            if (hasAnyPnl) {
+              entry.total = pnlTotal;
+            }
+          }
+
           for (const entry of flattenedAccounts) {
             const equityValue = Number(entry.equity);
             const walletValue = Number(entry.wallet);
