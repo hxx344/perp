@@ -1613,20 +1613,30 @@ class HedgeCoordinator:
                 for pos in pos_list:
                     if not isinstance(pos, dict):
                         continue
+                    # NOTE: Backpack positions keys vary across sources.
+                    # From current debug sample_keys we must support:
+                    # - size: netQuantity / netExposureQuantity / q
+                    # - entry: entryPrice / B
+                    # - mark : markPrice / M
                     size = (
-                        self._decimal_from(pos.get("size"))
+                        self._decimal_from(pos.get("netQuantity"))
+                        or self._decimal_from(pos.get("netExposureQuantity"))
+                        or self._decimal_from(pos.get("q"))
+                        or self._decimal_from(pos.get("size"))
                         or self._decimal_from(pos.get("positionSize"))
                         or self._decimal_from(pos.get("qty"))
                         or self._decimal_from(pos.get("quantity"))
                     )
                     entry = (
                         self._decimal_from(pos.get("entryPrice"))
+                        or self._decimal_from(pos.get("B"))
                         or self._decimal_from(pos.get("avgEntryPrice"))
                         or self._decimal_from(pos.get("avgEntry"))
                         or self._decimal_from(pos.get("entry"))
                     )
                     mark = (
                         self._decimal_from(pos.get("markPrice"))
+                        or self._decimal_from(pos.get("M"))
                         or self._decimal_from(pos.get("mark"))
                         or self._decimal_from(pos.get("indexPrice"))
                         or self._decimal_from(pos.get("lastPrice"))
@@ -1642,6 +1652,7 @@ class HedgeCoordinator:
                             or self._decimal_from(pos.get("pnlUnrealized"))
                             or self._decimal_from(pos.get("unrealizedPnl"))
                             or self._decimal_from(pos.get("unrealized_pnl"))
+                            or self._decimal_from(pos.get("P"))
                         )
                     if pnl is None:
                         continue
@@ -1768,19 +1779,24 @@ class HedgeCoordinator:
                         sample_keys = []
 
                 size = (
-                    self._decimal_from(pos.get("size"))
+                    self._decimal_from(pos.get("netQuantity"))
+                    or self._decimal_from(pos.get("netExposureQuantity"))
+                    or self._decimal_from(pos.get("q"))
+                    or self._decimal_from(pos.get("size"))
                     or self._decimal_from(pos.get("positionSize"))
                     or self._decimal_from(pos.get("qty"))
                     or self._decimal_from(pos.get("quantity"))
                 )
                 entry = (
                     self._decimal_from(pos.get("entryPrice"))
+                    or self._decimal_from(pos.get("B"))
                     or self._decimal_from(pos.get("avgEntryPrice"))
                     or self._decimal_from(pos.get("avgEntry"))
                     or self._decimal_from(pos.get("entry"))
                 )
                 mark = (
                     self._decimal_from(pos.get("markPrice"))
+                    or self._decimal_from(pos.get("M"))
                     or self._decimal_from(pos.get("mark"))
                     or self._decimal_from(pos.get("indexPrice"))
                     or self._decimal_from(pos.get("lastPrice"))
