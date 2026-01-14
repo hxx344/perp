@@ -11624,6 +11624,8 @@
                   // Backpack monitor currently reports positions at snapshot-level.
                   // If per-account positions are not provided, fall back to snapshot.positions.
                   positions: Array.isArray(obj.positions) ? obj.positions : snapshotPositions,
+                  // Keep a raw computed total for exact reconciliation in the UI.
+                  computedTotal: hasComputedTotal ? computedTotal : null,
                   updatedTs: snapshotTs,
                   sortKey: buildAccountSortKey(agentId, obj, summary),
                 });
@@ -11682,6 +11684,7 @@
                 equity,
                 wallet,
                 positions: snapshotPositions,
+                computedTotal: hasComputedTotal ? computedTotal : null,
                 updatedTs: snapshotTs,
                 sortKey: buildAccountSortKey(agentId, null, summary),
               });
@@ -11865,6 +11868,8 @@
             const card = document.createElement('article');
             card.className = 'grvt-account-card';
 
+            // NOTE: Backpack card TOTAL should match the sum of PnL shown in the positions table.
+            // We'll compute a table-total below and then patch the displayed TOTAL.
             const totalText = Number.isFinite(entry.total) ? numberFormatter.format(entry.total) : '--';
             const equityText = Number.isFinite(entry.equity) ? numberFormatter.format(entry.equity) : '--';
             const walletText = Number.isFinite(entry.wallet) ? numberFormatter.format(entry.wallet) : '--';
@@ -11932,6 +11937,8 @@
               // Maintain per-account totals for a maintenance ratio badge.
               // Per openapi_bp.json: positions can include imf/mmf and netExposureNotional.
               let bpMaintenanceRequirementTotal = 0;
+              let bpTablePnlTotal = 0;
+              let bpTablePnlHasAny = false;
               for (const position of positionsList) {
                 const symbol = position?.symbol ?? position?.s ?? '--';
                 const netQty = parseDecimal(position?.net_size ?? position?.netQuantity ?? position?.q);
@@ -11951,6 +11958,10 @@
                   ?? position?.P
                 );
                 const pnl = Number.isFinite(computedPnl) ? computedPnl : rawPnl;
+                if (Number.isFinite(pnl)) {
+                  bpTablePnlTotal += pnl;
+                  bpTablePnlHasAny = true;
+                }
                 const positionValue = (Number.isFinite(netQty) && Number.isFinite(markPx))
                   ? Math.abs(netQty) * markPx
                   : null;
@@ -11982,6 +11993,22 @@
                 body.appendChild(row);
               }
               card.appendChild(table);
+
+              // Patch the displayed TOTAL to exactly match the table PnL sum.
+              try {
+                const totalDd = card.querySelector('.grvt-account-metrics > div:first-child dd');
+                if (totalDd) {
+                  if (bpTablePnlHasAny) {
+                    totalDd.textContent = numberFormatter.format(bpTablePnlTotal);
+                    totalDd.title = 'sum(PnL rows)';
+                  } else {
+                    totalDd.textContent = '--';
+                    totalDd.removeAttribute('title');
+                  }
+                }
+              } catch (_) {
+                // ignore
+              }
 
               // Update maintenance ratio badge for Backpack cards.
               try {

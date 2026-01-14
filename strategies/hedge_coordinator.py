@@ -1604,17 +1604,15 @@ class HedgeCoordinator:
                     if label_raw is not None:
                         account_label = str(label_raw)
 
-            agent_pnl = Decimal("0")
-            # Align with dashboard position detail display:
-            # Prefer computing per-position PnL via size*(mark-entry). Only fall back
-            # to upstream pnl fields when required inputs are missing.
-            positions = bp.get("positions")
-            any_position_pnl = False
-            if isinstance(positions, list) and positions:
-                for pos in positions:
+            def _compute_positions_pnl(pos_list: Any) -> Tuple[Decimal, bool]:
+                """Return (pnl_sum, has_any_pnl)."""
+                pnl_sum = Decimal("0")
+                has_any = False
+                if not isinstance(pos_list, list) or not pos_list:
+                    return pnl_sum, False
+                for pos in pos_list:
                     if not isinstance(pos, dict):
                         continue
-
                     size = (
                         self._decimal_from(pos.get("size"))
                         or self._decimal_from(pos.get("positionSize"))
@@ -1634,7 +1632,6 @@ class HedgeCoordinator:
                         or self._decimal_from(pos.get("lastPrice"))
                         or self._decimal_from(pos.get("price"))
                     )
-
                     pnl: Optional[Decimal] = None
                     if size is not None and entry is not None and mark is not None:
                         pnl = size * (mark - entry)
@@ -1646,10 +1643,35 @@ class HedgeCoordinator:
                             or self._decimal_from(pos.get("unrealizedPnl"))
                             or self._decimal_from(pos.get("unrealized_pnl"))
                         )
+                    if pnl is None:
+                        continue
+                    pnl_sum += pnl
+                    has_any = True
+                return pnl_sum, has_any
 
-                    if pnl is not None:
-                        agent_pnl += pnl
+            agent_pnl = Decimal("0")
+            any_position_pnl = False
+            # IMPORTANT: avoid double counting when bp['accounts'] exists.
+            # If accounts provide per-account positions, sum each account's own positions.
+            # Otherwise fall back to snapshot-level positions once.
+            accounts_for_pnl = bp.get("accounts")
+            if isinstance(accounts_for_pnl, list) and accounts_for_pnl:
+                for acc in accounts_for_pnl:
+                    if not isinstance(acc, dict):
+                        continue
+                    acc_positions = acc.get("positions")
+                    pnl_sum, has_any = _compute_positions_pnl(acc_positions)
+                    if has_any:
+                        agent_pnl += pnl_sum
                         any_position_pnl = True
+                # If accounts exist but none had positions/pnl usable, fall back below.
+
+            if not any_position_pnl:
+                positions = bp.get("positions")
+                pnl_sum, has_any = _compute_positions_pnl(positions)
+                if has_any:
+                    agent_pnl += pnl_sum
+                    any_position_pnl = True
 
             if not any_position_pnl:
                 # If positions were missing or had no usable PnL inputs, fall back to summary-level fields.
