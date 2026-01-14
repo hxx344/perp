@@ -1605,21 +1605,54 @@ class HedgeCoordinator:
                         account_label = str(label_raw)
 
             agent_pnl = Decimal("0")
+            # Align with dashboard position detail display:
+            # Prefer computing per-position PnL via size*(mark-entry). Only fall back
+            # to upstream pnl fields when required inputs are missing.
             positions = bp.get("positions")
+            any_position_pnl = False
             if isinstance(positions, list) and positions:
                 for pos in positions:
                     if not isinstance(pos, dict):
                         continue
-                    pnl = (
-                        self._decimal_from(pos.get("pnlRealized"))
-                        or self._decimal_from(pos.get("pnl"))
-                        or self._decimal_from(pos.get("pnlUnrealized"))
-                        or self._decimal_from(pos.get("unrealizedPnl"))
-                        or self._decimal_from(pos.get("unrealized_pnl"))
+
+                    size = (
+                        self._decimal_from(pos.get("size"))
+                        or self._decimal_from(pos.get("positionSize"))
+                        or self._decimal_from(pos.get("qty"))
+                        or self._decimal_from(pos.get("quantity"))
                     )
+                    entry = (
+                        self._decimal_from(pos.get("entryPrice"))
+                        or self._decimal_from(pos.get("avgEntryPrice"))
+                        or self._decimal_from(pos.get("avgEntry"))
+                        or self._decimal_from(pos.get("entry"))
+                    )
+                    mark = (
+                        self._decimal_from(pos.get("markPrice"))
+                        or self._decimal_from(pos.get("mark"))
+                        or self._decimal_from(pos.get("indexPrice"))
+                        or self._decimal_from(pos.get("lastPrice"))
+                        or self._decimal_from(pos.get("price"))
+                    )
+
+                    pnl: Optional[Decimal] = None
+                    if size is not None and entry is not None and mark is not None:
+                        pnl = size * (mark - entry)
+                    else:
+                        pnl = (
+                            self._decimal_from(pos.get("pnlRealized"))
+                            or self._decimal_from(pos.get("pnl"))
+                            or self._decimal_from(pos.get("pnlUnrealized"))
+                            or self._decimal_from(pos.get("unrealizedPnl"))
+                            or self._decimal_from(pos.get("unrealized_pnl"))
+                        )
+
                     if pnl is not None:
                         agent_pnl += pnl
-            else:
+                        any_position_pnl = True
+
+            if not any_position_pnl:
+                # If positions were missing or had no usable PnL inputs, fall back to summary-level fields.
                 if isinstance(summary, dict):
                     pnl_fallback = (
                         self._decimal_from(summary.get("total_pnl"))

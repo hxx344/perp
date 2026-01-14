@@ -11927,12 +11927,20 @@
                 const netQty = parseDecimal(position?.net_size ?? position?.netQuantity ?? position?.q);
                 const entryPx = parseDecimal(position?.entry_price ?? position?.entryPrice ?? position?.B);
                 const markPx = parseDecimal(position?.mark_price ?? position?.markPrice ?? position?.M);
-                const pnl = parseDecimal(
+                // Backpack: prefer computed PnL = size * (mark - entry).
+                // - LONG (size>0): profit when mark > entry
+                // - SHORT (size<0): profit when mark < entry
+                // Fallback to upstream PnL fields only when inputs are missing.
+                const computedPnl = (Number.isFinite(netQty) && Number.isFinite(entryPx) && Number.isFinite(markPx))
+                  ? (netQty * (markPx - entryPx))
+                  : null;
+                const rawPnl = parseDecimal(
                   position?.pnl
                   ?? position?.pnlRealized
                   ?? position?.unrealizedPnl
                   ?? position?.P
                 );
+                const pnl = Number.isFinite(computedPnl) ? computedPnl : rawPnl;
                 const positionValue = (Number.isFinite(netQty) && Number.isFinite(markPx))
                   ? Math.abs(netQty) * markPx
                   : null;
