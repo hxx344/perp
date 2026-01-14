@@ -3158,6 +3158,7 @@
         };
 
         const derivedSymbolCap = {};
+        const derivedSymbolPnl = {};
         for (const pos of positions) {
           const base = normalizeBaseAsset(pos?.symbol ?? pos?.s ?? pos?.instrument ?? pos?.market);
           if (!base) continue;
@@ -3167,6 +3168,17 @@
           const absQty = Math.abs(qty);
           // If multiple instruments map to same base, sum abs to get a conservative cap.
           derivedSymbolCap[base] = (derivedSymbolCap[base] || 0) + absQty;
+
+          // PnL: best-effort derive from position fields.
+          // Backpack provides pnlUnrealized; also sometimes we can compute size*(mark-entry).
+          const pnlFallback = coerceNumber(pos?.pnlUnrealized ?? pos?.pnl_unrealized ?? pos?.pnl ?? pos?.P);
+          const entry = coerceNumber(pos?.entryPrice ?? pos?.avgEntryPrice ?? pos?.avgEntry ?? pos?.entry ?? pos?.B);
+          const mark = coerceNumber(pos?.markPrice ?? pos?.mark ?? pos?.indexPrice ?? pos?.lastPrice ?? pos?.price ?? pos?.M);
+          const computedPnl = (Number.isFinite(entry) && Number.isFinite(mark)) ? (qty * (mark - entry)) : null;
+          const pnl = (computedPnl !== null && Number.isFinite(computedPnl)) ? computedPnl : pnlFallback;
+          if (Number.isFinite(pnl) && pnl !== 0) {
+            derivedSymbolPnl[base] = (derivedSymbolPnl[base] || 0) + pnl;
+          }
         }
 
         return {
@@ -3174,7 +3186,8 @@
           totalRaw,
           ffPnl,
           nonFfTotal,
-          symbolPnl,
+          // Prefer explicit maps if provided; otherwise fall back to positions aggregation.
+          symbolPnl: { ...derivedSymbolPnl, ...symbolPnl },
           symbolCap: { ...derivedSymbolCap, ...symbolCap },
         };
       };
