@@ -112,8 +112,16 @@ class GrvtClient(BaseExchangeClient):
                 self.logger.log(f"Deferred subscription started for {self.config.contract_id}", "INFO")
 
         except Exception as e:
-            self.logger.log(f"Error connecting to GRVT WebSocket: {e}", "ERROR")
-            raise
+            # Don't hard-fail: strategies can operate with REST polling.
+            self._ws_client = None
+            self.logger.log(
+                (
+                    "GRVT WebSocket connection failed; falling back to REST polling only. "
+                    f"error={e}"
+                ),
+                "WARNING",
+            )
+            return
 
     async def disconnect(self) -> None:
         """Disconnect from GRVT."""
@@ -220,6 +228,9 @@ class GrvtClient(BaseExchangeClient):
     async def _subscribe_to_orders(self, callback):
         """Subscribe to order updates asynchronously."""
         try:
+            if not self._ws_client:
+                self.logger.log("WebSocket client is not available; skip subscription", "WARNING")
+                return
             await self._ws_client.subscribe(
                 stream="order",
                 callback=callback,
@@ -280,7 +291,9 @@ class GrvtClient(BaseExchangeClient):
         if order_status == 'PENDING':
             raise Exception('Paradex Server Error: Order not processed after 10 seconds')
         else:
-            return order_info
+            if order_info is None:
+                return OrderResult(success=False, error_message="order_info_unavailable")
+            return OrderResult(success=True, order_id=order_info.order_id)
 
     async def get_order_price(self, direction: str) -> Decimal:
         """Get the price of an order with GRVT using official SDK."""
@@ -508,7 +521,7 @@ class GrvtClient(BaseExchangeClient):
             return OrderResult(success=False, error_message=str(e))
 
     @query_retry(reraise=True)
-    async def get_order_info(self, order_id: str = None, client_order_id: str = None) -> Optional[OrderInfo]:
+    async def get_order_info(self, order_id: Optional[str] = None, client_order_id: Optional[str] = None) -> Optional[OrderInfo]:
         """Get order information from GRVT."""
         # Get order information using GRVT SDK
         if order_id is not None:
