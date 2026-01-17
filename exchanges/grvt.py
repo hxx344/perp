@@ -406,6 +406,93 @@ class GrvtClient(BaseExchangeClient):
             else:
                 raise Exception(f"[CLOSE] Unexpected order status: {order_status}")
 
+    async def place_market_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
+        """Place a market order with GRVT.
+
+        GRVT SDK (ccxt-like) may expose `create_market_order`. If not available,
+        we fall back to an aggressive limit order using current BBO.
+        """
+        side = direction
+        if side not in {"buy", "sell"}:
+            raise Exception(f"[MARKET] Invalid direction: {direction}")
+
+        # First try native market order if supported by the SDK.
+        try:
+            if hasattr(self.rest_client, "create_market_order"):
+                order_result = self.rest_client.create_market_order(
+                    symbol=contract_id,
+                    side=side,
+                    amount=quantity,
+                )
+                if not order_result:
+                    return OrderResult(success=False, error_message="market_order_empty_response")
+
+                client_order_id = (
+                    (order_result.get("metadata") or {}).get("client_order_id")
+                    if isinstance(order_result, dict)
+                    else None
+                )
+                state = order_result.get("state", {}) if isinstance(order_result, dict) else {}
+                status = state.get("status") if isinstance(state, dict) else None
+                if client_order_id:
+                    return OrderResult(
+                        success=True,
+                        order_id=str(client_order_id),
+                        side=side,
+                        size=quantity,
+                        price=Decimal("0"),
+                        status=str(status or "SUBMITTED"),
+                    )
+        except Exception as e:
+            # Continue to fallback.
+            self.logger.log(f"[MARKET] Native market order failed; fallback to aggressive limit: {e}", "WARNING")
+
+        # Fallback: aggressive limit around BBO.
+        best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+        if best_bid <= 0 or best_ask <= 0:
+            return OrderResult(success=False, error_message="market_order_invalid_bbo")
+
+        # Push through spread by a few ticks to behave like market.
+        nudge = self.config.tick_size * Decimal("5") if self.config.tick_size else Decimal("0")
+        if nudge <= 0:
+            nudge = Decimal("0")
+
+        if side == "buy":
+            limit_price = best_ask + nudge
+        else:
+            limit_price = best_bid - nudge
+            if limit_price <= 0:
+                limit_price = best_bid
+
+        limit_price = self.round_to_tick(limit_price)
+        try:
+            # Not post-only: we want immediate execution.
+            order_result = self.rest_client.create_limit_order(
+                symbol=contract_id,
+                side=side,
+                amount=quantity,
+                price=limit_price,
+                params={"post_only": False},
+            )
+        except Exception as e:
+            return OrderResult(success=False, error_message=f"market_order_fallback_failed: {e}")
+
+        if not order_result or not isinstance(order_result, dict):
+            return OrderResult(success=False, error_message="market_order_fallback_empty_response")
+
+        client_order_id = (order_result.get("metadata") or {}).get("client_order_id")
+        if not client_order_id:
+            return OrderResult(success=False, error_message="market_order_missing_client_order_id")
+
+        return OrderResult(
+            success=True,
+            order_id=str(client_order_id),
+            side=side,
+            size=quantity,
+            price=limit_price,
+            status=str((order_result.get("state") or {}).get("status") or "SUBMITTED"),
+        )
+
     async def cancel_order(self, order_id: str) -> OrderResult:
         """Cancel an order with GRVT."""
         try:
