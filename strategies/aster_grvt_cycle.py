@@ -699,7 +699,9 @@ class HedgingCycleExecutor:
         last_status: Optional[str] = None
 
         while time.time() < deadline:
-            info = await self.grvt_client.get_order_info(order_id=order_id)
+            # NOTE: GRVT adapter returns client_order_id as order_id for consistency.
+            # The underlying pysdk expects client_order_id to be provided via params.
+            info = await self.grvt_client.get_order_info(client_order_id=order_id)
             if info:
                 last_status = info.status
                 if info.status == "FILLED":
@@ -714,7 +716,7 @@ class HedgingCycleExecutor:
         except Exception:
             pass
 
-        final_info = await self.grvt_client.get_order_info(order_id=order_id)
+        final_info = await self.grvt_client.get_order_info(client_order_id=order_id)
         if final_info and final_info.status == "FILLED":
             return final_info
 
