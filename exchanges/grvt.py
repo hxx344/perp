@@ -420,91 +420,107 @@ class GrvtClient(BaseExchangeClient):
                 raise Exception(f"[CLOSE] Unexpected order status: {order_status}")
 
     async def place_market_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:
-        """Place a market order with GRVT.
+        """Place a *pure taker* order with GRVT.
 
-        GRVT SDK (ccxt-like) may expose `create_market_order`. If not available,
-        we fall back to an aggressive limit order using current BBO.
+        This intentionally avoids the previous "aggressive limit" fallback to ensure
+        LEG2/LEG4 are real taker executions.
+
+        Implementation detail (grvt-pysdk): market is represented as
+        `create_order(..., order_type='market', ...)`, with optional `time_in_force` like
+        `IMMEDIATE_OR_CANCEL`.
         """
         side = direction
         if side not in {"buy", "sell"}:
             raise Exception(f"[MARKET] Invalid direction: {direction}")
 
-        # First try native market order if supported by the SDK.
+        # Best-effort bump for min notional / min size (kept from previous implementation).
+        # For market orders we estimate notional using mid-price.
         try:
-            if hasattr(self.rest_client, "create_market_order"):
-                order_result = self.rest_client.create_market_order(
-                    symbol=contract_id,
-                    side=side,
-                    amount=quantity,
-                )
-                if not order_result:
-                    return OrderResult(success=False, error_message="market_order_empty_response")
+            best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+            if best_bid > 0 and best_ask > 0:
+                mid = (best_bid + best_ask) / Decimal("2")
+                if mid > 0:
+                    quantity = await self._ensure_min_constraints(contract_id, quantity, mid)
+        except Exception:
+            # If BBO isn't available, we still try to place the order; exchange will validate.
+            pass
 
-                client_order_id = (
-                    (order_result.get("metadata") or {}).get("client_order_id")
-                    if isinstance(order_result, dict)
-                    else None
-                )
-                state = order_result.get("state", {}) if isinstance(order_result, dict) else {}
-                status = state.get("status") if isinstance(state, dict) else None
-                if client_order_id:
-                    return OrderResult(
-                        success=True,
-                        order_id=str(client_order_id),
-                        side=side,
-                        size=quantity,
-                        price=Decimal("0"),
-                        status=str(status or "SUBMITTED"),
-                    )
-        except Exception as e:
-            # Continue to fallback.
-            self.logger.log(f"[MARKET] Native market order failed; fallback to aggressive limit: {e}", "WARNING")
-
-        # Fallback: aggressive limit around BBO.
-        best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
-        if best_bid <= 0 or best_ask <= 0:
-            return OrderResult(success=False, error_message="market_order_invalid_bbo")
-
-        # Push through spread by a few ticks to behave like market.
-        nudge = self.config.tick_size * Decimal("5") if self.config.tick_size else Decimal("0")
-        if nudge <= 0:
-            nudge = Decimal("0")
-
-        if side == "buy":
-            limit_price = best_ask + nudge
-        else:
-            limit_price = best_bid - nudge
-            if limit_price <= 0:
-                limit_price = best_bid
-
-        limit_price = self.round_to_tick(limit_price)
+        # Prefer grvt-pysdk native market path: create_order(order_type='market').
+        # This gives us `isMarket=True` in the signed payload and supports IOC/FOK.
         try:
-            # Not post-only: we want immediate execution.
-            order_result = self.rest_client.create_limit_order(
+            if not hasattr(self.rest_client, "create_order"):
+                raise Exception("grvt_sdk_missing_create_order")
+
+            order_result = self.rest_client.create_order(
                 symbol=contract_id,
+                order_type="market",
                 side=side,
                 amount=quantity,
-                price=limit_price,
-                params={"post_only": False},
+                price=None,
+                params={
+                    # pure taker semantics
+                    "time_in_force": "IMMEDIATE_OR_CANCEL",
+                    "post_only": False,
+                },
             )
         except Exception as e:
-            return OrderResult(success=False, error_message=f"market_order_fallback_failed: {e}")
+            return OrderResult(success=False, error_message=f"market_order_native_failed: {e}")
 
         if not order_result or not isinstance(order_result, dict):
-            return OrderResult(success=False, error_message="market_order_fallback_empty_response")
+            return OrderResult(success=False, error_message="market_order_empty_response")
 
         client_order_id = (order_result.get("metadata") or {}).get("client_order_id")
         if not client_order_id:
             return OrderResult(success=False, error_message="market_order_missing_client_order_id")
+
+        state = order_result.get("state", {}) if isinstance(order_result, dict) else {}
+        status = state.get("status") if isinstance(state, dict) else None
 
         return OrderResult(
             success=True,
             order_id=str(client_order_id),
             side=side,
             size=quantity,
-            price=limit_price,
-            status=str((order_result.get("state") or {}).get("status") or "SUBMITTED"),
+            price=Decimal("0"),
+            status=str(status or "SUBMITTED"),
         )
+
+    async def _ensure_min_constraints(self, contract_id: str, quantity: Decimal, reference_price: Decimal) -> Decimal:
+        """Best-effort bump for min_size/min_notional using cached market constraints."""
+        if quantity <= 0:
+            return quantity
+
+        # get_contract_attributes() is the adapter entrypoint that also populates
+        # cached market constraints (min_size/min_notional) used here.
+        try:
+            await self.get_contract_attributes()
+        except Exception:
+            return quantity
+
+        min_size = getattr(self.config, "min_size", None)
+        min_notional = getattr(self.config, "min_notional", None)
+
+        bumped = quantity
+        if min_size and bumped < min_size:
+            self.logger.log(
+                f"[GRVT] bump qty for min_size: {bumped} -> {min_size} ({contract_id})",
+                "WARNING",
+            )
+            bumped = min_size
+
+        if min_notional and reference_price > 0:
+            notional = bumped * reference_price
+            if notional < min_notional:
+                target_qty = (min_notional / reference_price)
+                if min_size and target_qty < min_size:
+                    target_qty = min_size
+                self.logger.log(
+                    f"[GRVT] bump qty for min_notional: {bumped} -> {target_qty} ({contract_id}), mid={reference_price}, min_notional={min_notional}",
+                    "WARNING",
+                )
+                bumped = target_qty
+
+        return bumped
 
     async def cancel_order(self, order_id: str) -> OrderResult:
         """Cancel an order with GRVT."""
@@ -608,7 +624,12 @@ class GrvtClient(BaseExchangeClient):
         return Decimal(0)
 
     async def get_contract_attributes(self) -> Tuple[str, Decimal]:
-        """Get contract ID and tick size for a ticker."""
+        """Get contract ID and tick size for a ticker.
+
+        Side effect: cache best-effort market constraints on `self.config`:
+        - `min_size`: Decimal | None
+        - `min_notional`: Decimal | None
+        """
         ticker = self.config.ticker
         if not ticker:
             raise ValueError("Ticker is empty")
@@ -624,12 +645,25 @@ class GrvtClient(BaseExchangeClient):
                 self.config.contract_id = market.get('instrument', '')
                 self.config.tick_size = Decimal(market.get('tick_size', 0))
 
-                # Validate minimum quantity
-                min_size = Decimal(market.get('min_size', 0))
-                if self.config.quantity < min_size:
-                    raise ValueError(
-                        f"Order quantity is less than min quantity: {self.config.quantity} < {min_size}"
-                    )
+                # Cache best-effort min constraints (do NOT hard-fail here; actual order qty
+                # may differ from config.quantity and we can bump at order-time).
+                try:
+                    self.config.min_size = Decimal(market.get('min_size')) if market.get('min_size') is not None else None
+                except Exception:
+                    self.config.min_size = None
+
+                # GRVT uses a minimum notional error (2066). Different SDK/ccxt shapes name it
+                # differently; cache in a best-effort way.
+                min_notional_raw = (
+                    market.get('min_notional')
+                    or market.get('min_cost')
+                    or market.get('min_value')
+                    or market.get('min_quote')
+                )
+                try:
+                    self.config.min_notional = Decimal(min_notional_raw) if min_notional_raw is not None else None
+                except Exception:
+                    self.config.min_notional = None
 
                 return self.config.contract_id, self.config.tick_size
 
