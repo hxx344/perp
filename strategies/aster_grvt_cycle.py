@@ -420,6 +420,8 @@ class HedgingCycleExecutor:
             tasks.append(self._aster_public.stop())
         if self.grvt_client is not None:
             tasks.append(self.grvt_client.disconnect())
+        if self._metrics_reporter is not None:
+            tasks.append(self._metrics_reporter.aclose())
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.logger.log("Shutdown complete", "INFO")
@@ -541,12 +543,14 @@ class HedgingCycleExecutor:
 
         overall_start = time.time()
         attempt = 0
+        skip_retry_delay = False
         last_error: Optional[str] = None
 
         while True:
             attempt += 1
-            if attempt > 1:
+            if attempt > 1 and not skip_retry_delay:
                 await asyncio.sleep(self.config.retry_delay_seconds)
+            skip_retry_delay = False
 
             try:
                 target_price = await self._calculate_virtual_maker_price(direction, depth_level=depth_level)
@@ -561,8 +565,13 @@ class HedgingCycleExecutor:
                 break
             except TimeoutError as exc:
                 last_error = str(exc)
+                self.logger.log(
+                    f"{leg_name} | Virtual Aster order at {target_price} timed out on attempt {attempt}. Retrying...",
+                    "WARNING",
+                )
                 if self.config.max_retries > 0 and attempt >= self.config.max_retries:
                     raise
+                skip_retry_delay = True
                 continue
 
         latency = max(fill_ts - overall_start, 0.0)
