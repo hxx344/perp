@@ -525,9 +525,18 @@ class GrvtClient(BaseExchangeClient):
         """Get order information from GRVT."""
         # Get order information using GRVT SDK
         if order_id is not None:
-            order_data = self.rest_client.fetch_order(id=order_id)
+            # Some pysdk versions expect `order_id` (not `id`).
+            try:
+                order_data = self.rest_client.fetch_order(order_id=order_id)
+            except TypeError:
+                # Fallback to ccxt-style signature
+                order_data = self.rest_client.fetch_order(id=order_id)
         elif client_order_id is not None:
-            order_data = self.rest_client.fetch_order(params={'client_order_id': client_order_id})
+            # Depending on pysdk version, client_order_id can be a kwarg or inside params.
+            try:
+                order_data = self.rest_client.fetch_order(client_order_id=client_order_id)
+            except TypeError:
+                order_data = self.rest_client.fetch_order(params={'client_order_id': client_order_id})
         else:
             raise ValueError("Either order_id or client_order_id must be provided")
 
