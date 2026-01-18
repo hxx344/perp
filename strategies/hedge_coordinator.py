@@ -4987,30 +4987,40 @@ class CoordinatorApp:
             await self._maybe_para_auto_balance(snapshot)
         return web.json_response(snapshot)
 
-    async def handle_para_control_get(self, request: web.Request) -> web.Response:
-        """Paradex monitor control endpoint.
-
-        Kept separate from /control (used by Backpack + dashboard control plane)
-        to avoid response-shape coupling.
-
-        Response shape matches `monitoring/para_account_monitor.py`:
-        {
-          "agent": {
-            "agent_id": "...",
-            "pending_adjustments": [ ... ]
-          }
-        }
-        """
-
-        # Monitor should be allowed to poll when auth is configured.
+    async def handle_control_get(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
-
         agent_id = (request.rel_url.query.get("agent_id") or "").strip()
         if not agent_id:
             raise web.HTTPBadRequest(text="agent_id is required")
 
-        pending = await self._para_adjustments.pending_for_agent(agent_id)
-        return web.json_response({"agent": {"agent_id": agent_id, "pending_adjustments": pending}})
+        # NOTE:
+        # Paradex/GRVT monitors expect a nested shape:
+        #   payload["agent"]["pending_adjustments"]
+        # If we return a flat dict, the monitor will skip execution and you'll see
+        # endless "pending (waiting for ACK)" in the dashboard.
+        agent_payload: Dict[str, Any] = {"agent_id": agent_id}
+
+        # Best-effort include any control flags we may have persisted per agent.
+        with suppress(Exception):
+            snapshot = await self._coordinator.snapshot()
+            controls = snapshot.get("controls")
+            if isinstance(controls, dict):
+                per_agent = controls.get(agent_id)
+                if isinstance(per_agent, dict):
+                    for k in ("paused", "updated_at"):
+                        if k in per_agent:
+                            agent_payload[k] = per_agent.get(k)
+
+        # PARA pending adjustments (task queue consumed by Paradex monitor).
+        agent_payload["pending_adjustments"] = await self._para_adjustments.pending_for_agent(agent_id)
+
+        response: Dict[str, Any] = {"agent": agent_payload}
+
+        # Backpack stays separate (other monitors may read this top-level key).
+        with suppress(Exception):
+            response["backpack_adjustments"] = await self._backpack_adjustments.pending_for_agent(agent_id)
+
+        return web.json_response(response)
 
     # -----------------------------
     # Backpack auto balance
@@ -5597,32 +5607,6 @@ class CoordinatorApp:
             raise web.HTTPBadRequest(text="control payload requires 'action' or 'paused'")
 
         return web.json_response(snapshot)
-
-    async def handle_control_get(self, request: web.Request) -> web.Response:
-        self._enforce_dashboard_auth(request)
-        agent_id = (request.rel_url.query.get("agent_id") or "").strip()
-        if not agent_id:
-            raise web.HTTPBadRequest(text="agent_id is required")
-        # Coordinator provides aggregated snapshot; extract per-agent control queue.
-        snapshot = await self._coordinator.snapshot()
-        controls = snapshot.get("controls")
-        out: Dict[str, Any]
-        if isinstance(controls, dict):
-            per_agent = controls.get(agent_id)
-            if isinstance(per_agent, dict):
-                out = dict(per_agent)
-            else:
-                out = {"agent_id": agent_id, "pending_adjustments": []}
-        else:
-            out = {"agent_id": agent_id, "pending_adjustments": []}
-
-        # IMPORTANT: also attach Backpack pending adjustments.
-        # Backpack monitor executors poll /control; without this they will never
-        # receive dashboard-created backpack adjustments, leaving them stuck in
-        # pending state with 0 ACKs.
-        with suppress(Exception):
-            out["backpack_adjustments"] = await self._backpack_adjustments.pending_for_agent(agent_id)
-        return web.json_response(out)
 
     async def handle_auto_balance_get(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
