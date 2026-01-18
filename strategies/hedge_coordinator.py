@@ -3662,6 +3662,16 @@ class CoordinatorApp:
         else:
             raise ValueError("symbols must be an array of strings")
 
+        next_run_at = None
+        next_run_raw = body.get("next_run_at")
+        if next_run_raw is not None:
+            try:
+                next_run_val = float(next_run_raw)
+                if next_run_val > 0:
+                    next_run_at = next_run_val
+            except (TypeError, ValueError):
+                next_run_at = None
+
         return {
             "task_id": task_id,
             "enabled": True if body.get("enabled") is None else bool(body.get("enabled")),
@@ -3670,10 +3680,16 @@ class CoordinatorApp:
             "interval_seconds": interval_seconds,
             "twap_duration_seconds": twap_duration_seconds,
             "symbols": symbols,
+            "next_run_at": next_run_at,
         }
 
     def _update_para_twap_scheduler_tasks(self, tasks: List[Dict[str, Any]]) -> None:
         normalized: List[Dict[str, Any]] = []
+        existing_by_id = {
+            str(t.get("task_id")): t
+            for t in (self._para_twap_scheduler_tasks or [])
+            if isinstance(t, dict) and t.get("task_id")
+        }
         seen_ids: set = set()
         seen_signatures: set = set()
         for t in tasks or []:
@@ -3684,6 +3700,10 @@ class CoordinatorApp:
             # Ensure task has required shape.
             parsed = self._parse_para_twap_scheduler_task(t)
             task_id = str(parsed.get("task_id") or "")
+            if parsed.get("next_run_at") is None and task_id:
+                existing = existing_by_id.get(task_id)
+                if isinstance(existing, dict) and existing.get("next_run_at") is not None:
+                    parsed["next_run_at"] = existing.get("next_run_at")
             symbols = tuple(parsed.get("symbols") or [])
             signature = (
                 parsed.get("action"),
