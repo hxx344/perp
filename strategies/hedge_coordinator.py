@@ -3691,6 +3691,8 @@ class CoordinatorApp:
             self._para_twap_scheduler_status["running"] = False
             self._para_twap_scheduler_status["next_run_at"] = None
             return
+        # Restart scheduler so newly added tasks don't wait for the previous sleep window.
+        self._stop_para_twap_scheduler()
         self._start_para_twap_scheduler()
 
     def _para_twap_scheduler_add_history_entry(self, entry: Dict[str, Any]) -> None:
