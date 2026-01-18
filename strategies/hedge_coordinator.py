@@ -3521,7 +3521,7 @@ class CoordinatorApp:
                 web.get("/para/twap_scheduler/config", self.handle_para_twap_scheduler_get),
                 web.post("/para/twap_scheduler/config", self.handle_para_twap_scheduler_update),
                 web.get("/backpack/auto_balance/config", self.handle_bp_auto_balance_get),
-                web.post("/backpack/auto_balance/config", self.handle_bp_auto_balance_update),
+                web.post("/backpack/auto_balance/config", self.handle_bp_auto_balance_get),
                 web.get("/risk_alert/settings", self.handle_risk_alert_settings),
                 web.post("/risk_alert/settings", self.handle_risk_alert_update),
                 web.get("/para/risk_alert/settings", self.handle_para_risk_alert_settings),
@@ -4987,6 +4987,31 @@ class CoordinatorApp:
             await self._maybe_para_auto_balance(snapshot)
         return web.json_response(snapshot)
 
+    async def handle_para_control_get(self, request: web.Request) -> web.Response:
+        """Paradex monitor control endpoint.
+
+        Kept separate from /control (used by Backpack + dashboard control plane)
+        to avoid response-shape coupling.
+
+        Response shape matches `monitoring/para_account_monitor.py`:
+        {
+          "agent": {
+            "agent_id": "...",
+            "pending_adjustments": [ ... ]
+          }
+        }
+        """
+
+        # Monitor should be allowed to poll when auth is configured.
+        self._enforce_dashboard_auth(request)
+
+        agent_id = (request.rel_url.query.get("agent_id") or "").strip()
+        if not agent_id:
+            raise web.HTTPBadRequest(text="agent_id is required")
+
+        pending = await self._para_adjustments.pending_for_agent(agent_id)
+        return web.json_response({"agent": {"agent_id": agent_id, "pending_adjustments": pending}})
+
     # -----------------------------
     # Backpack auto balance
     # -----------------------------
@@ -5060,61 +5085,6 @@ class CoordinatorApp:
             "config": self._bp_auto_balance_config_as_payload(),
             "status": self._bp_auto_balance_status_snapshot(),
         })
-
-    async def handle_bp_auto_balance_update(self, request: web.Request) -> web.Response:
-        self._enforce_dashboard_auth(request)
-        try:
-            body = await request.json()
-        except Exception:
-            raise web.HTTPBadRequest(text="auto balance payload must be JSON")
-        if not isinstance(body, dict):
-            raise web.HTTPBadRequest(text="auto balance payload must be an object")
-
-        action_raw = body.get("action")
-        action = str(action_raw).strip().lower() if isinstance(action_raw, str) else None
-        enabled_flag = body.get("enabled")
-        if enabled_flag is False or action == "disable":
-            self._update_bp_auto_balance_config(None)
-            self._persist_bp_auto_balance_config()
-            return web.json_response({
-                "config": None,
-                "status": self._bp_auto_balance_status_snapshot(),
-            })
-
-        try:
-            config = self._parse_auto_balance_config(body, default_currency="USDC")
-        except ValueError as exc:
-            raise web.HTTPBadRequest(text=str(exc))
-
-        self._update_bp_auto_balance_config(config)
-        self._persist_bp_auto_balance_config()
-        return web.json_response({
-            "config": self._bp_auto_balance_config_as_payload(),
-            "status": self._bp_auto_balance_status_snapshot(),
-        })
-
-    def _extract_bp_equity_from_agent(self, agent_payload: Dict[str, Any], *, prefer_available: bool) -> Optional[Decimal]:
-        bp_block = agent_payload.get("backpack_accounts")
-        if not isinstance(bp_block, dict):
-            return None
-        summary = bp_block.get("summary")
-        summary_block = summary if isinstance(summary, dict) else None
-        if summary_block is None:
-            return None
-        # Backpack monitors currently report equity information primarily under
-        # summary.collateral, e.g. netEquity / netEquityAvailable.
-        collateral = summary_block.get("collateral")
-        collateral_block = collateral if isinstance(collateral, dict) else None
-        if collateral_block is not None:
-            preferred = (
-                ("netEquityAvailable", "netEquity", "assetsValue")
-                if prefer_available
-                else ("netEquity", "netEquityAvailable", "assetsValue")
-            )
-            for field in preferred:
-                value = HedgeCoordinator._decimal_from(collateral_block.get(field))
-                if value is not None:
-                    return value
 
         # Fallback: accept any legacy summary-level fields.
         fields_available = ("available_equity", "available_balance", "equity", "balance")
@@ -5645,18 +5615,6 @@ class CoordinatorApp:
                 out = {"agent_id": agent_id, "pending_adjustments": []}
         else:
             out = {"agent_id": agent_id, "pending_adjustments": []}
-
-        # Ensure PARA/GRVT monitors that only poll /control can receive
-        # dashboard-created adjustment requests. Paradex monitor consumes
-        # `agent.pending_adjustments` specifically.
-        with suppress(Exception):
-            para_pending = await self._para_adjustments.pending_for_agent(agent_id)
-            if para_pending:
-                pending_block = out.get("pending_adjustments")
-                if not isinstance(pending_block, list):
-                    pending_block = []
-                # Prepend PARA tasks so they start ASAP; keep existing entries.
-                out["pending_adjustments"] = list(para_pending) + list(pending_block)
 
         # IMPORTANT: also attach Backpack pending adjustments.
         # Backpack monitor executors poll /control; without this they will never
@@ -6846,6 +6804,31 @@ class CoordinatorApp:
         if not positives:
             return Decimal("0")
         return min(positives)
+
+    def _extract_bp_equity_from_agent(self, agent_payload: Dict[str, Any], *, prefer_available: bool) -> Optional[Decimal]:
+        """Extract Backpack 'equity' from an agent snapshot payload.
+
+        Backpack monitor posts payload under key `backpack_accounts` with a `summary`
+        mapping. We keep this helper symmetric with GRVT/PARA extraction so the
+        auto-balance measurement logic can stay venue-agnostic.
+        """
+
+        bp_block = agent_payload.get("backpack_accounts")
+        if not isinstance(bp_block, dict):
+            return None
+        summary = bp_block.get("summary")
+        summary_block = summary if isinstance(summary, dict) else None
+        if summary_block is None:
+            return None
+
+        fields_available = ("available_equity", "available_balance", "equity", "balance")
+        fields_equity_first = ("equity", "balance", "available_equity", "available_balance")
+        fields = fields_available if prefer_available else fields_equity_first
+        for field in fields:
+            value = HedgeCoordinator._decimal_from(summary_block.get(field))
+            if value is not None:
+                return value
+        return None
 
     def _extract_equity_from_agent(self, agent_payload: Dict[str, Any], *, prefer_available: bool) -> Optional[Decimal]:
         grvt_block = agent_payload.get("grvt_accounts")
