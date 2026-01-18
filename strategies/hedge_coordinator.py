@@ -3533,6 +3533,7 @@ class CoordinatorApp:
 
     def _load_persisted_para_auto_balance_config(self) -> None:
         path = PERSISTED_PARA_AUTO_BALANCE_FILE
+        LOGGER.info("PARA auto balance persisted config path: %s", path)
         if not path.exists():
             return
         try:
@@ -3560,12 +3561,16 @@ class CoordinatorApp:
     def _persist_para_auto_balance_config(self) -> None:
         path = PERSISTED_PARA_AUTO_BALANCE_FILE
         try:
+            # Ensure parent directory exists (defensive; should already exist).
+            with suppress(Exception):
+                path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "enabled": bool(self._para_auto_balance_cfg),
                 "config": self._para_auto_balance_config_as_payload(),
                 "updated_at": time.time(),
             }
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            LOGGER.info("Persisted PARA auto balance config to %s (enabled=%s)", path, payload.get("enabled"))
         except Exception as exc:
             LOGGER.warning("Failed to persist PARA auto balance config: %s", exc)
 
