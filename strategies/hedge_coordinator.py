@@ -7349,19 +7349,6 @@ class CoordinatorApp:
                 )
             raise web.HTTPBadRequest(text=str(exc))
 
-        with suppress(Exception):
-            LOGGER.info(
-                "PARA adjust ack received: request_id=%s agent_id=%s status=%s progress=%s filled_qty=%s avg_price=%s order_id=%s algo_id=%s",
-                request_id,
-                agent_id,
-                status,
-                progress,
-                ack_extra.get("filled_qty"),
-                ack_extra.get("avg_price"),
-                ack_extra.get("order_id"),
-                ack_extra.get("algo_id"),
-            )
-
         return web.json_response({"request": payload})
 
     @staticmethod
