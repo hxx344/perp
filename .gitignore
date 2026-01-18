@@ -172,6 +172,7 @@ strategies/.coordinator_state/
 # Runtime persisted auto-balance configs (local machine)
 strategies/.para_auto_balance_config.json
 strategies/.bp_auto_balance_config.json
+strategies/.para_twap_scheduler_config.json
 
 # Spyder project settings
 .spyderproject

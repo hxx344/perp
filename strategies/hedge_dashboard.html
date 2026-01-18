@@ -1951,6 +1951,60 @@
               </div>
               <p class="grvt-adjust-status" id="para-adjust-status">等待指令…</p>
             </div>
+
+            <div class="grvt-adjust-controls" style="margin-top: 0.9rem; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 0.9rem;">
+              <div class="grvt-adjust-header" style="margin-bottom: 0.6rem;">
+                <h3 style="margin: 0 0 0.2rem; font-size: 0.95rem;">定时 TWAP 广播（PARA）</h3>
+                <p class="summary-sub" style="margin: 0;">按固定间隔自动发起与上面一致的广播逻辑（TWAP）</p>
+              </div>
+              <label>
+                间隔 (秒)
+                <input type="number" id="para-twap-schedule-interval" min="30" max="86400" step="30" value="900" />
+              </label>
+              <label>
+                动作
+                <select id="para-twap-schedule-action">
+                  <option value="add" selected>加仓</option>
+                  <option value="reduce">减仓</option>
+                </select>
+              </label>
+              <label>
+                Size
+                <input type="number" id="para-twap-schedule-size" min="0.01" step="0.01" value="1" />
+              </label>
+              <label>
+                TWAP 时长 (秒)
+                <input type="number" id="para-twap-schedule-duration" min="30" max="86400" step="30" value="900" />
+                <small style="color: #8a94a6;">30-86400，30 秒步进</small>
+              </label>
+              <div class="grvt-adjust-buttons">
+                <button type="button" id="para-twap-schedule-start">启用定时</button>
+                <button type="button" class="button-danger" id="para-twap-schedule-stop">停用</button>
+                <button type="button" id="para-twap-schedule-refresh">刷新</button>
+              </div>
+              <p class="grvt-adjust-status" id="para-twap-schedule-status">未启用</p>
+            </div>
+
+            <div class="grvt-adjust-history" style="margin-top: 0.85rem;">
+              <table>
+                <thead>
+                  <tr>
+                    <th>创建时间</th>
+                    <th>动作</th>
+                    <th>数量</th>
+                    <th>币种</th>
+                    <th>间隔</th>
+                    <th>TWAP</th>
+                    <th>累计成交</th>
+                    <th>均价</th>
+                    <th>批次</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody id="para-twap-schedule-history"><tr><td colspan="10">暂无定时记录</td></tr></tbody>
+              </table>
+            </div>
+
             <div class="grvt-adjust-history">
               <table>
                 <thead>
@@ -3831,6 +3885,17 @@
   const paraOrderModeSelect = document.getElementById('para-order-mode');
   const paraTwapDurationInput = document.getElementById('para-twap-duration');
   const paraTwapDurationWrapper = document.getElementById('para-twap-duration-wrapper');
+
+  // PARA scheduled TWAP
+  const paraTwapScheduleIntervalInput = document.getElementById('para-twap-schedule-interval');
+  const paraTwapScheduleActionSelect = document.getElementById('para-twap-schedule-action');
+  const paraTwapScheduleSizeInput = document.getElementById('para-twap-schedule-size');
+  const paraTwapScheduleDurationInput = document.getElementById('para-twap-schedule-duration');
+  const paraTwapScheduleStartButton = document.getElementById('para-twap-schedule-start');
+  const paraTwapScheduleStopButton = document.getElementById('para-twap-schedule-stop');
+  const paraTwapScheduleRefreshButton = document.getElementById('para-twap-schedule-refresh');
+  const paraTwapScheduleStatus = document.getElementById('para-twap-schedule-status');
+  const paraTwapScheduleHistoryBody = document.getElementById('para-twap-schedule-history');
   const paraResetSymbolButton = document.getElementById('para-reset-symbol');
   const paraAdjustAddButton = document.getElementById('para-adjust-add');
   const paraAdjustReduceButton = document.getElementById('para-adjust-reduce');
@@ -8921,6 +8986,248 @@
         return Math.round(clamped / 30) * 30;
       }
 
+      function clampIntervalSeconds(raw) {
+        const value = Number.parseInt(raw, 10);
+        if (!Number.isFinite(value)) {
+          return null;
+        }
+        const clamped = Math.min(86400, Math.max(30, value));
+        return Math.round(clamped / 30) * 30;
+      }
+
+      function formatTs(ts) {
+        const num = Number(ts);
+        if (!Number.isFinite(num) || num <= 0) {
+          return null;
+        }
+        try {
+          return new Date(num * 1000).toLocaleString();
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function renderParaTwapScheduler(scheduler) {
+        if (!paraTwapScheduleStatus) {
+          return;
+        }
+        const enabled = Boolean(scheduler?.enabled);
+        const cfg = scheduler?.config || {};
+        const st = scheduler?.status || {};
+        if (!enabled) {
+          paraTwapScheduleStatus.textContent = '未启用';
+          renderParaTwapSchedulerHistory([]);
+          return;
+        }
+        const action = String(cfg?.action || 'add').toLowerCase();
+        const magnitude = cfg?.magnitude ?? '--';
+        const scope = describeSymbolScope(cfg?.symbols);
+        const interval = cfg?.interval_seconds ?? '--';
+        const duration = cfg?.twap_duration_seconds ?? '--';
+        const nextText = formatTs(st?.next_run_at);
+        const lastText = formatTs(st?.last_run_at);
+        const err = st?.last_error;
+        if (err) {
+          paraTwapScheduleStatus.textContent = `已启用（${describeAdjustmentAction(action)} ${magnitude} ${scope}，间隔 ${interval}s，TWAP ${duration}s）｜错误：${err}`;
+          return;
+        }
+        const timing = [lastText ? `上次：${lastText}` : null, nextText ? `下次：${nextText}` : null].filter(Boolean).join(' ｜ ');
+        paraTwapScheduleStatus.textContent = `已启用（${describeAdjustmentAction(action)} ${magnitude} ${scope}，间隔 ${interval}s，TWAP ${duration}s）${timing ? ' ｜ ' + timing : ''}`;
+
+        // History rollups (multiple TWAP executions accumulated under one run record).
+        renderParaTwapSchedulerHistory(st?.history);
+      }
+
+      function renderParaTwapSchedulerHistory(history) {
+        if (!paraTwapScheduleHistoryBody) {
+          return;
+        }
+        const rows = [];
+        const items = Array.isArray(history) ? history : [];
+        if (!items.length) {
+          paraTwapScheduleHistoryBody.innerHTML = '<tr><td colspan="10">暂无定时记录</td></tr>';
+          return;
+        }
+
+        const safeText = (value) => {
+          if (value === undefined || value === null) {
+            return '--';
+          }
+          const text = String(value).trim();
+          return text ? text : '--';
+        };
+
+        const formatMaybeNumber = (value, decimals = 6) => {
+          if (value === undefined || value === null) {
+            return '--';
+          }
+          const raw = String(value).trim();
+          if (!raw) {
+            return '--';
+          }
+          const parsed = Number(raw);
+          if (!Number.isFinite(parsed)) {
+            return raw;
+          }
+          const fixed = parsed.toFixed(Math.min(8, Math.max(0, decimals)));
+          return fixed.replace(/\.0+$/, '').replace(/(\.[0-9]*?)0+$/, '$1');
+        };
+
+        const formatTs = (tsSeconds) => {
+          const num = Number(tsSeconds);
+          if (!Number.isFinite(num) || num <= 0) {
+            return '--';
+          }
+          try {
+            return new Date(num * 1000).toLocaleString();
+          } catch (_) {
+            return '--';
+          }
+        };
+
+        const parseMsToText = (ms) => {
+          const n = Number(ms);
+          if (!Number.isFinite(n) || n <= 0) {
+            return '--';
+          }
+          try {
+            return new Date(n).toLocaleString();
+          } catch (_) {
+            return '--';
+          }
+        };
+
+        const scopeFor = (symbols) => describeSymbolScope(symbols);
+
+        const statusFor = (rollup, lastError) => {
+          if (lastError) {
+            return `错误：${safeText(lastError)}`;
+          }
+          const r = (rollup && typeof rollup === 'object') ? rollup : {};
+          const completed = Number(r.completed ?? 0);
+          const failed = Number(r.failed ?? 0);
+          const pending = Number(r.pending ?? 0);
+          const inProgress = Number(r.in_progress ?? 0);
+          const total = Number(r.request_count ?? 0);
+          return `批次 ${completed}/${total} 完成，失败 ${failed}，进行中 ${inProgress}，待ACK ${pending}`;
+        };
+
+        for (const item of items.slice(0, 20)) {
+          const cfg = (item?.config && typeof item.config === 'object') ? item.config : {};
+          const roll = (item?.rollup && typeof item.rollup === 'object') ? item.rollup : {};
+          const requestCount = Number(roll.request_count ?? (Array.isArray(item?.request_ids) ? item.request_ids.length : 0));
+
+          const createdText = formatTs(item?.created_at);
+          const action = String(cfg?.action || '--').toLowerCase();
+          const magnitude = formatMaybeNumber(cfg?.magnitude ?? '--', 6);
+          const scope = scopeFor(cfg?.symbols);
+          const interval = safeText(cfg?.interval_seconds);
+          const duration = safeText(cfg?.twap_duration_seconds);
+          const filledTotal = formatMaybeNumber(roll?.filled_qty_total ?? '--', 6);
+          const avgPrice = roll?.avg_price === null ? '--' : formatMaybeNumber(roll?.avg_price ?? '--', 6);
+
+          const finishedAt = roll?.end_at_ms ? parseMsToText(roll.end_at_ms) : '--';
+          const updatedAt = roll?.last_updated_at_ms ? parseMsToText(roll.last_updated_at_ms) : '--';
+          const timing = finishedAt !== '--' ? `完成 ${finishedAt}` : (updatedAt !== '--' ? `更新 ${updatedAt}` : '--');
+
+          rows.push(`
+            <tr>
+              <td>${escapeHtml(createdText)}</td>
+              <td>${escapeHtml(describeAdjustmentAction(action))}</td>
+              <td>${escapeHtml(String(magnitude))}</td>
+              <td>${escapeHtml(scope)}</td>
+              <td>${escapeHtml(String(interval))}s</td>
+              <td>${escapeHtml(String(duration))}s</td>
+              <td>${escapeHtml(String(filledTotal))}</td>
+              <td>${escapeHtml(String(avgPrice))}</td>
+              <td>${escapeHtml(String(requestCount))}</td>
+              <td title="${escapeHtml(timing)}">${escapeHtml(statusFor(roll, item?.last_error))}</td>
+            </tr>
+          `);
+        }
+
+        paraTwapScheduleHistoryBody.innerHTML = rows.join('');
+      }
+
+      async function refreshParaTwapScheduler() {
+        try {
+          const response = await fetch('/para/twap_scheduler/config');
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            return;
+          }
+          const data = await response.json();
+          renderParaTwapScheduler(data);
+        } catch (_) {
+          // ignore
+        }
+      }
+
+      async function submitParaTwapSchedulerConfig() {
+        const interval = clampIntervalSeconds(paraTwapScheduleIntervalInput?.value ?? 900) || 900;
+        const duration = clampTwapDurationSeconds(paraTwapScheduleDurationInput?.value ?? 900) || 900;
+        const rawMagnitude = parseFloat(paraTwapScheduleSizeInput?.value ?? '1');
+        const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : 1;
+        const action = (paraTwapScheduleActionSelect?.value || 'add').toLowerCase();
+        const payload = {
+          enabled: true,
+          action,
+          magnitude,
+          interval_seconds: interval,
+          twap_duration_seconds: duration,
+        };
+        const symbols = getSelectedParaSymbols();
+        if (symbols) {
+          payload.symbols = symbols;
+        }
+        if (paraTwapScheduleStatus) {
+          paraTwapScheduleStatus.textContent = '提交定时配置…';
+        }
+        try {
+          const response = await fetch('/para/twap_scheduler/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const data = await response.json();
+          renderParaTwapScheduler({ enabled: data?.enabled, config: data?.config, status: data?.status });
+          await refreshMetrics();
+        } catch (error) {
+          if (paraTwapScheduleStatus) {
+            paraTwapScheduleStatus.textContent = `提交失败：${error}`;
+          }
+        }
+      }
+
+      async function disableParaTwapScheduler() {
+        if (paraTwapScheduleStatus) {
+          paraTwapScheduleStatus.textContent = '停用中…';
+        }
+        try {
+          const response = await fetch('/para/twap_scheduler/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'disable', enabled: false }),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          renderParaTwapScheduler({ enabled: false });
+          await refreshMetrics();
+        } catch (error) {
+          if (paraTwapScheduleStatus) {
+            paraTwapScheduleStatus.textContent = `停用失败：${error}`;
+          }
+        }
+      }
+
       function updateTwapVisibility() {
   const mode = (paraOrderModeSelect?.value || 'twap').toLowerCase();
         if (paraTwapDurationWrapper) {
@@ -12696,6 +13003,7 @@
           renderGrvt(data);
           renderBackpack(data);
           renderParaAdjustments(data?.para_adjustments);
+          renderParaTwapScheduler(data?.para_twap_scheduler);
           renderGrvtAdjustments(data?.grvt_adjustments);
           const bpAdjPayload = await fetchBackpackAdjustments();
           renderBackpackAdjustments(bpAdjPayload);
@@ -12718,6 +13026,17 @@
           agentEmpty.textContent = 'Unable to load metrics at the moment.';
           // BTC/ETH Volatility panel removed.
         }
+      }
+
+      // Wire PARA scheduled TWAP buttons
+      if (paraTwapScheduleStartButton) {
+        paraTwapScheduleStartButton.addEventListener('click', () => submitParaTwapSchedulerConfig());
+      }
+      if (paraTwapScheduleStopButton) {
+        paraTwapScheduleStopButton.addEventListener('click', () => disableParaTwapScheduler());
+      }
+      if (paraTwapScheduleRefreshButton) {
+        paraTwapScheduleRefreshButton.addEventListener('click', () => refreshParaTwapScheduler());
       }
 
       // Simulation inputs removed.

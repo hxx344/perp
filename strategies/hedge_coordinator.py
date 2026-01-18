@@ -141,6 +141,7 @@ def _bp_env_diagnostics() -> Dict[str, Any]:
 
 PERSISTED_PARA_AUTO_BALANCE_FILE = Path(__file__).with_name(".para_auto_balance_config.json")
 PERSISTED_BP_AUTO_BALANCE_FILE = Path(__file__).with_name(".bp_auto_balance_config.json")
+PERSISTED_PARA_TWAP_SCHEDULER_FILE = Path(__file__).with_name(".para_twap_scheduler_config.json")
 BP_VOLUME_HISTORY_FILE = Path(__file__).with_name(".bp_volume_history.json")
 BP_ADJUSTMENTS_HISTORY_FILE = Path(__file__).with_name(".bp_adjustments_history.json")
 DASHBOARD_PATH = Path(__file__).with_name("hedge_dashboard.html")
@@ -3434,6 +3435,31 @@ class CoordinatorApp:
         }
         self._para_auto_balance_task: Optional[asyncio.Task] = None
 
+        # PARA TWAP scheduler (dashboard-triggered periodic PARA adjustments)
+        # Config shape (persisted):
+        # {
+        #   "enabled": true,
+        #   "config": {
+        #     "action": "add"|"reduce",
+        #     "magnitude": 1.0,
+        #     "symbols": ["BTC"],
+        #     "interval_seconds": 900,
+        #     "twap_duration_seconds": 900
+        #   }
+        # }
+        self._para_twap_scheduler_cfg: Optional[Dict[str, Any]] = None
+        self._para_twap_scheduler_status: Dict[str, Any] = {
+            "running": False,
+            "next_run_at": None,
+            "last_run_at": None,
+            "last_request_id": None,
+            "last_error": None,
+            "last_result": None,
+            "history": [],
+        }
+        self._para_twap_scheduler_task: Optional[asyncio.Task] = None
+        self._para_twap_scheduler_history_limit: int = 20
+
         # Backpack auto balance (equity equalization via internal transfer)
         self._bp_auto_balance_cfg: Optional[AutoBalanceConfig] = None
         self._bp_auto_balance_lock = asyncio.Lock()
@@ -3475,6 +3501,7 @@ class CoordinatorApp:
         # Load persisted auto balance configs (if any)
         self._load_persisted_para_auto_balance_config()
         self._load_persisted_bp_auto_balance_config()
+        self._load_persisted_para_twap_scheduler_config()
         self._app = web.Application()
         self._app.add_routes(
             [
@@ -3491,6 +3518,8 @@ class CoordinatorApp:
                 web.post("/auto_balance/config", self.handle_auto_balance_update),
                 web.get("/para/auto_balance/config", self.handle_para_auto_balance_get),
                 web.post("/para/auto_balance/config", self.handle_para_auto_balance_update),
+                web.get("/para/twap_scheduler/config", self.handle_para_twap_scheduler_get),
+                web.post("/para/twap_scheduler/config", self.handle_para_twap_scheduler_update),
                 web.get("/backpack/auto_balance/config", self.handle_bp_auto_balance_get),
                 web.post("/backpack/auto_balance/config", self.handle_bp_auto_balance_update),
                 web.get("/risk_alert/settings", self.handle_risk_alert_settings),
@@ -3530,6 +3559,393 @@ class CoordinatorApp:
         )
         self._app.on_startup.append(self._on_startup)
         self._app.on_cleanup.append(self._on_cleanup)
+
+    # -----------------------------
+    # PARA TWAP scheduler
+    # -----------------------------
+
+    def _load_persisted_para_twap_scheduler_config(self) -> None:
+        path = PERSISTED_PARA_TWAP_SCHEDULER_FILE
+        raw = _load_json_file(path, default=None)
+        if not isinstance(raw, dict) or not raw:
+            return
+        enabled = bool(raw.get("enabled"))
+        cfg_raw = raw.get("config")
+        if not enabled:
+            self._update_para_twap_scheduler_config(None)
+            return
+        if not isinstance(cfg_raw, dict):
+            return
+        try:
+            cfg = self._parse_para_twap_scheduler_config(cfg_raw)
+        except Exception:
+            return
+        self._update_para_twap_scheduler_config(cfg)
+
+    def _persist_para_twap_scheduler_config(self) -> None:
+        payload = {
+            "enabled": bool(self._para_twap_scheduler_cfg),
+            "config": dict(self._para_twap_scheduler_cfg or {}),
+        }
+        _atomic_write_json(PERSISTED_PARA_TWAP_SCHEDULER_FILE, payload)
+
+    def _parse_para_twap_scheduler_config(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        action_raw = (body.get("action") or "").strip().lower()
+        if action_raw not in {"add", "reduce"}:
+            raise ValueError("action must be 'add' or 'reduce'")
+
+        magnitude_raw = body.get("magnitude", 1)
+        try:
+            magnitude = float(magnitude_raw)
+        except (TypeError, ValueError):
+            raise ValueError("magnitude must be numeric")
+        if not (magnitude > 0):
+            raise ValueError("magnitude must be positive")
+
+        interval_raw = body.get("interval_seconds")
+        try:
+            interval_seconds = int(float(900 if interval_raw is None else interval_raw))
+        except (TypeError, ValueError):
+            interval_seconds = 900
+        interval_seconds = max(30, min(86400, interval_seconds))
+
+        duration_raw = body.get("twap_duration_seconds")
+        try:
+            twap_duration_seconds = int(float(900 if duration_raw is None else duration_raw))
+        except (TypeError, ValueError):
+            twap_duration_seconds = 900
+        # Keep same clamping rule as handle_para_adjust
+        twap_duration_seconds = max(30, min(86400, int(round(twap_duration_seconds / 30) * 30)))
+
+        symbols_raw = body.get("symbols")
+        if symbols_raw is None and body.get("symbol"):
+            symbols_raw = [body.get("symbol")]
+        symbols: Optional[List[str]]
+        if symbols_raw is None:
+            symbols = None
+        elif isinstance(symbols_raw, list):
+            normalized: List[str] = []
+            for item in symbols_raw:
+                value = self._normalize_symbol(item)
+                if value and value not in normalized:
+                    normalized.append(value)
+            symbols = normalized
+        else:
+            raise ValueError("symbols must be an array of strings")
+
+        return {
+            "action": action_raw,
+            "magnitude": magnitude,
+            "interval_seconds": interval_seconds,
+            "twap_duration_seconds": twap_duration_seconds,
+            "symbols": symbols,
+        }
+
+    def _update_para_twap_scheduler_config(self, cfg: Optional[Dict[str, Any]]) -> None:
+        self._para_twap_scheduler_cfg = dict(cfg) if isinstance(cfg, dict) else None
+        self._para_twap_scheduler_status["last_error"] = None
+        self._para_twap_scheduler_status["last_result"] = None
+
+        if not self._para_twap_scheduler_cfg:
+            self._stop_para_twap_scheduler()
+            self._para_twap_scheduler_status["running"] = False
+            self._para_twap_scheduler_status["next_run_at"] = None
+            return
+        self._start_para_twap_scheduler()
+
+    def _para_twap_scheduler_add_history_entry(self, entry: Dict[str, Any]) -> None:
+        history = self._para_twap_scheduler_status.get("history")
+        if not isinstance(history, list):
+            history = []
+        history.insert(0, entry)
+        del history[self._para_twap_scheduler_history_limit :]
+        self._para_twap_scheduler_status["history"] = history
+
+    async def _para_twap_scheduler_rollup_history(self) -> None:
+        """Compute rollup progress for recent scheduler runs.
+
+        We derive rollups from the adjustment manager's stored requests.
+        Each scheduler history entry stores request_ids executed under it.
+        """
+
+        history = self._para_twap_scheduler_status.get("history")
+        if not isinstance(history, list) or not history:
+            return
+
+        # Pull a bounded set of requests and build an index.
+        summary = await self._para_adjustments.summary()
+        requests = summary.get("requests")
+        if not isinstance(requests, list):
+            return
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for req in requests:
+            if isinstance(req, dict) and req.get("request_id"):
+                by_id[str(req.get("request_id"))] = req
+
+        def _safe_float(val: Any) -> Optional[float]:
+            try:
+                if val is None:
+                    return None
+                f = float(str(val).strip())
+                if not (f >= 0):
+                    return None
+                return f
+            except Exception:
+                return None
+
+        def _norm_ms(val: Any) -> Optional[int]:
+            try:
+                if val is None:
+                    return None
+                n = int(float(str(val).strip()))
+            except Exception:
+                return None
+            if n <= 0:
+                return None
+            # Heuristic seconds vs ms.
+            return n * 1000 if n < 10_000_000_000 else n
+
+        for ent in history[: self._para_twap_scheduler_history_limit]:
+            if not isinstance(ent, dict):
+                continue
+            req_ids = ent.get("request_ids")
+            if not isinstance(req_ids, list) or not req_ids:
+                ent["rollup"] = {
+                    "request_count": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "pending": 0,
+                    "in_progress": 0,
+                    "filled_qty_total": 0.0,
+                    "avg_price": None,
+                    "last_updated_at_ms": None,
+                    "end_at_ms": None,
+                }
+                continue
+
+            filled_sum = 0.0
+            filled_price_num = 0.0
+            filled_price_den = 0.0
+            completed = 0
+            failed = 0
+            in_progress = 0
+            pending = 0
+            last_updated_ms: Optional[int] = None
+            end_at_ms: Optional[int] = None
+
+            for rid in req_ids:
+                req = by_id.get(str(rid))
+                if not isinstance(req, dict):
+                    continue
+
+                agents = req.get("agents")
+                if not isinstance(agents, list):
+                    agents = []
+
+                per_request_statuses: List[str] = []
+                for agent in agents:
+                    if not isinstance(agent, dict):
+                        continue
+                    per_request_statuses.append(str(agent.get("status") or "").lower())
+                    extra_obj = agent.get("extra")
+                    extra: Dict[str, Any] = extra_obj if isinstance(extra_obj, dict) else {}
+
+                    fq = _safe_float(extra.get("filled_qty"))
+                    ap = _safe_float(extra.get("avg_price"))
+                    if fq is not None:
+                        filled_sum += fq
+                        if ap is not None:
+                            filled_price_num += fq * ap
+                            filled_price_den += fq
+
+                    ms = _norm_ms(extra.get("last_updated_at") or extra.get("updated_at"))
+                    if ms is not None:
+                        last_updated_ms = max(last_updated_ms or 0, ms)
+                    ms_end = _norm_ms(extra.get("end_at"))
+                    if ms_end is not None:
+                        end_at_ms = max(end_at_ms or 0, ms_end)
+
+                overall = str(req.get("overall_status") or req.get("status") or "").lower()
+                statuses = per_request_statuses or ([overall] if overall else [])
+                if statuses and all(s in {"completed", "acknowledged", "success", "succeeded"} for s in statuses):
+                    completed += 1
+                elif any(s in {"failed", "error"} for s in statuses):
+                    failed += 1
+                elif any(s in {"pending"} for s in statuses):
+                    pending += 1
+                else:
+                    in_progress += 1
+
+            ent["rollup"] = {
+                "request_count": len(req_ids),
+                "completed": completed,
+                "failed": failed,
+                "pending": pending,
+                "in_progress": in_progress,
+                "filled_qty_total": round(filled_sum, 6),
+                "avg_price": (filled_price_num / filled_price_den) if filled_price_den > 0 else None,
+                "last_updated_at_ms": last_updated_ms,
+                "end_at_ms": end_at_ms,
+            }
+
+    def _start_para_twap_scheduler(self) -> None:
+        task = getattr(self, "_para_twap_scheduler_task", None)
+        if task is not None and not task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # startup not done yet
+            return
+        self._para_twap_scheduler_task = loop.create_task(self._para_twap_scheduler_loop())
+
+    def _stop_para_twap_scheduler(self) -> None:
+        task = getattr(self, "_para_twap_scheduler_task", None)
+        if task and not task.done():
+            task.cancel()
+        self._para_twap_scheduler_task = None
+
+    async def _para_twap_scheduler_loop(self) -> None:
+        self._para_twap_scheduler_status["running"] = True
+        while True:
+            cfg = self._para_twap_scheduler_cfg
+            if not isinstance(cfg, dict) or not cfg:
+                self._para_twap_scheduler_status["running"] = False
+                self._para_twap_scheduler_status["next_run_at"] = None
+                return
+
+            interval_seconds = int(cfg.get("interval_seconds") or 900)
+            interval_seconds = max(30, min(86400, interval_seconds))
+            next_run = time.time() + interval_seconds
+            self._para_twap_scheduler_status["next_run_at"] = next_run
+
+            try:
+                await asyncio.sleep(interval_seconds)
+            except asyncio.CancelledError:
+                self._para_twap_scheduler_status["running"] = False
+                self._para_twap_scheduler_status["next_run_at"] = None
+                raise
+
+            # Re-check cfg after sleep (operator might have disabled/updated settings)
+            cfg = self._para_twap_scheduler_cfg
+            if not isinstance(cfg, dict) or not cfg:
+                continue
+
+            try:
+                result = await self._fire_para_twap_scheduler_once(cfg)
+                self._para_twap_scheduler_status["last_result"] = result
+                self._para_twap_scheduler_status["last_error"] = None
+            except Exception as exc:
+                self._para_twap_scheduler_status["last_error"] = str(exc)
+                self._para_twap_scheduler_status["last_result"] = None
+
+    async def _fire_para_twap_scheduler_once(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
+        action = str(cfg.get("action") or "").strip().lower()
+        magnitude = float(cfg.get("magnitude") or 1.0)
+        symbols = cfg.get("symbols")
+        if symbols is not None and not isinstance(symbols, list):
+            symbols = None
+
+        twap_duration_seconds = int(cfg.get("twap_duration_seconds") or 900)
+        twap_duration_seconds = max(30, min(86400, int(round(twap_duration_seconds / 30) * 30)))
+
+        agent_ids = await self._coordinator.list_agent_ids()
+        if not agent_ids:
+            raise RuntimeError("No agent IDs available for scheduled adjustment; ensure bots are reporting metrics")
+
+        # Same payload shape as manual /para/adjust
+        extra_payload: Dict[str, Any] = {
+            "order_mode": "twap",
+            "twap_duration_seconds": twap_duration_seconds,
+            "algo_type": "TWAP",
+        }
+
+        created_by = "dashboard:scheduler"
+        payload = await self._para_adjustments.create_request(
+            action=cast(AdjustmentAction, action),
+            magnitude=magnitude,
+            agent_ids=agent_ids,
+            symbols=symbols,
+            created_by=created_by,
+            payload=extra_payload,
+        )
+
+        now = time.time()
+        self._para_twap_scheduler_status["last_run_at"] = now
+        self._para_twap_scheduler_status["last_request_id"] = payload.get("request_id")
+
+        # Attach request id into a scheduler-run history entry.
+        try:
+            history = self._para_twap_scheduler_status.get("history")
+            if not isinstance(history, list) or not history or not isinstance(history[0], dict):
+                entry: Dict[str, Any] = {
+                    "run_id": f"run-{int(now)}",
+                    "created_at": now,
+                    "config": {
+                        "action": action,
+                        "magnitude": magnitude,
+                        "symbols": symbols,
+                        "interval_seconds": int(cfg.get("interval_seconds") or 900),
+                        "twap_duration_seconds": twap_duration_seconds,
+                    },
+                    "request_ids": [],
+                    "last_request_id": None,
+                    "last_fire_at": None,
+                }
+                self._para_twap_scheduler_add_history_entry(entry)
+                history = self._para_twap_scheduler_status.get("history")
+
+            entry_opt: Optional[Dict[str, Any]] = history[0] if isinstance(history, list) and history and isinstance(history[0], dict) else None
+            if entry_opt is not None:
+                cfg_obj = entry_opt.get("config")
+                cfg_sig: Dict[str, Any] = cfg_obj if isinstance(cfg_obj, dict) else {}
+                if (
+                    str(cfg_sig.get("action") or "") != action
+                    or str(cfg_sig.get("twap_duration_seconds") or "") != str(twap_duration_seconds)
+                    or str(cfg_sig.get("interval_seconds") or "") != str(int(cfg.get("interval_seconds") or 900))
+                    or str(cfg_sig.get("magnitude") or "") != str(magnitude)
+                    or (cfg_sig.get("symbols") or None) != (symbols or None)
+                ):
+                    entry_opt = {
+                        "run_id": f"run-{int(now)}",
+                        "created_at": now,
+                        "config": {
+                            "action": action,
+                            "magnitude": magnitude,
+                            "symbols": symbols,
+                            "interval_seconds": int(cfg.get("interval_seconds") or 900),
+                            "twap_duration_seconds": twap_duration_seconds,
+                        },
+                        "request_ids": [],
+                        "last_request_id": None,
+                        "last_fire_at": None,
+                    }
+                    self._para_twap_scheduler_add_history_entry(entry_opt)
+
+                rid = payload.get("request_id")
+                if rid:
+                    req_ids = entry_opt.get("request_ids")
+                    if not isinstance(req_ids, list):
+                        req_ids = []
+                    req_ids.append(str(rid))
+                    entry_opt["request_ids"] = req_ids
+                    entry_opt["last_request_id"] = str(rid)
+                    entry_opt["last_fire_at"] = now
+        except Exception:
+            pass
+
+        with suppress(Exception):
+            await self._para_twap_scheduler_rollup_history()
+        return {
+            "ok": True,
+            "request_id": payload.get("request_id"),
+            "action": action,
+            "magnitude": magnitude,
+            "symbols": symbols,
+            "twap_duration_seconds": twap_duration_seconds,
+            "agent_count": len(agent_ids),
+            "ts": now,
+        }
 
     def _load_persisted_para_auto_balance_config(self) -> None:
         path = PERSISTED_PARA_AUTO_BALANCE_FILE
@@ -4484,6 +4900,8 @@ class CoordinatorApp:
 
     async def handle_metrics(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
+        with suppress(Exception):
+            await self._para_twap_scheduler_rollup_history()
         payload = await self._coordinator.snapshot()
         payload["grvt_adjustments"] = await self._adjustments.summary()
         payload["para_adjustments"] = await self._para_adjustments.summary()
@@ -4557,6 +4975,9 @@ class CoordinatorApp:
         snapshot["auto_balance"] = self._auto_balance_status_snapshot()
         snapshot["para_auto_balance"] = self._para_auto_balance_status_snapshot()
         snapshot["bp_auto_balance"] = self._bp_auto_balance_status_snapshot()
+
+        with suppress(Exception):
+            await self._para_twap_scheduler_rollup_history()
 
         # Trigger backpack auto balance evaluation in the background.
         # We intentionally do this post-update so it uses the freshest snapshot.
@@ -5324,6 +5745,48 @@ class CoordinatorApp:
         return web.json_response({
             "config": self._para_auto_balance_config_as_payload(),
             "status": self._para_auto_balance_status_snapshot(),
+        })
+
+    async def handle_para_twap_scheduler_get(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        return web.json_response({
+            "enabled": bool(self._para_twap_scheduler_cfg),
+            "config": dict(self._para_twap_scheduler_cfg or {}),
+            "status": dict(self._para_twap_scheduler_status or {}),
+        })
+
+    async def handle_para_twap_scheduler_update(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="twap scheduler payload must be JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="twap scheduler payload must be an object")
+
+        action_raw = body.get("action")
+        action = str(action_raw).strip().lower() if isinstance(action_raw, str) else None
+        enabled_flag = body.get("enabled")
+        if enabled_flag is False or action == "disable":
+            self._update_para_twap_scheduler_config(None)
+            self._persist_para_twap_scheduler_config()
+            return web.json_response({
+                "enabled": False,
+                "config": None,
+                "status": dict(self._para_twap_scheduler_status or {}),
+            })
+
+        try:
+            cfg = self._parse_para_twap_scheduler_config(body)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+
+        self._update_para_twap_scheduler_config(cfg)
+        self._persist_para_twap_scheduler_config()
+        return web.json_response({
+            "enabled": True,
+            "config": dict(self._para_twap_scheduler_cfg or {}),
+            "status": dict(self._para_twap_scheduler_status or {}),
         })
 
     async def handle_risk_alert_settings(self, request: web.Request) -> web.Response:
