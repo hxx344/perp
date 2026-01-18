@@ -3674,13 +3674,32 @@ class CoordinatorApp:
 
     def _update_para_twap_scheduler_tasks(self, tasks: List[Dict[str, Any]]) -> None:
         normalized: List[Dict[str, Any]] = []
+        seen_ids: set = set()
+        seen_signatures: set = set()
         for t in tasks or []:
             if not isinstance(t, dict):
                 continue
             if t.get("enabled") is False:
                 continue
             # Ensure task has required shape.
-            normalized.append(self._parse_para_twap_scheduler_task(t))
+            parsed = self._parse_para_twap_scheduler_task(t)
+            task_id = str(parsed.get("task_id") or "")
+            symbols = tuple(parsed.get("symbols") or [])
+            signature = (
+                parsed.get("action"),
+                float(parsed.get("magnitude") or 0),
+                int(parsed.get("interval_seconds") or 0),
+                int(parsed.get("twap_duration_seconds") or 0),
+                symbols,
+            )
+            if task_id and task_id in seen_ids:
+                continue
+            if not task_id and signature in seen_signatures:
+                continue
+            if task_id:
+                seen_ids.add(task_id)
+            seen_signatures.add(signature)
+            normalized.append(parsed)
 
         self._para_twap_scheduler_tasks = normalized
         self._para_twap_scheduler_status["last_error"] = None
