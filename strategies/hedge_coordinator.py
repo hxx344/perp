@@ -3436,18 +3436,23 @@ class CoordinatorApp:
         self._para_auto_balance_task: Optional[asyncio.Task] = None
 
         # PARA TWAP scheduler (dashboard-triggered periodic PARA adjustments)
-        # Config shape (persisted):
+        # Persisted shape (v2):
         # {
         #   "enabled": true,
-        #   "config": {
-        #     "action": "add"|"reduce",
-        #     "magnitude": 1.0,
-        #     "symbols": ["BTC"],
-        #     "interval_seconds": 900,
-        #     "twap_duration_seconds": 900
-        #   }
+        #   "tasks": [
+        #     {
+        #       "task_id": "...",
+        #       "enabled": true,
+        #       "action": "add"|"reduce",
+        #       "magnitude": 1.0,
+        #       "symbols": ["BTC"],
+        #       "interval_seconds": 900,
+        #       "twap_duration_seconds": 900
+        #     }
+        #   ]
         # }
-        self._para_twap_scheduler_cfg: Optional[Dict[str, Any]] = None
+        # Backward-compat: legacy payload stored a single {enabled, config:{...}}.
+        self._para_twap_scheduler_tasks: List[Dict[str, Any]] = []
         self._para_twap_scheduler_status: Dict[str, Any] = {
             "running": False,
             "next_run_at": None,
@@ -3570,26 +3575,48 @@ class CoordinatorApp:
         if not isinstance(raw, dict) or not raw:
             return
         enabled = bool(raw.get("enabled"))
-        cfg_raw = raw.get("config")
         if not enabled:
-            self._update_para_twap_scheduler_config(None)
+            self._update_para_twap_scheduler_tasks([])
             return
+
+        # v2: tasks list
+        tasks_raw = raw.get("tasks")
+        if isinstance(tasks_raw, list):
+            tasks: List[Dict[str, Any]] = []
+            for item in tasks_raw:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("enabled") is False:
+                    continue
+                try:
+                    tasks.append(self._parse_para_twap_scheduler_task(item))
+                except Exception:
+                    continue
+            self._update_para_twap_scheduler_tasks(tasks)
+            return
+
+        # legacy: single config
+        cfg_raw = raw.get("config")
         if not isinstance(cfg_raw, dict):
             return
         try:
-            cfg = self._parse_para_twap_scheduler_config(cfg_raw)
+            legacy = self._parse_para_twap_scheduler_task(cfg_raw)
         except Exception:
             return
-        self._update_para_twap_scheduler_config(cfg)
+        self._update_para_twap_scheduler_tasks([legacy])
 
     def _persist_para_twap_scheduler_config(self) -> None:
+        enabled = any(bool(t.get("enabled", True)) for t in (self._para_twap_scheduler_tasks or []))
         payload = {
-            "enabled": bool(self._para_twap_scheduler_cfg),
-            "config": dict(self._para_twap_scheduler_cfg or {}),
+            "enabled": bool(enabled),
+            "tasks": [dict(t) for t in (self._para_twap_scheduler_tasks or [])],
         }
         _atomic_write_json(PERSISTED_PARA_TWAP_SCHEDULER_FILE, payload)
 
-    def _parse_para_twap_scheduler_config(self, body: Dict[str, Any]) -> Dict[str, Any]:
+    def _parse_para_twap_scheduler_task(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        task_id_raw = body.get("task_id")
+        task_id = str(task_id_raw).strip() if task_id_raw else f"task-{int(time.time() * 1000)}"
+
         action_raw = (body.get("action") or "").strip().lower()
         if action_raw not in {"add", "reduce"}:
             raise ValueError("action must be 'add' or 'reduce'")
@@ -3622,18 +3649,22 @@ class CoordinatorApp:
             symbols_raw = [body.get("symbol")]
         symbols: Optional[List[str]]
         if symbols_raw is None:
-            symbols = None
+            raise ValueError("symbols is required; specify at least one symbol")
         elif isinstance(symbols_raw, list):
             normalized: List[str] = []
             for item in symbols_raw:
                 value = self._normalize_symbol(item)
                 if value and value not in normalized:
                     normalized.append(value)
+            if not normalized:
+                raise ValueError("symbols is required; specify at least one symbol")
             symbols = normalized
         else:
             raise ValueError("symbols must be an array of strings")
 
         return {
+            "task_id": task_id,
+            "enabled": True if body.get("enabled") is None else bool(body.get("enabled")),
             "action": action_raw,
             "magnitude": magnitude,
             "interval_seconds": interval_seconds,
@@ -3641,12 +3672,21 @@ class CoordinatorApp:
             "symbols": symbols,
         }
 
-    def _update_para_twap_scheduler_config(self, cfg: Optional[Dict[str, Any]]) -> None:
-        self._para_twap_scheduler_cfg = dict(cfg) if isinstance(cfg, dict) else None
+    def _update_para_twap_scheduler_tasks(self, tasks: List[Dict[str, Any]]) -> None:
+        normalized: List[Dict[str, Any]] = []
+        for t in tasks or []:
+            if not isinstance(t, dict):
+                continue
+            if t.get("enabled") is False:
+                continue
+            # Ensure task has required shape.
+            normalized.append(self._parse_para_twap_scheduler_task(t))
+
+        self._para_twap_scheduler_tasks = normalized
         self._para_twap_scheduler_status["last_error"] = None
         self._para_twap_scheduler_status["last_result"] = None
 
-        if not self._para_twap_scheduler_cfg:
+        if not self._para_twap_scheduler_tasks:
             self._stop_para_twap_scheduler()
             self._para_twap_scheduler_status["running"] = False
             self._para_twap_scheduler_status["next_run_at"] = None
@@ -3808,31 +3848,67 @@ class CoordinatorApp:
     async def _para_twap_scheduler_loop(self) -> None:
         self._para_twap_scheduler_status["running"] = True
         while True:
-            cfg = self._para_twap_scheduler_cfg
-            if not isinstance(cfg, dict) or not cfg:
+            tasks = list(self._para_twap_scheduler_tasks or [])
+            if not tasks:
                 self._para_twap_scheduler_status["running"] = False
                 self._para_twap_scheduler_status["next_run_at"] = None
                 return
 
-            interval_seconds = int(cfg.get("interval_seconds") or 900)
-            interval_seconds = max(30, min(86400, interval_seconds))
-            try:
-                result = await self._fire_para_twap_scheduler_once(cfg)
-                self._para_twap_scheduler_status["last_result"] = result
-                self._para_twap_scheduler_status["last_error"] = None
-            except Exception as exc:
-                self._para_twap_scheduler_status["last_error"] = str(exc)
-                self._para_twap_scheduler_status["last_result"] = None
+            now = time.time()
 
-            next_run = time.time() + interval_seconds
+            # Init next_run_at for newly enabled tasks (enable -> immediate fire).
+            for t in tasks:
+                if not isinstance(t, dict) or t.get("enabled") is False:
+                    continue
+                if t.get("next_run_at") is None:
+                    t["next_run_at"] = now
+
+            enabled = [t for t in tasks if isinstance(t, dict) and t.get("enabled") is not False]
+            if not enabled:
+                self._para_twap_scheduler_status["running"] = False
+                self._para_twap_scheduler_status["next_run_at"] = None
+                return
+
+            next_run = min(float(t.get("next_run_at") or now) for t in enabled)
             self._para_twap_scheduler_status["next_run_at"] = next_run
 
             try:
-                await asyncio.sleep(interval_seconds)
+                await asyncio.sleep(max(0.0, next_run - time.time()))
             except asyncio.CancelledError:
                 self._para_twap_scheduler_status["running"] = False
                 self._para_twap_scheduler_status["next_run_at"] = None
                 raise
+
+            fired_at = time.time()
+            due = [t for t in enabled if float(t.get("next_run_at") or 0) <= fired_at + 1e-6]
+            if not due:
+                continue
+
+            results = await asyncio.gather(
+                *[self._fire_para_twap_scheduler_once(t) for t in due if isinstance(t, dict)],
+                return_exceptions=True,
+            )
+
+            last_error: Optional[str] = None
+            last_result: Optional[Dict[str, Any]] = None
+            for t, res in zip(due, results):
+                with suppress(Exception):
+                    interval_seconds = int(float(t.get("interval_seconds") or 900))
+                interval_seconds = max(30, min(86400, int(interval_seconds)))
+                t["next_run_at"] = fired_at + interval_seconds
+                if isinstance(res, Exception):
+                    last_error = str(res)
+                else:
+                    last_result = cast(Dict[str, Any], res)
+
+            self._para_twap_scheduler_status["last_run_at"] = fired_at
+            self._para_twap_scheduler_status["last_error"] = last_error
+            self._para_twap_scheduler_status["last_result"] = last_result
+
+            # Persist updated tasks (includes next_run_at).
+            with suppress(Exception):
+                self._para_twap_scheduler_tasks = tasks
+                self._persist_para_twap_scheduler_config()
 
     async def _fire_para_twap_scheduler_once(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         action = str(cfg.get("action") or "").strip().lower()
@@ -4903,9 +4979,10 @@ class CoordinatorApp:
         payload["auto_balance"] = self._auto_balance_status_snapshot()
         payload["para_auto_balance"] = self._para_auto_balance_status_snapshot()
         payload["bp_auto_balance"] = self._bp_auto_balance_status_snapshot()
+        tasks = [dict(t) for t in (getattr(self, "_para_twap_scheduler_tasks", None) or [])]
         payload["para_twap_scheduler"] = {
-            "enabled": bool(getattr(self, "_para_twap_scheduler_cfg", None)),
-            "config": dict(getattr(self, "_para_twap_scheduler_cfg", None) or {}),
+            "enabled": bool(tasks),
+            "tasks": tasks,
             "status": dict(getattr(self, "_para_twap_scheduler_status", None) or {}),
         }
         return web.json_response(payload)
@@ -5699,8 +5776,8 @@ class CoordinatorApp:
     async def handle_para_twap_scheduler_get(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
         return web.json_response({
-            "enabled": bool(self._para_twap_scheduler_cfg),
-            "config": dict(self._para_twap_scheduler_cfg or {}),
+            "enabled": bool(self._para_twap_scheduler_tasks),
+            "tasks": [dict(t) for t in (self._para_twap_scheduler_tasks or [])],
             "status": dict(self._para_twap_scheduler_status or {}),
         })
 
@@ -5713,28 +5790,38 @@ class CoordinatorApp:
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="twap scheduler payload must be an object")
 
-        action_raw = body.get("action")
-        action = str(action_raw).strip().lower() if isinstance(action_raw, str) else None
         enabled_flag = body.get("enabled")
+        action = str(body.get("action") or "").strip().lower() if isinstance(body.get("action"), str) else None
         if enabled_flag is False or action == "disable":
-            self._update_para_twap_scheduler_config(None)
+            self._update_para_twap_scheduler_tasks([])
             self._persist_para_twap_scheduler_config()
             return web.json_response({
                 "enabled": False,
-                "config": None,
+                "tasks": [],
                 "status": dict(self._para_twap_scheduler_status or {}),
             })
 
-        try:
-            cfg = self._parse_para_twap_scheduler_config(body)
-        except ValueError as exc:
-            raise web.HTTPBadRequest(text=str(exc))
+        tasks_raw = body.get("tasks")
+        # Backward compatible: allow posting a single-task shape.
+        if tasks_raw is None:
+            tasks_raw = [body]
+        if not isinstance(tasks_raw, list):
+            raise web.HTTPBadRequest(text="tasks must be an array")
 
-        self._update_para_twap_scheduler_config(cfg)
+        tasks: List[Dict[str, Any]] = []
+        for item in tasks_raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                tasks.append(self._parse_para_twap_scheduler_task(item))
+            except ValueError as exc:
+                raise web.HTTPBadRequest(text=str(exc))
+
+        self._update_para_twap_scheduler_tasks(tasks)
         self._persist_para_twap_scheduler_config()
         return web.json_response({
-            "enabled": True,
-            "config": dict(self._para_twap_scheduler_cfg or {}),
+            "enabled": bool(self._para_twap_scheduler_tasks),
+            "tasks": [dict(t) for t in (self._para_twap_scheduler_tasks or [])],
             "status": dict(self._para_twap_scheduler_status or {}),
         })
 
@@ -5993,13 +6080,15 @@ class CoordinatorApp:
             symbols_raw = [body.get("symbol")]
 
         if symbols_raw is None:
-            symbols: Optional[List[str]] = None
+            raise web.HTTPBadRequest(text="symbols is required; specify at least one symbol")
         elif isinstance(symbols_raw, list):
             normalized_symbols: List[str] = []
             for item in symbols_raw:
                 value = self._normalize_symbol(item)
                 if value and value not in normalized_symbols:
                     normalized_symbols.append(value)
+            if not normalized_symbols:
+                raise web.HTTPBadRequest(text="symbols is required; specify at least one symbol")
             symbols = normalized_symbols
         else:
             raise web.HTTPBadRequest(text="symbols must be an array of strings")
