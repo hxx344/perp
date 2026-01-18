@@ -3694,7 +3694,7 @@ class CoordinatorApp:
             )
             if task_id and task_id in seen_ids:
                 continue
-            if not task_id and signature in seen_signatures:
+            if signature in seen_signatures:
                 continue
             if task_id:
                 seen_ids.add(task_id)
