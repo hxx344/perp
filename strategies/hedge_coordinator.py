@@ -3533,7 +3533,16 @@ class CoordinatorApp:
 
     def _load_persisted_para_auto_balance_config(self) -> None:
         path = PERSISTED_PARA_AUTO_BALANCE_FILE
-        LOGGER.info("PARA auto balance persisted config path: %s", path)
+        try:
+            LOGGER.info(
+                "PARA auto balance persisted config path: %s (abs=%s exists=%s cwd=%s)",
+                path,
+                path.resolve(),
+                path.exists(),
+                os.getcwd(),
+            )
+        except Exception:
+            LOGGER.info("PARA auto balance persisted config path: %s", path)
         if not path.exists():
             return
         try:
@@ -3570,9 +3579,20 @@ class CoordinatorApp:
                 "updated_at": time.time(),
             }
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            LOGGER.info("Persisted PARA auto balance config to %s (enabled=%s)", path, payload.get("enabled"))
+            LOGGER.info(
+                "Persisted PARA auto balance config to %s (abs=%s enabled=%s)",
+                path,
+                path.resolve(),
+                payload.get("enabled"),
+            )
         except Exception as exc:
-            LOGGER.warning("Failed to persist PARA auto balance config: %s", exc)
+            # Include traceback so operators can see permission/path errors.
+            LOGGER.exception(
+                "Failed to persist PARA auto balance config to %s (abs=%s): %s",
+                path,
+                getattr(path, "resolve", lambda: path)(),
+                exc,
+            )
 
     @property
     def app(self) -> web.Application:
