@@ -5286,6 +5286,16 @@ class CoordinatorApp:
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="auto balance payload must be an object")
 
+        # Helpful operator log: if users click "保存配置" but nothing is written,
+        # this lets us confirm whether the POST reached the coordinator at all.
+        # Do NOT log secrets (payload contains only config fields).
+        with suppress(Exception):
+            LOGGER.info(
+                "Dashboard PARA auto balance save requested (remote=%s keys=%s)",
+                getattr(request, "remote", None),
+                sorted(list(body.keys())),
+            )
+
         action_raw = body.get("action")
         action = str(action_raw).strip().lower() if isinstance(action_raw, str) else None
         enabled_flag = body.get("enabled")

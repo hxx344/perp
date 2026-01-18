@@ -18,7 +18,7 @@ class TestParaAutoBalancePersistence(unittest.TestCase):
             if path.exists():
                 path.unlink()
 
-            app = CoordinatorApp(enable_volatility_monitor=False)
+            app = CoordinatorApp()
 
             cfg_body = {
                 "agent_a": "agentA",
@@ -41,7 +41,7 @@ class TestParaAutoBalancePersistence(unittest.TestCase):
             self.assertEqual(payload["config"]["agent_a"], "agentA")
 
             # new instance should reload
-            app2 = CoordinatorApp(enable_volatility_monitor=False)
+            app2 = CoordinatorApp()
             loaded = app2._para_auto_balance_config_as_payload()
             self.assertIsNotNone(loaded)
             assert loaded is not None
@@ -53,7 +53,7 @@ class TestParaAutoBalancePersistence(unittest.TestCase):
             # disable should persist disabled and next instance should not load
             app2._update_para_auto_balance_config(None)
             app2._persist_para_auto_balance_config()
-            app3 = CoordinatorApp(enable_volatility_monitor=False)
+            app3 = CoordinatorApp()
             self.assertIsNone(app3._para_auto_balance_config_as_payload())
         finally:
             loop.close()
