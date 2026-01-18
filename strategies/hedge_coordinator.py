@@ -4463,7 +4463,13 @@ class CoordinatorApp:
         payload["grvt_adjustments"] = await self._adjustments.summary()
         payload["para_adjustments"] = await self._para_adjustments.summary()
         payload["auto_balance"] = self._auto_balance_status_snapshot()
+        payload["para_auto_balance"] = self._para_auto_balance_status_snapshot()
         payload["bp_auto_balance"] = self._bp_auto_balance_status_snapshot()
+        payload["para_twap_scheduler"] = {
+            "enabled": bool(getattr(self, "_para_twap_scheduler_cfg", None)),
+            "config": dict(getattr(self, "_para_twap_scheduler_cfg", None) or {}),
+            "status": dict(getattr(self, "_para_twap_scheduler_status", None) or {}),
+        }
         return web.json_response(payload)
 
     def _build_range_payload(self, points: Sequence[Mapping[str, float]]) -> Optional[Dict[str, Any]]:
