@@ -5646,6 +5646,18 @@ class CoordinatorApp:
         else:
             out = {"agent_id": agent_id, "pending_adjustments": []}
 
+        # Ensure PARA/GRVT monitors that only poll /control can receive
+        # dashboard-created adjustment requests. Paradex monitor consumes
+        # `agent.pending_adjustments` specifically.
+        with suppress(Exception):
+            para_pending = await self._para_adjustments.pending_for_agent(agent_id)
+            if para_pending:
+                pending_block = out.get("pending_adjustments")
+                if not isinstance(pending_block, list):
+                    pending_block = []
+                # Prepend PARA tasks so they start ASAP; keep existing entries.
+                out["pending_adjustments"] = list(para_pending) + list(pending_block)
+
         # IMPORTANT: also attach Backpack pending adjustments.
         # Backpack monitor executors poll /control; without this they will never
         # receive dashboard-created backpack adjustments, leaving them stuck in
