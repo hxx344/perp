@@ -4562,6 +4562,13 @@ class CoordinatorApp:
         # We intentionally do this post-update so it uses the freshest snapshot.
         with suppress(Exception):
             await self._maybe_bp_auto_balance(snapshot)
+
+        # Trigger PARA auto balance evaluation as well (real-time measurement for UI).
+        # Without this call, PARA measurement stays None even when the dashboard
+        # shows paradex account data, because nothing updates the para_auto_balance
+        # status fields after config is enabled.
+        with suppress(Exception):
+            await self._maybe_para_auto_balance(snapshot)
         return web.json_response(snapshot)
 
     # -----------------------------
