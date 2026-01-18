@@ -3914,8 +3914,8 @@ class CoordinatorApp:
         action = str(cfg.get("action") or "").strip().lower()
         magnitude = float(cfg.get("magnitude") or 1.0)
         symbols = cfg.get("symbols")
-        if symbols is not None and not isinstance(symbols, list):
-            symbols = None
+        if not isinstance(symbols, list) or not symbols:
+            raise RuntimeError("Scheduled adjustment requires at least one symbol")
 
         twap_duration_seconds = int(cfg.get("twap_duration_seconds") or 900)
         twap_duration_seconds = max(30, min(86400, int(round(twap_duration_seconds / 30) * 30)))
@@ -6122,23 +6122,6 @@ class CoordinatorApp:
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
-
-        # Operator-friendly log: if dashboard shows the request stuck in pending,
-        # this confirms the request was created server-side and shows who/what
-        # was targeted.
-        with suppress(Exception):
-            LOGGER.info(
-                "PARA adjust created: request_id=%s action=%s magnitude=%s agents=%d symbols=%s order_mode=%s twap_duration=%s created_by=%s remote=%s",
-                payload.get("request_id"),
-                action,
-                magnitude,
-                len(agent_ids),
-                symbols,
-                extras.get("order_mode"),
-                extras.get("twap_duration_seconds"),
-                created_by,
-                getattr(request, "remote", None),
-            )
 
         return web.json_response({"request": payload})
 
