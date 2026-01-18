@@ -6080,6 +6080,23 @@ class CoordinatorApp:
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
 
+        # Operator-friendly log: if dashboard shows the request stuck in pending,
+        # this confirms the request was created server-side and shows who/what
+        # was targeted.
+        with suppress(Exception):
+            LOGGER.info(
+                "PARA adjust created: request_id=%s action=%s magnitude=%s agents=%d symbols=%s order_mode=%s twap_duration=%s created_by=%s remote=%s",
+                payload.get("request_id"),
+                action,
+                magnitude,
+                len(agent_ids),
+                symbols,
+                extras.get("order_mode"),
+                extras.get("twap_duration_seconds"),
+                created_by,
+                getattr(request, "remote", None),
+            )
+
         return web.json_response({"request": payload})
 
     async def handle_grvt_transfer(self, request: web.Request) -> web.Response:
@@ -7238,9 +7255,40 @@ class CoordinatorApp:
                 progress=progress,
             )
         except KeyError as exc:
+            with suppress(Exception):
+                LOGGER.warning(
+                    "PARA adjust ack ignored (unknown request_id): request_id=%s agent_id=%s status=%s progress=%s keys=%s",
+                    request_id,
+                    agent_id,
+                    status,
+                    progress,
+                    sorted(list(body.keys())),
+                )
             raise web.HTTPNotFound(text=str(exc))
         except ValueError as exc:
+            with suppress(Exception):
+                LOGGER.warning(
+                    "PARA adjust ack rejected: request_id=%s agent_id=%s status=%s progress=%s error=%s",
+                    request_id,
+                    agent_id,
+                    status,
+                    progress,
+                    str(exc),
+                )
             raise web.HTTPBadRequest(text=str(exc))
+
+        with suppress(Exception):
+            LOGGER.info(
+                "PARA adjust ack received: request_id=%s agent_id=%s status=%s progress=%s filled_qty=%s avg_price=%s order_id=%s algo_id=%s",
+                request_id,
+                agent_id,
+                status,
+                progress,
+                ack_extra.get("filled_qty"),
+                ack_extra.get("avg_price"),
+                ack_extra.get("order_id"),
+                ack_extra.get("algo_id"),
+            )
 
         return web.json_response({"request": payload})
 
