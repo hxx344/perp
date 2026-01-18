@@ -6224,11 +6224,11 @@
         }
       }
 
-      function applyParaAutoBalanceConfig(config, { markClean = false } = {}) {
+      function applyParaAutoBalanceConfig(config, { markClean = false, enabledOverride = undefined } = {}) {
         if (!paraAutoEnabledInput) {
           return;
         }
-        const enabled = Boolean(config);
+        const enabled = enabledOverride !== undefined ? Boolean(enabledOverride) : Boolean(config);
         paraAutoEnabledInput.checked = enabled;
         const setValue = (element, value, fallback = '') => {
           if (!element) {
@@ -6458,7 +6458,12 @@
             throw new Error(text || `HTTP ${response.status}`);
           }
           const result = await response.json();
-          applyParaAutoBalanceConfig(result.config, { markClean: true });
+          // Use backend-reported enabled flag to avoid UI flipping to disabled
+          // when the backend intentionally returns config payload without an explicit enabled boolean.
+          applyParaAutoBalanceConfig(result.config, {
+            markClean: true,
+            enabledOverride: result?.status?.enabled,
+          });
           const agentCount = lastMetricsSnapshot && lastMetricsSnapshot.agents
             ? Object.keys(lastMetricsSnapshot.agents).length
             : 0;
@@ -6492,7 +6497,7 @@
             throw new Error(text || `HTTP ${response.status}`);
           }
           const result = await response.json();
-          applyParaAutoBalanceConfig(null, { markClean: true });
+          applyParaAutoBalanceConfig(null, { markClean: true, enabledOverride: false });
           const agentCount = lastMetricsSnapshot && lastMetricsSnapshot.agents
             ? Object.keys(lastMetricsSnapshot.agents).length
             : 0;
@@ -6524,7 +6529,10 @@
             throw new Error(text || `HTTP ${response.status}`);
           }
           const result = await response.json();
-          applyParaAutoBalanceConfig(result.config, { markClean: true });
+          applyParaAutoBalanceConfig(result.config, {
+            markClean: true,
+            enabledOverride: result?.status?.enabled,
+          });
           const agentCount = lastMetricsSnapshot && lastMetricsSnapshot.agents
             ? Object.keys(lastMetricsSnapshot.agents).length
             : 0;
