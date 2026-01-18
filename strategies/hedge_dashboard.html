@@ -1971,10 +1971,7 @@
                 间隔 (秒)
                 <input type="number" id="para-twap-schedule-interval" min="30" max="86400" step="30" value="900" />
               </label>
-              <label>
-                当前编辑任务
-                <select id="para-twap-schedule-edit-target"></select>
-              </label>
+              <div class="summary-sub" id="para-twap-schedule-edit-hint">当前：新增任务</div>
               <label>
                 动作
                 <select id="para-twap-schedule-action">
@@ -1992,8 +1989,9 @@
                 <small style="color: #8a94a6;">30-86400，30 秒步进</small>
               </label>
               <div class="grvt-adjust-buttons">
-                <button type="button" id="para-twap-schedule-start">启用定时</button>
-                <button type="button" class="button-danger" id="para-twap-schedule-stop">停用</button>
+                <button type="button" id="para-twap-schedule-start">新增并保存</button>
+                <button type="button" id="para-twap-schedule-save-edit" disabled>保存修改</button>
+                <button type="button" class="button-danger" id="para-twap-schedule-stop">停用全部</button>
                 <button type="button" id="para-twap-schedule-refresh">刷新</button>
               </div>
               <p class="grvt-adjust-status" id="para-twap-schedule-status">未启用</p>
@@ -2002,11 +2000,7 @@
                 <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
                   <div>
                     <strong>定时任务列表</strong>
-                    <div class="summary-sub" style="margin-top: 0.15rem;">每条任务可独立启停、立即触发、删除；编辑上方表单后点“保存定时”会更新第一条任务。</div>
-                  </div>
-                  <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                    <button type="button" id="para-twap-schedule-add-task">新增任务</button>
-                    <button type="button" id="para-twap-schedule-save-tasks">保存定时任务</button>
+                    <div class="summary-sub" style="margin-top: 0.15rem;">新增：填表后点“新增并保存”。编辑：点任务的“编辑”，改表单后点“保存修改”。</div>
                   </div>
                 </div>
                 <div id="paraTwapScheduleTasks" style="margin-top: 0.5rem;"></div>
@@ -3918,17 +3912,16 @@
   const paraTwapScheduleSymbolsSelect = document.getElementById('para-twap-schedule-symbols');
   const paraTwapScheduleResetSymbolButton = document.getElementById('para-twap-schedule-reset-symbol');
   const paraTwapScheduleIntervalInput = document.getElementById('para-twap-schedule-interval');
-  const paraTwapScheduleEditTargetSelect = document.getElementById('para-twap-schedule-edit-target');
+  const paraTwapScheduleEditHint = document.getElementById('para-twap-schedule-edit-hint');
   const paraTwapScheduleActionSelect = document.getElementById('para-twap-schedule-action');
   const paraTwapScheduleSizeInput = document.getElementById('para-twap-schedule-size');
   const paraTwapScheduleDurationInput = document.getElementById('para-twap-schedule-duration');
   const paraTwapScheduleStartButton = document.getElementById('para-twap-schedule-start');
+  const paraTwapScheduleSaveEditButton = document.getElementById('para-twap-schedule-save-edit');
   const paraTwapScheduleStopButton = document.getElementById('para-twap-schedule-stop');
   const paraTwapScheduleRefreshButton = document.getElementById('para-twap-schedule-refresh');
   const paraTwapScheduleStatus = document.getElementById('para-twap-schedule-status');
   const paraTwapScheduleHistoryBody = document.getElementById('para-twap-schedule-history');
-  const paraTwapScheduleAddTaskButton = document.getElementById('para-twap-schedule-add-task');
-  const paraTwapScheduleSaveTasksButton = document.getElementById('para-twap-schedule-save-tasks');
   const paraResetSymbolButton = document.getElementById('para-reset-symbol');
   const paraAdjustAddButton = document.getElementById('para-adjust-add');
   const paraAdjustReduceButton = document.getElementById('para-adjust-reduce');
@@ -9103,58 +9096,25 @@
       // -----------------------------
 
       let paraTwapSchedulerTasksDraft = [];
+      let paraTwapScheduleEditingTaskId = null;
 
-      function _getSelectedEditTaskId() {
-        const v = paraTwapScheduleEditTargetSelect?.value;
-        return v ? String(v) : null;
+      function _setEditingTask(task) {
+        const id = task && task.task_id ? String(task.task_id) : null;
+        paraTwapScheduleEditingTaskId = id;
+        if (paraTwapScheduleSaveEditButton) {
+          paraTwapScheduleSaveEditButton.disabled = !id;
+        }
+        if (paraTwapScheduleEditHint) {
+          if (id && task) {
+            paraTwapScheduleEditHint.textContent = `当前编辑：${_formatSchedulerTaskSummary(task)}`;
+          } else {
+            paraTwapScheduleEditHint.textContent = '当前：新增任务';
+          }
+        }
       }
 
-      function _setSelectedEditTaskId(taskId) {
-        if (!paraTwapScheduleEditTargetSelect) {
-          return;
-        }
-        const id = taskId ? String(taskId) : '';
-        const options = Array.from(paraTwapScheduleEditTargetSelect.options || []);
-        const exists = options.some((opt) => String(opt.value) === id);
-        if (exists) {
-          paraTwapScheduleEditTargetSelect.value = id;
-        }
-      }
-
-      function _renderEditTargetOptions(tasks) {
-        if (!paraTwapScheduleEditTargetSelect) {
-          return;
-        }
-        const selected = _getSelectedEditTaskId();
-        const list = Array.isArray(tasks) ? tasks : [];
-        paraTwapScheduleEditTargetSelect.innerHTML = '';
-        if (!list.length) {
-          const opt = document.createElement('option');
-          opt.value = '';
-          opt.textContent = '—';
-          paraTwapScheduleEditTargetSelect.appendChild(opt);
-          return;
-        }
-        for (let i = 0; i < list.length; i++) {
-          const t = list[i] || {};
-          const id = String(t.task_id || `task-${i + 1}`);
-          const opt = document.createElement('option');
-          opt.value = id;
-          const action = String(t.action || 'add').toLowerCase();
-          const magnitude = t.magnitude ?? '--';
-          const interval = t.interval_seconds ?? '--';
-          const duration = t.twap_duration_seconds ?? '--';
-          const scope = describeSymbolScope(Array.isArray(t.symbols) ? t.symbols : null);
-          opt.textContent = `${i + 1}. ${describeAdjustmentAction(action)} ${magnitude} ${scope}｜每 ${interval}s｜TWAP ${duration}s`;
-          paraTwapScheduleEditTargetSelect.appendChild(opt);
-        }
-        if (selected) {
-          _setSelectedEditTaskId(selected);
-        }
-        if (!_getSelectedEditTaskId()) {
-          // default to first
-          paraTwapScheduleEditTargetSelect.selectedIndex = 0;
-        }
+      function _getEditingTaskId() {
+        return paraTwapScheduleEditingTaskId ? String(paraTwapScheduleEditingTaskId) : null;
       }
 
       function _applyTaskToForm(task) {
@@ -9221,7 +9181,13 @@
 
         // Keep an in-memory draft (so we can add/remove tasks before submitting).
         paraTwapSchedulerTasksDraft = tasks;
-        _renderEditTargetOptions(tasks);
+        const editingId = _getEditingTaskId();
+        const editingTask = editingId ? tasks.find((t) => String(t.task_id) === String(editingId)) : null;
+        if (editingId && !editingTask) {
+          _setEditingTask(null);
+        } else if (editingTask) {
+          _setEditingTask(editingTask);
+        }
 
         if (!enabled || !tasks.length) {
           paraTwapScheduleStatus.textContent = '未启用';
@@ -9245,12 +9211,6 @@
         _renderParaTwapSchedulerTasksEditor(st);
         renderParaTwapSchedulerHistory(st?.history);
 
-        // If current selected task exists, reflect it into the form.
-        const selectedId = _getSelectedEditTaskId();
-        const selectedTask = selectedId ? tasks.find((t) => String(t.task_id) === String(selectedId)) : tasks[0];
-        if (selectedTask) {
-          _applyTaskToForm(selectedTask);
-        }
       }
 
       function _renderParaTwapSchedulerTasksEditor(status) {
@@ -9263,7 +9223,7 @@
 
         const tasks = Array.isArray(paraTwapSchedulerTasksDraft) ? paraTwapSchedulerTasksDraft : [];
         if (!tasks.length) {
-          root.innerHTML = '<div class="muted">暂无任务，添加后点击“保存定时任务”。</div>';
+          root.innerHTML = '<div class="muted">暂无任务，填表后点击“新增并保存”。</div>';
           return;
         }
 
@@ -9282,13 +9242,15 @@
           const checked = t.enabled ? 'checked' : '';
           const scope = describeSymbolScope(t.symbols);
           const summary = _formatSchedulerTaskSummary(t);
+          const editing = String(t.task_id) === String(_getEditingTaskId());
+          const editingTag = editing ? '（编辑中）' : '';
           return `
             <div class="panel-row" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0;">
               <label style="display:flex;align-items:center;gap:6px;">
                 <input type="checkbox" data-ptwap-task-toggle="${escapeHtml(t.task_id)}" ${checked} />
                 启用
               </label>
-              <span style="min-width:240px;"><strong>${escapeHtml(summary)}</strong></span>
+              <span style="min-width:240px;"><strong>${escapeHtml(summary + editingTag)}</strong></span>
               <span class="muted">范围：${escapeHtml(scope)}</span>
               <span class="muted">下次：${escapeHtml(nextRun(t))}</span>
               <button class="btn" data-ptwap-task-edit="${escapeHtml(t.task_id)}">编辑</button>
@@ -9507,16 +9469,20 @@
         const magnitude = Number.isFinite(rawMagnitude) && rawMagnitude > 0 ? rawMagnitude : 1;
         const action = (paraTwapScheduleActionSelect?.value || 'add').toLowerCase();
         const symbols = getSelectedSymbolsFromSelect(paraTwapScheduleSymbolsSelect);
+        if (!symbols || !symbols.length) {
+          if (paraTwapScheduleStatus) {
+            paraTwapScheduleStatus.textContent = '请先选择币种';
+          }
+          return null;
+        }
         const task = {
           enabled: true,
           action,
           magnitude,
           interval_seconds: interval,
           twap_duration_seconds: duration,
+          symbols,
         };
-        if (symbols) {
-          task.symbols = symbols;
-        }
         return task;
       }
 
@@ -9540,32 +9506,42 @@
         await refreshMetrics();
       }
 
-      async function saveParaTwapSchedulerTasksDraft() {
-        const draft = Array.isArray(paraTwapSchedulerTasksDraft) ? paraTwapSchedulerTasksDraft.slice() : [];
-        if (!draft.length) {
-          // If empty, create a first task from the form.
-          draft.push(_buildTaskFromForm());
-        }
-        // Update selected task from the form.
-        const selectedId = _getSelectedEditTaskId();
-        const formTask = _buildTaskFromForm();
-        const idx = selectedId ? draft.findIndex((t) => t && String(t.task_id) === String(selectedId)) : 0;
-        const pos = idx >= 0 ? idx : 0;
-        const existing = draft[pos] || {};
-        draft[pos] = { ...existing, ...formTask, task_id: existing?.task_id || selectedId || existing?.task_id };
-        await _submitParaTwapSchedulerTasks(draft);
-      }
-
-      function addParaTwapSchedulerTaskFromForm() {
+      async function createParaTwapSchedulerTaskFromForm() {
         const draft = Array.isArray(paraTwapSchedulerTasksDraft) ? paraTwapSchedulerTasksDraft.slice() : [];
         const base = _buildTaskFromForm();
+        if (!base) {
+          return;
+        }
         base.task_id = `task-${Date.now()}`;
         draft.push(base);
-        paraTwapSchedulerTasksDraft = draft;
-        _renderEditTargetOptions(draft);
-        _setSelectedEditTaskId(base.task_id);
-        _applyTaskToForm(base);
-        _renderParaTwapSchedulerTasksEditor({});
+        await _submitParaTwapSchedulerTasks(draft);
+        _setEditingTask(null);
+      }
+
+      async function saveEditedParaTwapSchedulerTask() {
+        const editId = _getEditingTaskId();
+        if (!editId) {
+          if (paraTwapScheduleStatus) {
+            paraTwapScheduleStatus.textContent = '请先在任务列表里点“编辑”';
+          }
+          return;
+        }
+        const formTask = _buildTaskFromForm();
+        if (!formTask) {
+          return;
+        }
+        const draft = Array.isArray(paraTwapSchedulerTasksDraft) ? paraTwapSchedulerTasksDraft.slice() : [];
+        const idx = draft.findIndex((t) => t && String(t.task_id) === String(editId));
+        if (idx < 0) {
+          if (paraTwapScheduleStatus) {
+            paraTwapScheduleStatus.textContent = '找不到要保存的任务';
+          }
+          _setEditingTask(null);
+          return;
+        }
+        const existing = draft[idx] || {};
+        draft[idx] = { ...existing, ...formTask, task_id: existing?.task_id || editId };
+        await _submitParaTwapSchedulerTasks(draft);
       }
 
       async function fireParaTwapSchedulerTaskNow(taskId) {
@@ -9599,6 +9575,9 @@
       async function removeParaTwapSchedulerTask(taskId) {
         const draft = Array.isArray(paraTwapSchedulerTasksDraft) ? paraTwapSchedulerTasksDraft.slice() : [];
         const updated = draft.filter((t) => t && String(t.task_id) !== String(taskId));
+        if (String(_getEditingTaskId() || '') === String(taskId)) {
+          _setEditingTask(null);
+        }
         if (!updated.length) {
           // Removing last task effectively disables.
           await disableParaTwapScheduler();
@@ -13412,21 +13391,16 @@
 
       // Wire PARA scheduled TWAP buttons
       if (paraTwapScheduleStartButton) {
-        // "启用定时" 现在等价于保存任务（多任务模式下由 tasks 列表驱动）。
-        paraTwapScheduleStartButton.addEventListener('click', () => saveParaTwapSchedulerTasksDraft());
+        paraTwapScheduleStartButton.addEventListener('click', () => createParaTwapSchedulerTaskFromForm());
+      }
+      if (paraTwapScheduleSaveEditButton) {
+        paraTwapScheduleSaveEditButton.addEventListener('click', () => saveEditedParaTwapSchedulerTask());
       }
       if (paraTwapScheduleStopButton) {
         paraTwapScheduleStopButton.addEventListener('click', () => disableParaTwapScheduler());
       }
       if (paraTwapScheduleRefreshButton) {
         paraTwapScheduleRefreshButton.addEventListener('click', () => refreshParaTwapScheduler());
-      }
-
-      if (paraTwapScheduleAddTaskButton) {
-        paraTwapScheduleAddTaskButton.addEventListener('click', () => addParaTwapSchedulerTaskFromForm());
-      }
-      if (paraTwapScheduleSaveTasksButton) {
-        paraTwapScheduleSaveTasksButton.addEventListener('click', () => saveParaTwapSchedulerTasksDraft());
       }
 
       // Task list actions (event delegation).
@@ -13440,11 +13414,11 @@
           const removeId = el.getAttribute && el.getAttribute('data-ptwap-task-remove');
           if (editId) {
             evt.preventDefault();
-            _setSelectedEditTaskId(editId);
             const draft = Array.isArray(paraTwapSchedulerTasksDraft) ? paraTwapSchedulerTasksDraft : [];
             const target = draft.find((t) => t && String(t.task_id) === String(editId));
             if (target) {
               _applyTaskToForm(target);
+              _setEditingTask(target);
             }
             return;
           }
