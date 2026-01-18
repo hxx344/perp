@@ -3816,6 +3816,14 @@ class CoordinatorApp:
 
             interval_seconds = int(cfg.get("interval_seconds") or 900)
             interval_seconds = max(30, min(86400, interval_seconds))
+            try:
+                result = await self._fire_para_twap_scheduler_once(cfg)
+                self._para_twap_scheduler_status["last_result"] = result
+                self._para_twap_scheduler_status["last_error"] = None
+            except Exception as exc:
+                self._para_twap_scheduler_status["last_error"] = str(exc)
+                self._para_twap_scheduler_status["last_result"] = None
+
             next_run = time.time() + interval_seconds
             self._para_twap_scheduler_status["next_run_at"] = next_run
 
@@ -3825,19 +3833,6 @@ class CoordinatorApp:
                 self._para_twap_scheduler_status["running"] = False
                 self._para_twap_scheduler_status["next_run_at"] = None
                 raise
-
-            # Re-check cfg after sleep (operator might have disabled/updated settings)
-            cfg = self._para_twap_scheduler_cfg
-            if not isinstance(cfg, dict) or not cfg:
-                continue
-
-            try:
-                result = await self._fire_para_twap_scheduler_once(cfg)
-                self._para_twap_scheduler_status["last_result"] = result
-                self._para_twap_scheduler_status["last_error"] = None
-            except Exception as exc:
-                self._para_twap_scheduler_status["last_error"] = str(exc)
-                self._para_twap_scheduler_status["last_result"] = None
 
     async def _fire_para_twap_scheduler_once(self, cfg: Dict[str, Any]) -> Dict[str, Any]:
         action = str(cfg.get("action") or "").strip().lower()

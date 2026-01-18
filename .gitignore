@@ -85,6 +85,9 @@ cover/
 # Local one-off tests (not part of upstream suite)
 tests/test_backpack_adjustment_direction.py
 
+# Ignore all test files (current + future) in this repo
+tests/
+
 # Translations
 *.mo
 *.pot

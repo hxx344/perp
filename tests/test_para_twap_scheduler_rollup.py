@@ -4,6 +4,11 @@ import asyncio
 def test_para_twap_scheduler_rollup_accumulates_requests(monkeypatch):
     from strategies.hedge_coordinator import CoordinatorApp
 
+    # Windows + Py3.9: pytest 环境下默认可能没有 current event loop，
+    # 但 CoordinatorApp 初始化会创建 asyncio.Lock()。
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     app = CoordinatorApp()
 
     async def fake_list_agent_ids():
