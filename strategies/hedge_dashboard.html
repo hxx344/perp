@@ -6550,6 +6550,38 @@
         }
       }
 
+      // --- PARA Auto Balance wiring ---
+      // Without these listeners the "保存配置" button does nothing, which matches
+      // the reported behavior (no backend log line, still shows disabled).
+      if (paraAutoEnabledInput) paraAutoEnabledInput.addEventListener('change', markParaAutoBalanceDirty);
+      if (paraAutoAgentASelect) paraAutoAgentASelect.addEventListener('change', markParaAutoBalanceDirty);
+      if (paraAutoAgentBSelect) paraAutoAgentBSelect.addEventListener('change', markParaAutoBalanceDirty);
+      if (paraAutoThresholdInput) paraAutoThresholdInput.addEventListener('input', markParaAutoBalanceDirty);
+      if (paraAutoMinTransferInput) paraAutoMinTransferInput.addEventListener('input', markParaAutoBalanceDirty);
+      if (paraAutoMaxTransferInput) paraAutoMaxTransferInput.addEventListener('input', markParaAutoBalanceDirty);
+      if (paraAutoCurrencyInput) paraAutoCurrencyInput.addEventListener('input', markParaAutoBalanceDirty);
+      if (paraAutoCooldownInput) paraAutoCooldownInput.addEventListener('input', markParaAutoBalanceDirty);
+      if (paraAutoUseAvailableInput) paraAutoUseAvailableInput.addEventListener('change', markParaAutoBalanceDirty);
+
+      if (paraAutoSaveButton) {
+        paraAutoSaveButton.addEventListener('click', () => {
+          console.debug('[para-auto] save clicked', { origin: location.origin });
+          submitParaAutoBalanceConfig();
+        });
+      }
+      if (paraAutoDisableButton) {
+        paraAutoDisableButton.addEventListener('click', () => {
+          console.debug('[para-auto] disable clicked');
+          disableParaAutoBalance();
+        });
+      }
+      if (paraAutoRefreshButton) {
+        paraAutoRefreshButton.addEventListener('click', () => {
+          console.debug('[para-auto] refresh clicked');
+          loadParaAutoBalanceConfig();
+        });
+      }
+
       // --- Backpack Auto Balance wiring ---
       if (bpAutoEnabledInput) bpAutoEnabledInput.addEventListener('change', markBpAutoBalanceDirty);
       if (bpAutoAgentASelect) bpAutoAgentASelect.addEventListener('change', markBpAutoBalanceDirty);
