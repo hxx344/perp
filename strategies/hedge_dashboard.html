@@ -1955,8 +1955,18 @@
             <div class="grvt-adjust-controls" style="margin-top: 0.9rem; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 0.9rem;">
               <div class="grvt-adjust-header" style="margin-bottom: 0.6rem;">
                 <h3 style="margin: 0 0 0.2rem; font-size: 0.95rem;">定时 TWAP 广播（PARA）</h3>
-                <p class="summary-sub" style="margin: 0;">按固定间隔自动发起与上面一致的广播逻辑（TWAP）</p>
+                <p class="summary-sub" style="margin: 0;">按固定间隔自动发起广播（TWAP）；币种在本模块单独选择</p>
               </div>
+              <label for="para-twap-schedule-symbols" class="grvt-adjust-symbols">
+                <div class="grvt-symbol-label">
+                  <span>定时目标币种</span>
+                  <small>选择需要定时执行的币种；未选中时广播所有</small>
+                </div>
+                <div class="grvt-symbol-input">
+                  <select id="para-twap-schedule-symbols"></select>
+                  <button type="button" class="grvt-symbol-reset" id="para-twap-schedule-reset-symbol">清空</button>
+                </div>
+              </label>
               <label>
                 间隔 (秒)
                 <input type="number" id="para-twap-schedule-interval" min="30" max="86400" step="30" value="900" />
@@ -1989,6 +1999,25 @@
               <table>
                 <thead>
                   <tr>
+                    <th rowspan="2">时间</th>
+                    <th rowspan="2">动作</th>
+                    <th rowspan="2">数量</th>
+                    <th rowspan="2">币种</th>
+                    <th rowspan="2">状态</th>
+                    <th colspan="4" style="text-align:center;">VPS 明细</th>
+                  </tr>
+                  <tr>
+                    <th>节点</th><th>下单</th><th>均价</th><th>成交</th>
+                  </tr>
+                </thead>
+                <tbody id="para-adjust-history"><tr><td colspan="9">暂无记录</td></tr></tbody>
+              </table>
+            </div>
+
+            <div class="grvt-adjust-history" style="margin-top: 0.85rem;">
+              <table>
+                <thead>
+                  <tr>
                     <th>创建时间</th>
                     <th>动作</th>
                     <th>数量</th>
@@ -2002,25 +2031,6 @@
                   </tr>
                 </thead>
                 <tbody id="para-twap-schedule-history"><tr><td colspan="10">暂无定时记录</td></tr></tbody>
-              </table>
-            </div>
-
-            <div class="grvt-adjust-history">
-              <table>
-                <thead>
-                  <tr>
-                    <th rowspan="2">时间</th>
-                    <th rowspan="2">动作</th>
-                    <th rowspan="2">数量</th>
-                    <th rowspan="2">币种</th>
-                    <th rowspan="2">状态</th>
-                    <th colspan="4" style="text-align:center;">VPS 明细</th>
-                  </tr>
-                  <tr>
-                    <th>节点</th><th>下单</th><th>均价</th><th>成交</th>
-                  </tr>
-                </thead>
-                <tbody id="para-adjust-history"><tr><td colspan="9">暂无记录</td></tr></tbody>
               </table>
             </div>
           </div>
@@ -3887,6 +3897,8 @@
   const paraTwapDurationWrapper = document.getElementById('para-twap-duration-wrapper');
 
   // PARA scheduled TWAP
+  const paraTwapScheduleSymbolsSelect = document.getElementById('para-twap-schedule-symbols');
+  const paraTwapScheduleResetSymbolButton = document.getElementById('para-twap-schedule-reset-symbol');
   const paraTwapScheduleIntervalInput = document.getElementById('para-twap-schedule-interval');
   const paraTwapScheduleActionSelect = document.getElementById('para-twap-schedule-action');
   const paraTwapScheduleSizeInput = document.getElementById('para-twap-schedule-size');
@@ -8088,6 +8100,64 @@
         paraAdjustSymbolsSelect.selectedIndex = -1;
       }
 
+      function getSelectedSymbolsFromSelect(selectEl) {
+        if (!selectEl) {
+          return null;
+        }
+        const value = selectEl.value;
+        if (!value) {
+          return null;
+        }
+        return [value];
+      }
+
+      function updateParaTwapScheduleSymbolOptions(symbols) {
+        if (!paraTwapScheduleSymbolsSelect) {
+          return;
+        }
+        if (document.activeElement === paraTwapScheduleSymbolsSelect) {
+          return;
+        }
+        const normalized = Array.from(
+          new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => normalizeSymbolLabel(symbol)).filter(Boolean))
+        ).sort();
+        const previousValue = normalizeSymbolLabel(paraTwapScheduleSymbolsSelect.value);
+        const disabled = normalized.length === 0;
+        paraTwapScheduleSymbolsSelect.disabled = disabled;
+        if (paraTwapScheduleResetSymbolButton) {
+          paraTwapScheduleResetSymbolButton.disabled = disabled;
+        }
+
+        const existingValues = Array.from(paraTwapScheduleSymbolsSelect.options).map((opt) => normalizeSymbolLabel(opt.value));
+        const sameList = existingValues.length === normalized.length && existingValues.every((v, i) => v === normalized[i]);
+        if (!sameList) {
+          const oldScrollTop = paraTwapScheduleSymbolsSelect.scrollTop;
+          paraTwapScheduleSymbolsSelect.innerHTML = '';
+          for (const symbol of normalized) {
+            const option = document.createElement('option');
+            option.value = symbol;
+            option.textContent = symbol;
+            paraTwapScheduleSymbolsSelect.appendChild(option);
+          }
+          paraTwapScheduleSymbolsSelect.scrollTop = oldScrollTop;
+        }
+
+        if (previousValue && normalized.includes(previousValue)) {
+          paraTwapScheduleSymbolsSelect.value = previousValue;
+        } else {
+          paraTwapScheduleSymbolsSelect.selectedIndex = -1;
+        }
+      }
+
+      if (paraTwapScheduleSymbolsSelect) {
+        paraTwapScheduleSymbolsSelect.addEventListener('blur', () => {
+          refreshMetrics();
+        });
+        paraTwapScheduleSymbolsSelect.addEventListener('change', () => {
+          refreshMetrics();
+        });
+      }
+
       // Refresh the symbol list after the user closes the dropdown.
       // While focused, we intentionally skip option rebuilds to avoid the UI jumping.
       if (paraAdjustSymbolsSelect) {
@@ -9176,7 +9246,7 @@
           interval_seconds: interval,
           twap_duration_seconds: duration,
         };
-        const symbols = getSelectedParaSymbols();
+        const symbols = getSelectedSymbolsFromSelect(paraTwapScheduleSymbolsSelect);
         if (symbols) {
           payload.symbols = symbols;
         }
@@ -11449,7 +11519,9 @@
         }
 
         updateParaTransferAgents(transferOptions);
-        updateParaSymbolOptions(Array.from(symbolCandidates));
+        const paraSymbols = Array.from(symbolCandidates);
+        updateParaSymbolOptions(paraSymbols);
+        updateParaTwapScheduleSymbolOptions(paraSymbols);
         recomputeGlobalRiskRatio();
         } catch (err) {
           console.warn('renderPara error', err);
@@ -11461,6 +11533,7 @@
             paraCard.classList.add('hidden');
           }
           updateParaTransferAgents([]);
+          updateParaTwapScheduleSymbolOptions([]);
         }
       }
 
@@ -13037,6 +13110,18 @@
       }
       if (paraTwapScheduleRefreshButton) {
         paraTwapScheduleRefreshButton.addEventListener('click', () => refreshParaTwapScheduler());
+      }
+
+      if (paraTwapScheduleResetSymbolButton) {
+        paraTwapScheduleResetSymbolButton.addEventListener('click', () => {
+          try {
+            if (paraTwapScheduleSymbolsSelect) {
+              paraTwapScheduleSymbolsSelect.selectedIndex = -1;
+            }
+          } catch (_) {
+            // ignore
+          }
+        });
       }
 
       // Simulation inputs removed.
