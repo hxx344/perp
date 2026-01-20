@@ -628,7 +628,7 @@ class ParadexAccountMonitor:
         # With too few workers, progress pollers may not start when multiple TWAPs are
         # submitted in bursts (e.g., the 5th request never logs "start poll").
         # Use a small but higher concurrency to keep the system responsive.
-        self._adjust_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        self._adjust_executor = concurrent.futures.ThreadPoolExecutor(max_workers=20)
         self._register_symbol_hint(self._default_market)
 
     @staticmethod
