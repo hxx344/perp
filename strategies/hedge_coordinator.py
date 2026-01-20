@@ -7332,6 +7332,7 @@ class CoordinatorApp:
             # Prefer explicit target size when monitors provide it.
             "total_qty",
             "target_qty",
+            "mark_price",
             "order_id",
             # Algo order status fields (Paradex AlgoOrderResp)
             "algo_id",
@@ -7340,6 +7341,7 @@ class CoordinatorApp:
             "algo_remaining_size",
             "algo_size",
             "algo_expected_size",
+            "algo_side",
             # Raw history timestamps for dashboard time/duration.
             "created_at",
             "last_updated_at",
