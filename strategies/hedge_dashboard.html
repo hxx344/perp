@@ -9270,6 +9270,16 @@
           return;
         }
 
+        const requestList = Array.isArray(lastMetricsSnapshot?.para_adjustments?.requests)
+          ? lastMetricsSnapshot.para_adjustments.requests
+          : [];
+        const requestMap = new Map();
+        for (const req of requestList) {
+          if (req && req.request_id) {
+            requestMap.set(String(req.request_id), req);
+          }
+        }
+
         const safeText = (value) => {
           if (value === undefined || value === null) {
             return '--';
@@ -9353,6 +9363,42 @@
             }
             return null;
           };
+          const computeRequestWear = (req) => {
+            if (!req || typeof req !== 'object') {
+              return null;
+            }
+            const agents = Array.isArray(req.agents) ? req.agents : [];
+            const sortedAgents = agents
+              .filter((agent) => agent && typeof agent === 'object')
+              .slice()
+              .sort((a, b) => String(a.agent_id || '').localeCompare(String(b.agent_id || '')))
+              .slice(0, 2);
+            const left = sortedAgents[0] || null;
+            const right = sortedAgents[1] || null;
+            if (!left || !right) {
+              return null;
+            }
+            const aExtra = left.extra || {};
+            const bExtra = right.extra || {};
+            const aAvg = toNumber(aExtra?.avg_price);
+            const bAvg = toNumber(bExtra?.avg_price);
+            const aFilled = toNumber(aExtra?.filled_qty) ?? 0;
+            const bFilled = toNumber(bExtra?.filled_qty) ?? 0;
+            if (!Number.isFinite(aAvg) || !Number.isFinite(bAvg)) {
+              return null;
+            }
+            const filledTotal = aFilled + bFilled;
+            if (!(filledTotal > 0)) {
+              return null;
+            }
+            const priceDiff = Math.abs(aAvg - bAvg);
+            const wear = priceDiff * filledTotal;
+            const notional = (aAvg * aFilled * 2) + (bAvg * bFilled * 2);
+            if (!Number.isFinite(wear) || !Number.isFinite(notional) || notional <= 0) {
+              return null;
+            }
+            return { wear, notional, filledTotal };
+          };
           const key = signatureFor(cfg);
           const current = aggregates.get(key) || {
             created_at: item?.created_at ?? null,
@@ -9367,6 +9413,23 @@
           current.created_at = Math.min(Number(current.created_at || item?.created_at || 0) || 0, Number(item?.created_at || 0) || 0) || current.created_at;
           current.request_count += Number(roll.request_count ?? (Array.isArray(item?.request_ids) ? item.request_ids.length : 0)) || 0;
           current.completed += Number(roll.completed ?? 0) || 0;
+          const requestIds = Array.isArray(item?.request_ids) ? item.request_ids : [];
+          let reqWearTotal = 0;
+          let reqNotionalTotal = 0;
+          let reqFilledTotal = 0;
+          let reqUsed = false;
+          if (requestIds.length && requestMap.size) {
+            for (const rid of requestIds) {
+              const req = requestMap.get(String(rid));
+              const wearSummary = computeRequestWear(req);
+              if (wearSummary) {
+                reqUsed = true;
+                reqWearTotal += wearSummary.wear;
+                reqNotionalTotal += wearSummary.notional;
+                reqFilledTotal += wearSummary.filledTotal;
+              }
+            }
+          }
           const filledQty = pickNumber(
             roll.filled_qty_total,
             roll.filled_qty,
@@ -9395,11 +9458,15 @@
             roll.wear_avg,
             roll.wear_per_unit
           );
-          const wearTotal = wearTotalRaw ?? ((wearAvg != null && wearQty != null) ? (wearAvg * wearQty) : 0);
-          current.filled_qty_total += filledQty;
-          if (avgPrice != null && filledQty) {
-            current.notional_total += avgPrice * filledQty;
-          }
+          const wearTotal = reqUsed
+            ? reqWearTotal
+            : (wearTotalRaw ?? ((wearAvg != null && wearQty != null) ? (wearAvg * wearQty) : 0));
+          const filledForAgg = reqUsed ? reqFilledTotal : filledQty;
+          const notionalForAgg = reqUsed
+            ? reqNotionalTotal
+            : ((avgPrice != null && filledQty) ? (avgPrice * filledQty) : 0);
+          current.filled_qty_total += filledForAgg;
+          current.notional_total += Number.isFinite(notionalForAgg) ? notionalForAgg : 0;
           current.wear_total += Number.isFinite(wearTotal) ? wearTotal : 0;
           current.wear_qty_total += Number.isFinite(wearQty) ? wearQty : 0;
           aggregates.set(key, current);
