@@ -2174,10 +2174,26 @@ class ParadexAccountMonitor:
                     LOGGER.info("TWAP progress[%s] fetch failed: %s", request_id, exc)
                 LOGGER.debug("TWAP progress algo/orders fetch failed for %s: %s", request_id, exc)
 
+                exc_text = str(exc)
+                if (
+                    "404" in exc_text
+                    and "not found" in exc_text.lower()
+                    and not history_only
+                    and private_client is not None
+                ):
+                    # Some environments do not expose /algo/orders; fall back to history-only polling.
+                    history_only = True
+                    if debug_enabled:
+                        LOGGER.info(
+                            "TWAP progress[%s] switched to history-only polling after 404 on /algo/orders",
+                            request_id,
+                        )
+                    time.sleep(poll_interval)
+                    continue
+
                 # If unauthorized, try to self-heal (token refresh) and avoid leaving the
                 # request pending forever. After a few consecutive unauthorized failures,
                 # send a final failed ACK so the coordinator can surface the error.
-                exc_text = str(exc)
                 if "401" in exc_text and "Unauthorized" in exc_text:
                     consecutive_unauthorized += 1
                     _rebuild_clients_from_latest_token()
