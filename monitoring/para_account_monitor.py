@@ -1402,6 +1402,12 @@ class ParadexAccountMonitor:
         symbol = self._resolve_symbol(target_symbols)
         if not symbol:
             raise ValueError("Unable to resolve symbol for adjustment request")
+        mark_price = None
+        try:
+            price_map = self._build_mark_price_map()
+            mark_price = price_map.get(self._normalize_symbol_label(symbol))
+        except Exception:
+            mark_price = None
         net_size = self._lookup_net_position(symbol)
         if net_size is None:
             net_size = Decimal("0")
@@ -1514,6 +1520,8 @@ class ParadexAccountMonitor:
             ack_extra["filled_qty"] = str(filled_qty)
         if avg_price is not None:
             ack_extra["avg_price"] = _format_decimal_places(avg_price, 5) or str(avg_price)
+        if mark_price is not None:
+            ack_extra["mark_price"] = decimal_to_str(mark_price)
 
         # Carry enough context for streaming TWAP progress updates.
         # This is best-effort and allows the dashboard history to refresh avg_price/filled_qty

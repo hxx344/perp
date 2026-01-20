@@ -3799,6 +3799,9 @@ class CoordinatorApp:
                     "in_progress": 0,
                     "filled_qty_total": 0.0,
                     "avg_price": None,
+                    "wear_total": 0.0,
+                    "wear_qty_total": 0.0,
+                    "wear_avg_per_unit": None,
                     "last_updated_at_ms": None,
                     "end_at_ms": None,
                 }
@@ -3807,6 +3810,8 @@ class CoordinatorApp:
             filled_sum = 0.0
             filled_price_num = 0.0
             filled_price_den = 0.0
+            wear_total = 0.0
+            wear_qty_total = 0.0
             completed = 0
             failed = 0
             in_progress = 0
@@ -3833,11 +3838,20 @@ class CoordinatorApp:
 
                     fq = _safe_float(extra.get("filled_qty"))
                     ap = _safe_float(extra.get("avg_price"))
+                    mp = _safe_float(extra.get("mark_price"))
                     if fq is not None:
                         filled_sum += fq
                         if ap is not None:
                             filled_price_num += fq * ap
                             filled_price_den += fq
+                    if fq is not None and ap is not None and mp is not None:
+                        side = str(extra.get("algo_side") or "").strip().lower()
+                        if side == "buy":
+                            wear_total += (ap - mp) * fq
+                            wear_qty_total += fq
+                        elif side == "sell":
+                            wear_total += (mp - ap) * fq
+                            wear_qty_total += fq
 
                     ms = _norm_ms(extra.get("last_updated_at") or extra.get("updated_at"))
                     if ms is not None:
@@ -3865,6 +3879,9 @@ class CoordinatorApp:
                 "in_progress": in_progress,
                 "filled_qty_total": round(filled_sum, 6),
                 "avg_price": (filled_price_num / filled_price_den) if filled_price_den > 0 else None,
+                "wear_total": round(wear_total, 6),
+                "wear_qty_total": round(wear_qty_total, 6),
+                "wear_avg_per_unit": (wear_total / wear_qty_total) if wear_qty_total > 0 else None,
                 "last_updated_at_ms": last_updated_ms,
                 "end_at_ms": end_at_ms,
             }

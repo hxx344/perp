@@ -2034,15 +2034,13 @@
                     <th>动作</th>
                     <th>数量</th>
                     <th>币种</th>
-                    <th>间隔</th>
-                    <th>TWAP</th>
-                    <th>累计成交</th>
-                    <th>均价</th>
-                    <th>批次</th>
-                    <th>状态</th>
+                    <th>完成次数</th>
+                    <th>成交总数量</th>
+                    <th>平均磨损(合计)</th>
+                    <th>累计磨损</th>
                   </tr>
                 </thead>
-                <tbody id="para-twap-schedule-history"><tr><td colspan="10">暂无定时记录</td></tr></tbody>
+                <tbody id="para-twap-schedule-history"><tr><td colspan="8">暂无定时记录</td></tr></tbody>
               </table>
             </div>
           </div>
@@ -9268,7 +9266,7 @@
         const rows = [];
         const items = Array.isArray(history) ? history : [];
         if (!items.length) {
-          paraTwapScheduleHistoryBody.innerHTML = '<tr><td colspan="10">暂无定时记录</td></tr>';
+          paraTwapScheduleHistoryBody.innerHTML = '<tr><td colspan="8">暂无定时记录</td></tr>';
           return;
         }
 
@@ -9322,36 +9320,51 @@
 
         const scopeFor = (symbols) => describeSymbolScope(symbols);
 
-        const statusFor = (rollup, lastError) => {
-          if (lastError) {
-            return `错误：${safeText(lastError)}`;
-          }
-          const r = (rollup && typeof rollup === 'object') ? rollup : {};
-          const completed = Number(r.completed ?? 0);
-          const failed = Number(r.failed ?? 0);
-          const pending = Number(r.pending ?? 0);
-          const inProgress = Number(r.in_progress ?? 0);
-          const total = Number(r.request_count ?? 0);
-          return `批次 ${completed}/${total} 完成，失败 ${failed}，进行中 ${inProgress}，待ACK ${pending}`;
+        const signatureFor = (cfg) => {
+          const action = String(cfg?.action || '').toLowerCase();
+          const magnitude = Number(cfg?.magnitude ?? 0);
+          const interval = Number(cfg?.interval_seconds ?? 0);
+          const duration = Number(cfg?.twap_duration_seconds ?? 0);
+          const symbols = Array.isArray(cfg?.symbols) ? cfg.symbols.slice().sort() : [];
+          return [action, magnitude, interval, duration, symbols.join(',')].join('|');
         };
 
-        for (const item of items.slice(0, 20)) {
+        const aggregates = new Map();
+        for (const item of items) {
           const cfg = (item?.config && typeof item.config === 'object') ? item.config : {};
           const roll = (item?.rollup && typeof item.rollup === 'object') ? item.rollup : {};
-          const requestCount = Number(roll.request_count ?? (Array.isArray(item?.request_ids) ? item.request_ids.length : 0));
+          const key = signatureFor(cfg);
+          const current = aggregates.get(key) || {
+            created_at: item?.created_at ?? null,
+            config: cfg,
+            request_count: 0,
+            completed: 0,
+            filled_qty_total: 0,
+            wear_total: 0,
+            wear_qty_total: 0,
+          };
+          current.created_at = Math.min(Number(current.created_at || item?.created_at || 0) || 0, Number(item?.created_at || 0) || 0) || current.created_at;
+          current.request_count += Number(roll.request_count ?? (Array.isArray(item?.request_ids) ? item.request_ids.length : 0)) || 0;
+          current.completed += Number(roll.completed ?? 0) || 0;
+          current.filled_qty_total += Number(roll.filled_qty_total ?? 0) || 0;
+          current.wear_total += Number(roll.wear_total ?? 0) || 0;
+          current.wear_qty_total += Number(roll.wear_qty_total ?? 0) || 0;
+          aggregates.set(key, current);
+        }
 
-          const createdText = formatTs(item?.created_at);
+        const aggregatedList = Array.from(aggregates.values()).sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0));
+
+        for (const item of aggregatedList) {
+          const cfg = item.config || {};
+          const createdText = formatTs(item.created_at);
           const action = String(cfg?.action || '--').toLowerCase();
           const magnitude = formatMaybeNumber(cfg?.magnitude ?? '--', 6);
           const scope = scopeFor(cfg?.symbols);
-          const interval = safeText(cfg?.interval_seconds);
-          const duration = safeText(cfg?.twap_duration_seconds);
-          const filledTotal = formatMaybeNumber(roll?.filled_qty_total ?? '--', 6);
-          const avgPrice = roll?.avg_price === null ? '--' : formatMaybeNumber(roll?.avg_price ?? '--', 6);
-
-          const finishedAt = roll?.end_at_ms ? parseMsToText(roll.end_at_ms) : '--';
-          const updatedAt = roll?.last_updated_at_ms ? parseMsToText(roll.last_updated_at_ms) : '--';
-          const timing = finishedAt !== '--' ? `完成 ${finishedAt}` : (updatedAt !== '--' ? `更新 ${updatedAt}` : '--');
+          const requestCount = Number(item.request_count ?? 0);
+          const completed = Number(item.completed ?? 0);
+          const filledTotal = formatMaybeNumber(item.filled_qty_total ?? '--', 6);
+          const wearTotal = formatMaybeNumber(item.wear_total ?? '--', 6);
+          const wearAvg = (item.wear_qty_total ?? 0) > 0 ? formatMaybeNumber(item.wear_total / item.wear_qty_total, 6) : '--';
 
           rows.push(`
             <tr>
@@ -9359,12 +9372,10 @@
               <td>${escapeHtml(describeAdjustmentAction(action))}</td>
               <td>${escapeHtml(String(magnitude))}</td>
               <td>${escapeHtml(scope)}</td>
-              <td>${escapeHtml(String(interval))}s</td>
-              <td>${escapeHtml(String(duration))}s</td>
+              <td title="完成 ${completed} / 批次 ${requestCount}">${escapeHtml(String(completed))}</td>
               <td>${escapeHtml(String(filledTotal))}</td>
-              <td>${escapeHtml(String(avgPrice))}</td>
-              <td>${escapeHtml(String(requestCount))}</td>
-              <td title="${escapeHtml(timing)}">${escapeHtml(statusFor(roll, item?.last_error))}</td>
+              <td>${escapeHtml(String(wearAvg))}</td>
+              <td>${escapeHtml(String(wearTotal))}</td>
             </tr>
           `);
         }
