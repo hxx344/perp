@@ -9189,7 +9189,7 @@
 
         if (!enabled || !tasks.length) {
           paraTwapScheduleStatus.textContent = '未启用';
-          renderParaTwapSchedulerHistory([]);
+          renderParaTwapSchedulerHistory(st?.history);
           _renderParaTwapSchedulerTasksEditor(st);
           return;
         }
