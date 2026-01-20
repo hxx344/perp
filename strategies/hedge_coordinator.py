@@ -7373,15 +7373,6 @@ class CoordinatorApp:
                 progress=progress,
             )
         except KeyError as exc:
-            with suppress(Exception):
-                LOGGER.warning(
-                    "PARA adjust ack ignored (unknown request_id): request_id=%s agent_id=%s status=%s progress=%s keys=%s",
-                    request_id,
-                    agent_id,
-                    status,
-                    progress,
-                    sorted(list(body.keys())),
-                )
             raise web.HTTPNotFound(text=str(exc))
         except ValueError as exc:
             with suppress(Exception):
