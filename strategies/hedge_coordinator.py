@@ -3463,7 +3463,7 @@ class CoordinatorApp:
             "history": [],
         }
         self._para_twap_scheduler_task: Optional[asyncio.Task] = None
-        self._para_twap_scheduler_history_limit: int = 20
+        self._para_twap_scheduler_history_limit: int = 2000
 
         # Backpack auto balance (equity equalization via internal transfer)
         self._bp_auto_balance_cfg: Optional[AutoBalanceConfig] = None
