@@ -3485,8 +3485,8 @@ class CoordinatorApp:
         # PARA adjustment history should stick around longer than the default
         # so the dashboard doesn't “forget” after an hour.
         self._para_adjustments = GrvtAdjustmentManager(
-            history_limit=20,
-            retention_seconds=3 * 24 * 3600,
+            history_limit=20000,
+            retention_seconds=10 * 24 * 3600,
         )
 
         # Backpack volume booster state (multi-runner, keyed by symbol).
