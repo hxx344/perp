@@ -2036,7 +2036,7 @@
                     <th>币种</th>
                     <th>完成次数</th>
                     <th>成交总数量</th>
-                    <th>平均磨损(合计)</th>
+                    <th>每万成交额磨损</th>
                     <th>累计磨损</th>
                   </tr>
                 </thead>
@@ -9362,6 +9362,7 @@
             filled_qty_total: 0,
             wear_total: 0,
             wear_qty_total: 0,
+            notional_total: 0,
           };
           current.created_at = Math.min(Number(current.created_at || item?.created_at || 0) || 0, Number(item?.created_at || 0) || 0) || current.created_at;
           current.request_count += Number(roll.request_count ?? (Array.isArray(item?.request_ids) ? item.request_ids.length : 0)) || 0;
@@ -9372,6 +9373,11 @@
             roll.qty_total,
             roll.qty
           ) ?? 0;
+          const avgPrice = pickNumber(
+            roll.avg_price,
+            roll.avg_fill_price,
+            roll.average_price
+          );
           const wearTotalRaw = pickNumber(
             roll.wear_total,
             roll.wear_total_net,
@@ -9391,6 +9397,9 @@
           );
           const wearTotal = wearTotalRaw ?? ((wearAvg != null && wearQty != null) ? (wearAvg * wearQty) : 0);
           current.filled_qty_total += filledQty;
+          if (avgPrice != null && filledQty) {
+            current.notional_total += avgPrice * filledQty;
+          }
           current.wear_total += Number.isFinite(wearTotal) ? wearTotal : 0;
           current.wear_qty_total += Number.isFinite(wearQty) ? wearQty : 0;
           aggregates.set(key, current);
@@ -9408,7 +9417,9 @@
           const completed = Number(item.completed ?? 0);
           const filledTotal = formatMaybeNumber(item.filled_qty_total ?? '--', 6);
           const wearTotal = formatMaybeNumber(item.wear_total ?? '--', 6);
-          const wearAvg = (item.wear_qty_total ?? 0) > 0 ? formatMaybeNumber(item.wear_total / item.wear_qty_total, 6) : '--';
+          const wearPer10k = (item.notional_total ?? 0) > 0
+            ? formatMaybeNumber((item.wear_total / item.notional_total) * 10000, 6)
+            : '--';
 
           rows.push(`
             <tr>
@@ -9418,7 +9429,7 @@
               <td>${escapeHtml(scope)}</td>
               <td title="完成 ${completed} / 批次 ${requestCount}">${escapeHtml(String(completed))}</td>
               <td>${escapeHtml(String(filledTotal))}</td>
-              <td>${escapeHtml(String(wearAvg))}</td>
+              <td>${escapeHtml(String(wearPer10k))}</td>
               <td>${escapeHtml(String(wearTotal))}</td>
             </tr>
           `);
