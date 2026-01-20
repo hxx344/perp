@@ -631,7 +631,7 @@ class ParadexAccountMonitor:
         # Use a small but higher concurrency to keep the system responsive.
         self._adjust_executor = concurrent.futures.ThreadPoolExecutor(max_workers=30)
         # Dedicated pool for TWAP progress polling to avoid blocking order execution.
-        self._progress_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+        self._progress_executor = concurrent.futures.ThreadPoolExecutor(max_workers=30)
         # TWAP caches (reduce history scans and allow batching open-orders polling).
         self._twap_algo_cache: Dict[str, Dict[str, Any]] = {}
         self._twap_algo_cache_lock = threading.Lock()
