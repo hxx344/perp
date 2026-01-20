@@ -9333,6 +9333,26 @@
         for (const item of items) {
           const cfg = (item?.config && typeof item.config === 'object') ? item.config : {};
           const roll = (item?.rollup && typeof item.rollup === 'object') ? item.rollup : {};
+          const toNumber = (value) => {
+            if (value === undefined || value === null) {
+              return null;
+            }
+            const raw = String(value).trim();
+            if (!raw) {
+              return null;
+            }
+            const parsed = Number(raw);
+            return Number.isFinite(parsed) ? parsed : null;
+          };
+          const pickNumber = (...values) => {
+            for (const v of values) {
+              const parsed = toNumber(v);
+              if (parsed !== null) {
+                return parsed;
+              }
+            }
+            return null;
+          };
           const key = signatureFor(cfg);
           const current = aggregates.get(key) || {
             created_at: item?.created_at ?? null,
@@ -9346,9 +9366,33 @@
           current.created_at = Math.min(Number(current.created_at || item?.created_at || 0) || 0, Number(item?.created_at || 0) || 0) || current.created_at;
           current.request_count += Number(roll.request_count ?? (Array.isArray(item?.request_ids) ? item.request_ids.length : 0)) || 0;
           current.completed += Number(roll.completed ?? 0) || 0;
-          current.filled_qty_total += Number(roll.filled_qty_total ?? 0) || 0;
-          current.wear_total += Number(roll.wear_total ?? 0) || 0;
-          current.wear_qty_total += Number(roll.wear_qty_total ?? 0) || 0;
+          const filledQty = pickNumber(
+            roll.filled_qty_total,
+            roll.filled_qty,
+            roll.qty_total,
+            roll.qty
+          ) ?? 0;
+          const wearTotalRaw = pickNumber(
+            roll.wear_total,
+            roll.wear_total_net,
+            roll.wear_total_net_est,
+            roll.wear
+          );
+          const wearQty = pickNumber(
+            roll.wear_qty_total,
+            roll.filled_qty_total,
+            roll.filled_qty,
+            roll.qty
+          );
+          const wearAvg = pickNumber(
+            roll.wear_avg_per_unit,
+            roll.wear_avg,
+            roll.wear_per_unit
+          );
+          const wearTotal = wearTotalRaw ?? ((wearAvg != null && wearQty != null) ? (wearAvg * wearQty) : 0);
+          current.filled_qty_total += filledQty;
+          current.wear_total += Number.isFinite(wearTotal) ? wearTotal : 0;
+          current.wear_qty_total += Number.isFinite(wearQty) ? wearQty : 0;
           aggregates.set(key, current);
         }
 
