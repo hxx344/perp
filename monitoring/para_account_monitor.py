@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import inspect
 import concurrent.futures
+import threading
 import logging
 import os
 import sys
@@ -629,7 +630,39 @@ class ParadexAccountMonitor:
         # submitted in bursts (e.g., the 5th request never logs "start poll").
         # Use a small but higher concurrency to keep the system responsive.
         self._adjust_executor = concurrent.futures.ThreadPoolExecutor(max_workers=30)
+        # Dedicated pool for TWAP progress polling to avoid blocking order execution.
+        self._progress_executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+        # TWAP caches (reduce history scans and allow batching open-orders polling).
+        self._twap_algo_cache: Dict[str, Dict[str, Any]] = {}
+        self._twap_algo_cache_lock = threading.Lock()
+        self._twap_open_cache: Dict[str, Any] = {"ts": 0.0, "rows": []}
+        self._twap_open_cache_lock = threading.Lock()
+        self._twap_history_cache: Dict[Tuple[str, str, Optional[int], Optional[int], str], Tuple[float, List[Dict[str, Any]]]] = {}
+        self._twap_history_cache_lock = threading.Lock()
         self._register_symbol_hint(self._default_market)
+
+    def _cache_twap_context(self, request_id: str, extra: Dict[str, Any]) -> None:
+        if not request_id or not isinstance(extra, dict):
+            return
+        if str(extra.get("order_type") or "").upper() != "TWAP":
+            return
+        payload = {
+            "algo_id": extra.get("algo_id"),
+            "algo_market": extra.get("algo_market"),
+            "algo_side": extra.get("algo_side"),
+            "algo_expected_size": extra.get("algo_expected_size"),
+            "algo_started_at_ms": extra.get("algo_started_at_ms"),
+        }
+        with self._twap_algo_cache_lock:
+            cached = dict(self._twap_algo_cache.get(request_id, {}))
+            cached.update({k: v for k, v in payload.items() if v is not None})
+            self._twap_algo_cache[request_id] = cached
+
+    def _get_twap_context(self, request_id: str) -> Dict[str, Any]:
+        if not request_id:
+            return {}
+        with self._twap_algo_cache_lock:
+            return dict(self._twap_algo_cache.get(request_id, {}))
 
     @staticmethod
     def _normalize_symbol_label(value: Optional[str]) -> str:
@@ -1686,7 +1719,7 @@ class ParadexAccountMonitor:
         """
 
         debug_enabled = _is_para_twap_progress_debug_enabled()
-        history_only = True
+        history_only = _is_para_twap_progress_history_only_enabled()
 
         record = self._processed_adjustments.get(request_id) or {}
         extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
@@ -1694,6 +1727,12 @@ class ParadexAccountMonitor:
             if debug_enabled:
                 LOGGER.info("TWAP progress[%s] skipped: missing extra dict", request_id)
             return
+
+        cached_context = self._get_twap_context(request_id)
+        if cached_context:
+            merged = dict(cached_context)
+            merged.update(extra)
+            extra = merged
 
         market = str(extra.get("algo_market") or "").strip()
         side = str(extra.get("algo_side") or "").strip().upper()
@@ -1718,6 +1757,8 @@ class ParadexAccountMonitor:
             duration_hint_val = None
 
         poll_interval = max(0.5, DEFAULT_TWAP_PROGRESS_POLL_SECONDS)
+        open_cache_ttl = max(0.25, min(2.0, poll_interval))
+        history_cache_ttl = max(1.0, min(5.0, poll_interval * 2))
         now = time.time()
 
         # Base deadline: a conservative fallback window for cases where we don't know the TWAP duration.
@@ -1807,6 +1848,12 @@ class ParadexAccountMonitor:
 
             window_start = started_at_ms - 10 * 60_000 if started_at_ms else None
             window_end = started_at_ms + 60 * 60_000 if started_at_ms else None
+            cache_key = (market.upper(), side, window_start, window_end, expected_algo_id)
+            now_ts = time.time()
+            with self._twap_history_cache_lock:
+                cached = self._twap_history_cache.get(cache_key)
+                if cached and (now_ts - cached[0] <= history_cache_ttl):
+                    return list(cached[1]), 0
             limit = max(1, int(DEFAULT_TWAP_HISTORY_PAGE_LIMIT))
             max_pages = max(1, int(DEFAULT_TWAP_HISTORY_MAX_PAGES))
 
@@ -1848,6 +1895,8 @@ class ParadexAccountMonitor:
                     break
                 cursor = str(next_cursor)
 
+            with self._twap_history_cache_lock:
+                self._twap_history_cache[cache_key] = (time.time(), list(combined))
             return combined, pages
 
         last_sent: Dict[str, Any] = {}
@@ -1987,6 +2036,11 @@ class ParadexAccountMonitor:
                 LOGGER.info("TWAP progress[%s] refreshed token from client headers", request_id)
             return True
 
+        if expected_algo_id:
+            history_only = False
+        if not history_only and algo_client is None and private_client is not None:
+            history_only = True
+
         if debug_enabled:
             LOGGER.info(
                 "TWAP progress[%s] start poll: market=%s side=%s expected_size=%s poll=%.1fs deadline=%.0fs base_url=%s token=%s",
@@ -2060,6 +2114,20 @@ class ParadexAccountMonitor:
         expected_algo_id_retry_count = 0
         expected_algo_id_retry_max = max(0, int(DEFAULT_TWAP_HISTORY_EXPECTED_ALGO_ID_RETRY_MAX))
 
+        def _fetch_open_orders_cached() -> List[Dict[str, Any]]:
+            if algo_client is None:
+                return []
+            now_ts = time.time()
+            with self._twap_open_cache_lock:
+                cached = self._twap_open_cache or {}
+                if cached.get("rows") and now_ts - float(cached.get("ts", 0.0)) <= open_cache_ttl:
+                    return list(cached.get("rows") or [])
+            resp_obj = algo_client.fetch_open_algo_orders()
+            rows_obj = _extract_rows(resp_obj)
+            with self._twap_open_cache_lock:
+                self._twap_open_cache = {"ts": now_ts, "rows": list(rows_obj)}
+            return rows_obj
+
         while time.time() < hard_deadline:
             loop_guard += 1
             if getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS) is not None:
@@ -2099,7 +2167,7 @@ class ParadexAccountMonitor:
                         if debug_enabled:
                             LOGGER.info("TWAP progress[%s] stop: missing base_url/token for algo client", request_id)
                         return
-                    resp = algo_client.fetch_open_algo_orders()
+                    rows = _fetch_open_orders_cached()
             except Exception as exc:  # pragma: no cover
                 # In production we want this visible when the dedicated progress debug flag is enabled.
                 if debug_enabled:
@@ -2139,9 +2207,6 @@ class ParadexAccountMonitor:
 
                 time.sleep(poll_interval)
                 continue
-
-            if not history_only:
-                rows = _extract_rows(resp)
 
             if debug_enabled and not history_only:
                 LOGGER.info(
@@ -2352,6 +2417,7 @@ class ParadexAccountMonitor:
                         progress_extra.get("algo_remaining_size"),
                     )
                 if ok:
+                    self._cache_twap_context(request_id, {"order_type": "TWAP", **progress_extra})
                     merged = dict(extra)
                     merged.update(progress_extra)
                     record["extra"] = merged
@@ -2424,13 +2490,16 @@ class ParadexAccountMonitor:
                     "inflight": False,
                 }
 
+                if acked and isinstance(extra, dict) and extra.get("order_type") == "TWAP":
+                    self._cache_twap_context(req_id, extra)
+
                 if acked and start_progress:
                     record = self._processed_adjustments.get(req_id) or {}
                     if not record.get("progress_polling"):
                         record["progress_polling"] = True
                         self._processed_adjustments[req_id] = record
                         try:
-                            self._adjust_executor.submit(self._poll_twap_progress, req_id)
+                            self._progress_executor.submit(self._poll_twap_progress, req_id)
                         except Exception as exc:  # pragma: no cover
                             LOGGER.debug("Failed to start TWAP progress poller for %s: %s", req_id, exc)
 
