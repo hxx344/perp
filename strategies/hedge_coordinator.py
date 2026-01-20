@@ -3575,9 +3575,6 @@ class CoordinatorApp:
         if not isinstance(raw, dict) or not raw:
             return
         enabled = bool(raw.get("enabled"))
-        if not enabled:
-            self._update_para_twap_scheduler_tasks([])
-            return
 
         # v2: tasks list
         tasks_raw = raw.get("tasks")
@@ -3586,13 +3583,16 @@ class CoordinatorApp:
             for item in tasks_raw:
                 if not isinstance(item, dict):
                     continue
-                if item.get("enabled") is False:
-                    continue
                 try:
                     tasks.append(self._parse_para_twap_scheduler_task(item))
                 except Exception:
                     continue
             self._update_para_twap_scheduler_tasks(tasks)
+            if not enabled:
+                # Keep tasks but pause scheduler if persisted as disabled.
+                self._stop_para_twap_scheduler()
+                self._para_twap_scheduler_status["running"] = False
+                self._para_twap_scheduler_status["next_run_at"] = None
             return
 
         # legacy: single config
@@ -3695,8 +3695,6 @@ class CoordinatorApp:
         for t in tasks or []:
             if not isinstance(t, dict):
                 continue
-            if t.get("enabled") is False:
-                continue
             # Ensure task has required shape.
             parsed = self._parse_para_twap_scheduler_task(t)
             task_id = str(parsed.get("task_id") or "")
@@ -3724,8 +3722,13 @@ class CoordinatorApp:
         self._para_twap_scheduler_tasks = normalized
         self._para_twap_scheduler_status["last_error"] = None
         self._para_twap_scheduler_status["last_result"] = None
-
         if not self._para_twap_scheduler_tasks:
+            self._stop_para_twap_scheduler()
+            self._para_twap_scheduler_status["running"] = False
+            self._para_twap_scheduler_status["next_run_at"] = None
+            return
+        if not any(t.get("enabled") is not False for t in self._para_twap_scheduler_tasks if isinstance(t, dict)):
+            # All tasks paused; keep them but stop scheduler loop.
             self._stop_para_twap_scheduler()
             self._para_twap_scheduler_status["running"] = False
             self._para_twap_scheduler_status["next_run_at"] = None
@@ -5851,11 +5854,15 @@ class CoordinatorApp:
         enabled_flag = body.get("enabled")
         action = str(body.get("action") or "").strip().lower() if isinstance(body.get("action"), str) else None
         if enabled_flag is False or action == "disable":
-            self._update_para_twap_scheduler_tasks([])
+            tasks = [dict(t) for t in (self._para_twap_scheduler_tasks or [])]
+            for t in tasks:
+                if isinstance(t, dict):
+                    t["enabled"] = False
+            self._update_para_twap_scheduler_tasks(tasks)
             self._persist_para_twap_scheduler_config()
             return web.json_response({
                 "enabled": False,
-                "tasks": [],
+                "tasks": [dict(t) for t in (self._para_twap_scheduler_tasks or [])],
                 "status": dict(self._para_twap_scheduler_status or {}),
             })
 

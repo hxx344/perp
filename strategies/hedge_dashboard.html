@@ -9576,10 +9576,12 @@
           paraTwapScheduleStatus.textContent = '停用中…';
         }
         try {
+          const draft = Array.isArray(paraTwapSchedulerTasksDraft) ? paraTwapSchedulerTasksDraft.slice() : [];
+          const paused = draft.map((t) => t ? { ...t, enabled: false } : t).filter(Boolean);
           const response = await fetch('/para/twap_scheduler/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'disable', enabled: false }),
+            body: JSON.stringify({ action: 'disable', enabled: false, tasks: paused }),
           });
           redirectIfUnauthorized(response);
           if (!response.ok) {
