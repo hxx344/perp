@@ -639,6 +639,11 @@ class ParadexAccountMonitor:
         self._twap_open_cache_lock = threading.Lock()
         self._twap_history_cache: Dict[Tuple[str, str, Optional[int], Optional[int], str], Tuple[float, List[Dict[str, Any]]]] = {}
         self._twap_history_cache_lock = threading.Lock()
+        # Shared TWAP progress polling state (batch loop).
+        self._twap_progress_active: Dict[str, Dict[str, Any]] = {}
+        self._twap_progress_active_lock = threading.Lock()
+        self._twap_progress_stop = threading.Event()
+        self._twap_progress_runner: Optional[concurrent.futures.Future] = None
         self._register_symbol_hint(self._default_market)
 
     def _cache_twap_context(self, request_id: str, extra: Dict[str, Any]) -> None:
@@ -1708,7 +1713,72 @@ class ParadexAccountMonitor:
             return False
         return True
 
-    def _poll_twap_progress(self, request_id: str) -> None:
+    def _ensure_twap_progress_runner(self) -> None:
+        should_start = False
+        with self._twap_progress_active_lock:
+            if self._twap_progress_runner is None or getattr(self._twap_progress_runner, "done", lambda: True)():
+                should_start = True
+        if should_start:
+            try:
+                self._twap_progress_runner = self._progress_executor.submit(self._twap_progress_loop)
+            except Exception as exc:  # pragma: no cover
+                LOGGER.debug("Failed to start TWAP progress batch loop: %s", exc)
+
+    def _register_twap_progress_request(self, request_id: str) -> None:
+        if not request_id:
+            return
+        with self._twap_progress_active_lock:
+            if request_id not in self._twap_progress_active:
+                self._twap_progress_active[request_id] = {}
+        self._ensure_twap_progress_runner()
+
+    def _twap_progress_loop(self) -> None:
+        poll_interval = max(0.5, DEFAULT_TWAP_PROGRESS_POLL_SECONDS)
+        idle_sleep = min(0.5, poll_interval)
+        while not self._twap_progress_stop.is_set():
+            with self._twap_progress_active_lock:
+                active_items = list(self._twap_progress_active.items())
+
+            if not active_items:
+                time.sleep(idle_sleep)
+                continue
+
+            now = time.time()
+            for request_id, state in active_items:
+                if request_id not in self._processed_adjustments:
+                    with self._twap_progress_active_lock:
+                        self._twap_progress_active.pop(request_id, None)
+                    continue
+                if not isinstance(state, dict):
+                    state = {}
+                    with self._twap_progress_active_lock:
+                        self._twap_progress_active[request_id] = state
+                next_poll_at = state.get("next_poll_at")
+                if isinstance(next_poll_at, (int, float)) and next_poll_at > now:
+                    continue
+                try:
+                    keep = self._poll_twap_progress(request_id, single_pass=True, state=state)
+                except Exception as exc:  # pragma: no cover
+                    LOGGER.debug("TWAP progress batch poll failed for %s: %s", request_id, exc)
+                    keep = False
+                if not keep:
+                    with self._twap_progress_active_lock:
+                        self._twap_progress_active.pop(request_id, None)
+                    record = self._processed_adjustments.get(request_id)
+                    if isinstance(record, dict):
+                        record["progress_polling"] = False
+                        record["timestamp"] = time.time()
+                        self._processed_adjustments[request_id] = record
+
+            time.sleep(idle_sleep)
+
+    def _poll_twap_progress(
+        self,
+        request_id: str,
+        *,
+        single_pass: bool = False,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Poll open algo orders and stream TWAP progress updates.
 
         Uses Paradex REST GET /v1/algo/orders (via perp-dex-tools helper client)
@@ -1719,14 +1789,18 @@ class ParadexAccountMonitor:
         """
 
         debug_enabled = _is_para_twap_progress_debug_enabled()
-        history_only = _is_para_twap_progress_history_only_enabled()
+        state = state if isinstance(state, dict) else {}
+        history_only = bool(state.get("history_only", _is_para_twap_progress_history_only_enabled()))
+
+        def _schedule_next(delay: float) -> None:
+            state["next_poll_at"] = time.time() + max(0.1, delay)
 
         record = self._processed_adjustments.get(request_id) or {}
         extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
         if not isinstance(extra, dict):
             if debug_enabled:
                 LOGGER.info("TWAP progress[%s] skipped: missing extra dict", request_id)
-            return
+            return False
 
         cached_context = self._get_twap_context(request_id)
         if cached_context:
@@ -1748,7 +1822,7 @@ class ParadexAccountMonitor:
                     side or "",
                     expected_size or "",
                 )
-            return
+            return False
 
         duration_hint = extra.get("twap_duration_seconds")
         try:
@@ -1762,7 +1836,9 @@ class ParadexAccountMonitor:
         now = time.time()
 
         # Base deadline: a conservative fallback window for cases where we don't know the TWAP duration.
-        hard_deadline = now + max(30.0, DEFAULT_TWAP_PROGRESS_MAX_SECONDS)
+        hard_deadline = state.get("hard_deadline")
+        if not isinstance(hard_deadline, (int, float)):
+            hard_deadline = now + max(30.0, DEFAULT_TWAP_PROGRESS_MAX_SECONDS)
 
         if duration_hint_val is not None and duration_hint_val > 0:
             # If we know the expected TWAP duration, keep polling at least until then (plus a grace window).
@@ -1771,6 +1847,8 @@ class ParadexAccountMonitor:
             expected_deadline = now + float(duration_hint_val) + 120.0
             capped_expected_deadline = min(expected_deadline, now + DEFAULT_TWAP_PROGRESS_HARD_CAP_SECONDS)
             hard_deadline = max(hard_deadline, capped_expected_deadline)
+
+        state["hard_deadline"] = hard_deadline
 
         def _to_float(value: Any) -> Optional[float]:
             if value is None:
@@ -1900,6 +1978,9 @@ class ParadexAccountMonitor:
             return combined, pages
 
         last_sent: Dict[str, Any] = {}
+        cached_last_sent = state.get("last_sent")
+        if isinstance(cached_last_sent, dict):
+            last_sent = dict(cached_last_sent)
 
         # Build local algo client config from the existing Paradex client.
         api_client = getattr(self._client, "api_client", None) if self._client is not None else None
@@ -1940,14 +2021,16 @@ class ParadexAccountMonitor:
             acct = getattr(self._client, "account", None)
             token = getattr(acct, "jwt_token", None) if acct is not None else None
 
-        algo_client: Optional[ParadexAlgoClient] = None
-        private_client: Optional[ParadexPrivateClient] = None
+        algo_client: Optional[ParadexAlgoClient] = state.get("algo_client")
+        private_client: Optional[ParadexPrivateClient] = state.get("private_client")
         # When history polling is unauthorized, try to self-heal by re-reading the latest
         # bearer token from the underlying client headers. This prevents stale-token
         # issues from leaving the request pending forever.
-        consecutive_unauthorized = 0
+        consecutive_unauthorized = int(state.get("consecutive_unauthorized", 0))
         max_consecutive_unauthorized = 3
-        last_token: Optional[str] = token if isinstance(token, str) and token else None
+        last_token: Optional[str] = state.get("last_token")
+        if not isinstance(last_token, str) or not last_token:
+            last_token = token if isinstance(token, str) and token else None
         if isinstance(base_url, str) and base_url and isinstance(token, str) and token:
             base_url_norm = base_url.rstrip("/")
             # Some paradex-py versions expose api_url already suffixed with /v1.
@@ -2032,14 +2115,20 @@ class ParadexAccountMonitor:
             last_token = token_local
             # Reset counter on successful token refresh.
             consecutive_unauthorized = 0
+            state["algo_client"] = algo_client
+            state["private_client"] = private_client
+            state["last_token"] = last_token
+            state["consecutive_unauthorized"] = consecutive_unauthorized
             if debug_enabled:
                 LOGGER.info("TWAP progress[%s] refreshed token from client headers", request_id)
             return True
 
-        if expected_algo_id:
+        if expected_algo_id and not state.get("history_only_forced"):
             history_only = False
         if not history_only and algo_client is None and private_client is not None:
             history_only = True
+
+        state["history_only"] = history_only
 
         if debug_enabled:
             LOGGER.info(
@@ -2111,7 +2200,7 @@ class ParadexAccountMonitor:
 
         # Unit-test friendliness: when timeout is configured extremely small, avoid long sleeps.
         loop_guard = 0
-        expected_algo_id_retry_count = 0
+        expected_algo_id_retry_count = int(state.get("expected_algo_id_retry_count", 0))
         expected_algo_id_retry_max = max(0, int(DEFAULT_TWAP_HISTORY_EXPECTED_ALGO_ID_RETRY_MAX))
 
         def _fetch_open_orders_cached() -> List[Dict[str, Any]]:
@@ -2128,12 +2217,21 @@ class ParadexAccountMonitor:
                 self._twap_open_cache = {"ts": now_ts, "rows": list(rows_obj)}
             return rows_obj
 
+        def _persist_state() -> None:
+            state["last_sent"] = dict(last_sent)
+            state["history_only"] = history_only
+            state["consecutive_unauthorized"] = consecutive_unauthorized
+            state["last_token"] = last_token
+            state["expected_algo_id_retry_count"] = expected_algo_id_retry_count
+            state["algo_client"] = algo_client
+            state["private_client"] = private_client
+
         while time.time() < hard_deadline:
             loop_guard += 1
             if getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS) is not None:
                 try:
                     if float(getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS)) < 0.01 and loop_guard > 2:
-                        return
+                        return False
                 except Exception:
                     pass
             try:
@@ -2141,7 +2239,7 @@ class ParadexAccountMonitor:
                     # Older setups may not expose base_url/token; in that case we can't poll.
                     if debug_enabled:
                         LOGGER.info("TWAP progress[%s] stop: missing base_url/token for algo client", request_id)
-                    return
+                    return False
                 if history_only:
                     # Use history endpoint for the full lifecycle (OPEN/NEW/CLOSED).
                     rows, pages = _fetch_history_pages()
@@ -2166,7 +2264,7 @@ class ParadexAccountMonitor:
                     if algo_client is None:
                         if debug_enabled:
                             LOGGER.info("TWAP progress[%s] stop: missing base_url/token for algo client", request_id)
-                        return
+                        return False
                     rows = _fetch_open_orders_cached()
             except Exception as exc:  # pragma: no cover
                 # In production we want this visible when the dedicated progress debug flag is enabled.
@@ -2188,6 +2286,14 @@ class ParadexAccountMonitor:
                             "TWAP progress[%s] switched to history-only polling after 404 on /algo/orders",
                             request_id,
                         )
+                    if single_pass:
+                        _schedule_next(poll_interval)
+                        state["history_only"] = True
+                        state["history_only_forced"] = True
+                        state["expected_algo_id_retry_count"] = expected_algo_id_retry_count
+                        state["consecutive_unauthorized"] = consecutive_unauthorized
+                        state["last_sent"] = dict(last_sent)
+                        return True
                     time.sleep(poll_interval)
                     continue
 
@@ -2196,6 +2302,7 @@ class ParadexAccountMonitor:
                 # send a final failed ACK so the coordinator can surface the error.
                 if "401" in exc_text and "Unauthorized" in exc_text:
                     consecutive_unauthorized += 1
+                    state["consecutive_unauthorized"] = consecutive_unauthorized
                     _rebuild_clients_from_latest_token()
                     if consecutive_unauthorized >= max_consecutive_unauthorized:
                         note = "TWAP progress polling unauthorized (401); token expired or invalid"
@@ -2219,7 +2326,14 @@ class ParadexAccountMonitor:
                             )
                         except Exception:
                             pass
-                        return
+                        return False
+
+                if single_pass:
+                    _schedule_next(poll_interval)
+                    state["expected_algo_id_retry_count"] = expected_algo_id_retry_count
+                    state["consecutive_unauthorized"] = consecutive_unauthorized
+                    state["last_sent"] = dict(last_sent)
+                    return True
 
                 time.sleep(poll_interval)
                 continue
@@ -2240,6 +2354,7 @@ class ParadexAccountMonitor:
                 # and refetch history instead of picking a heuristic candidate.
                 if expected_algo_id and algo is None and time.time() + 5.0 < hard_deadline:
                     expected_algo_id_retry_count += 1
+                    state["expected_algo_id_retry_count"] = expected_algo_id_retry_count
                     if expected_algo_id_retry_count > expected_algo_id_retry_max:
                         if debug_enabled:
                             LOGGER.info(
@@ -2248,13 +2363,18 @@ class ParadexAccountMonitor:
                                 expected_algo_id,
                                 expected_algo_id_retry_max,
                             )
-                        return
+                        return False
                     if debug_enabled:
                         LOGGER.info(
                             "TWAP progress[%s] history missing expected algo_id=%s; retrying after 5s",
                             request_id,
                             expected_algo_id,
                         )
+                    if single_pass:
+                        _schedule_next(5.0)
+                        state["expected_algo_id_retry_count"] = expected_algo_id_retry_count
+                        state["last_sent"] = dict(last_sent)
+                        return True
                     time.sleep(5.0)
                     continue
 
@@ -2377,7 +2497,8 @@ class ParadexAccountMonitor:
                                     last_sent = dict(progress_extra)
                     except Exception as exc:  # pragma: no cover
                         LOGGER.debug("TWAP progress[%s] history fallback failed: %s", request_id, exc)
-                break  # no longer open
+                _persist_state()
+                return False  # no longer open
 
             # In history-only mode, stop only after it is no longer OPEN/NEW.
             if history_only and not _status_is_openish(algo.get("status")):
@@ -2446,16 +2567,26 @@ class ParadexAccountMonitor:
                     LOGGER.info(
                         "TWAP progress[%s] stop: history status=%s", request_id, progress_extra.get("algo_status")
                     )
-                break
+                _persist_state()
+                return False
 
             if getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS) is not None:
                 try:
                     if float(getattr(self, "_timeout", DEFAULT_TIMEOUT_SECONDS)) < 0.01:
-                        return
+                        _persist_state()
+                        return False
                 except Exception:
                     pass
 
+            if single_pass:
+                _schedule_next(poll_interval)
+                _persist_state()
+                return True
+
             time.sleep(poll_interval)
+
+        _persist_state()
+        return False
 
     def _process_adjustments(self) -> None:
         snapshot = self._fetch_agent_control()
@@ -2515,9 +2646,9 @@ class ParadexAccountMonitor:
                         record["progress_polling"] = True
                         self._processed_adjustments[req_id] = record
                         try:
-                            self._progress_executor.submit(self._poll_twap_progress, req_id)
+                            self._register_twap_progress_request(req_id)
                         except Exception as exc:  # pragma: no cover
-                            LOGGER.debug("Failed to start TWAP progress poller for %s: %s", req_id, exc)
+                            LOGGER.debug("Failed to register TWAP progress poller for %s: %s", req_id, exc)
 
             self._processed_adjustments[request_id] = {
                 "status": "pending",
