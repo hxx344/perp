@@ -2130,7 +2130,7 @@ class ParadexAccountMonitor:
 
         state["history_only"] = history_only
 
-        if debug_enabled:
+        if debug_enabled and not state.get("logged_start"):
             LOGGER.info(
                 "TWAP progress[%s] start poll: market=%s side=%s expected_size=%s poll=%.1fs deadline=%.0fs base_url=%s token=%s",
                 request_id,
@@ -2142,6 +2142,7 @@ class ParadexAccountMonitor:
                 str(base_url or "")[:64],
                 "ok" if (private_client is not None or algo_client is not None) else "missing",
             )
+            state["logged_start"] = True
 
         def _extract_rows(resp_obj: Any) -> List[Dict[str, Any]]:
             if not isinstance(resp_obj, dict):
