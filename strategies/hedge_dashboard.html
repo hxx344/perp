@@ -13888,6 +13888,46 @@
           saveBpRiskSettings();
         });
       }
+      if (riskSaveButton) {
+        riskSaveButton.addEventListener('click', () => {
+          saveRiskSettings();
+        });
+      }
+      if (riskTestButton) {
+        riskTestButton.addEventListener('click', () => {
+          triggerRiskTest();
+        });
+      }
+      if (riskRefreshButton) {
+        riskRefreshButton.addEventListener('click', () => {
+          loadRiskSettings({ silent: false });
+        });
+      }
+      if (riskDisableButton) {
+        riskDisableButton.addEventListener('click', () => {
+          disableRiskAlerts();
+        });
+      }
+      if (paraRiskSaveButton) {
+        paraRiskSaveButton.addEventListener('click', () => {
+          saveParaRiskSettings();
+        });
+      }
+      if (paraRiskTestButton) {
+        paraRiskTestButton.addEventListener('click', () => {
+          triggerParaRiskTest();
+        });
+      }
+      if (paraRiskRefreshButton) {
+        paraRiskRefreshButton.addEventListener('click', () => {
+          loadParaRiskSettings({ silent: false });
+        });
+      }
+      if (paraRiskDisableButton) {
+        paraRiskDisableButton.addEventListener('click', () => {
+          disableParaRiskAlerts();
+        });
+      }
       if (bpRiskTestButton) {
         bpRiskTestButton.addEventListener('click', () => {
           triggerBpRiskTest();
