@@ -5216,8 +5216,25 @@ class CoordinatorApp:
                         if k in per_agent:
                             agent_payload[k] = per_agent.get(k)
 
-        # PARA pending adjustments (task queue consumed by Paradex monitor).
-        agent_payload["pending_adjustments"] = await self._para_adjustments.pending_for_agent(agent_id)
+        # Pending adjustments: choose the right queue based on the agent payload.
+        # GRVT 与 PARA 监控都读取 pending_adjustments，但各自的队列不同。
+        pending_adjustments: List[Dict[str, Any]] = []
+        agent_snapshot: Optional[Dict[str, Any]] = None
+        with suppress(Exception):
+            agents_block = snapshot.get("agents") if isinstance(snapshot, dict) else None
+            if isinstance(agents_block, dict):
+                agent_snapshot = agents_block.get(agent_id)
+        has_grvt = isinstance(agent_snapshot, dict) and "grvt_accounts" in agent_snapshot
+        has_para = isinstance(agent_snapshot, dict) and "paradex_accounts" in agent_snapshot
+        if has_grvt and not has_para:
+            pending_adjustments = await self._adjustments.pending_for_agent(agent_id)
+        elif has_para and not has_grvt:
+            pending_adjustments = await self._para_adjustments.pending_for_agent(agent_id)
+        elif has_grvt:
+            pending_adjustments = await self._adjustments.pending_for_agent(agent_id)
+        else:
+            pending_adjustments = await self._para_adjustments.pending_for_agent(agent_id)
+        agent_payload["pending_adjustments"] = pending_adjustments
 
         response: Dict[str, Any] = {"agent": agent_payload}
 
@@ -6660,9 +6677,9 @@ class CoordinatorApp:
                 source_payload = agents_block.get(measurement.source_agent)
             source_transferable = self._extract_para_transferable_from_agent(source_payload) if source_payload else None
             if source_transferable is not None:
-                self._para_auto_balance_status["source_transferable"] = self._decimal_to_str(source_transferable)
+                self._auto_balance_status["source_transferable"] = self._decimal_to_str(source_transferable)
                 if source_transferable <= 0:
-                    self._para_auto_balance_status["last_error"] = "PARA auto balance skipped: no transferable funds at source"
+                    self._auto_balance_status["last_error"] = "GRVT auto balance skipped: no transferable funds at source"
                     return
                 if requested_amount > source_transferable:
                     requested_amount = source_transferable
