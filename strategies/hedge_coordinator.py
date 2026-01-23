@@ -139,6 +139,7 @@ def _bp_env_diagnostics() -> Dict[str, Any]:
         "configured": len(missing) == 0,
     }
 
+PERSISTED_GRVT_AUTO_BALANCE_FILE = Path(__file__).with_name(".grvt_auto_balance_config.json")
 PERSISTED_PARA_AUTO_BALANCE_FILE = Path(__file__).with_name(".para_auto_balance_config.json")
 PERSISTED_BP_AUTO_BALANCE_FILE = Path(__file__).with_name(".bp_auto_balance_config.json")
 PERSISTED_PARA_TWAP_SCHEDULER_FILE = Path(__file__).with_name(".para_twap_scheduler_config.json")
@@ -3504,6 +3505,7 @@ class CoordinatorApp:
                 self._bp_bbo_ws = BackpackBookTickerWS()
 
         # Load persisted auto balance configs (if any)
+        self._load_persisted_auto_balance_config()
         self._load_persisted_para_auto_balance_config()
         self._load_persisted_bp_auto_balance_config()
         self._load_persisted_para_twap_scheduler_config()
@@ -4115,6 +4117,42 @@ class CoordinatorApp:
         self._update_para_auto_balance_config(cfg)
         LOGGER.info("Loaded persisted PARA auto balance config from disk")
 
+    def _load_persisted_auto_balance_config(self) -> None:
+        path = PERSISTED_GRVT_AUTO_BALANCE_FILE
+        try:
+            LOGGER.info(
+                "GRVT auto balance persisted config path: %s (abs=%s exists=%s cwd=%s)",
+                path,
+                path.resolve(),
+                path.exists(),
+                os.getcwd(),
+            )
+        except Exception:
+            LOGGER.info("GRVT auto balance persisted config path: %s", path)
+        if not path.exists():
+            return
+        try:
+            raw = path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+        except Exception as exc:
+            LOGGER.warning("Failed to load persisted GRVT auto balance config: %s", exc)
+            return
+        if not isinstance(payload, dict):
+            return
+        enabled = payload.get("enabled")
+        if enabled is False:
+            return
+        config_block = payload.get("config")
+        if not isinstance(config_block, dict):
+            return
+        try:
+            cfg = self._parse_auto_balance_config(config_block)
+        except Exception as exc:
+            LOGGER.warning("Ignoring persisted GRVT auto balance config (invalid): %s", exc)
+            return
+        self._update_auto_balance_config(cfg)
+        LOGGER.info("Loaded persisted GRVT auto balance config from disk")
+
     def _persist_para_auto_balance_config(self) -> None:
         path = PERSISTED_PARA_AUTO_BALANCE_FILE
         try:
@@ -4137,6 +4175,31 @@ class CoordinatorApp:
             # Include traceback so operators can see permission/path errors.
             LOGGER.exception(
                 "Failed to persist PARA auto balance config to %s (abs=%s): %s",
+                path,
+                getattr(path, "resolve", lambda: path)(),
+                exc,
+            )
+
+    def _persist_auto_balance_config(self) -> None:
+        path = PERSISTED_GRVT_AUTO_BALANCE_FILE
+        try:
+            with suppress(Exception):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "enabled": bool(self._auto_balance_cfg),
+                "config": self._auto_balance_config_as_payload(),
+                "updated_at": time.time(),
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            LOGGER.info(
+                "Persisted GRVT auto balance config to %s (abs=%s enabled=%s)",
+                path,
+                path.resolve(),
+                payload.get("enabled"),
+            )
+        except Exception as exc:
+            LOGGER.exception(
+                "Failed to persist GRVT auto balance config to %s (abs=%s): %s",
                 path,
                 getattr(path, "resolve", lambda: path)(),
                 exc,
@@ -5772,6 +5835,7 @@ class CoordinatorApp:
         enabled_flag = body.get("enabled")
         if enabled_flag is False or action == "disable":
             self._update_auto_balance_config(None)
+            self._persist_auto_balance_config()
             return web.json_response({
                 "config": None,
                 "status": self._auto_balance_status_snapshot(),
@@ -5783,6 +5847,7 @@ class CoordinatorApp:
             raise web.HTTPBadRequest(text=str(exc))
 
         self._update_auto_balance_config(config)
+        self._persist_auto_balance_config()
         return web.json_response({
             "config": self._auto_balance_config_as_payload(),
             "status": self._auto_balance_status_snapshot(),

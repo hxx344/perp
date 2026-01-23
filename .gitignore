@@ -173,6 +173,7 @@ env_files/
 strategies/.coordinator_state/
 
 # Runtime persisted auto-balance configs (local machine)
+strategies/.grvt_auto_balance_config.json
 strategies/.para_auto_balance_config.json
 strategies/.bp_auto_balance_config.json
 strategies/.para_twap_scheduler_config.json
