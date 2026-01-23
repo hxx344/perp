@@ -5117,6 +5117,10 @@ class CoordinatorApp:
         with suppress(Exception):
             await self._maybe_bp_auto_balance(snapshot)
 
+        # Trigger GRVT auto balance evaluation for real-time measurement updates.
+        with suppress(Exception):
+            await self._maybe_auto_balance(snapshot)
+
         # Trigger PARA auto balance evaluation as well (real-time measurement for UI).
         # Without this call, PARA measurement stays None even when the dashboard
         # shows paradex account data, because nothing updates the para_auto_balance

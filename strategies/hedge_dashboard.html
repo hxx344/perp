@@ -2434,17 +2434,6 @@
               <span><span class="legend-dot legend-eth"></span>ETH (相对首笔)</span>
             </div>
           </div>
-          <div class="grvt-chart-card hidden" id="grvt-transfer-chart-wrapper">
-            <div class="grvt-chart-header">
-              <h3>风险基数走势</h3>
-              <span class="summary-sub" id="grvt-transfer-chart-note">等待数据…</span>
-            </div>
-            <canvas id="grvt-transfer-chart"></canvas>
-            <div class="chart-legend" id="grvt-transfer-chart-legend">
-              <span><span class="legend-dot legend-transfer"></span>风险基数</span>
-              <span><span class="legend-dot legend-diff"></span>BTC-ETH Δ%</span>
-            </div>
-          </div>
         </div>
         <div class="grvt-adjust-panel" id="grvt-adjust-panel">
           <div class="grvt-adjust-header">
@@ -3822,10 +3811,6 @@
   const grvtPriceChartCanvas = document.getElementById('grvt-price-chart');
   const grvtPriceChartNote = document.getElementById('grvt-price-chart-note');
   const grvtPriceChartLegend = document.getElementById('grvt-price-chart-legend');
-  const grvtTransferChartWrapper = document.getElementById('grvt-transfer-chart-wrapper');
-  const grvtTransferChartCanvas = document.getElementById('grvt-transfer-chart');
-  const grvtTransferChartNote = document.getElementById('grvt-transfer-chart-note');
-  const grvtTransferChartLegend = document.getElementById('grvt-transfer-chart-legend');
   const grvtRiskLevel = document.getElementById('grvt-risk-level');
   const grvtRiskDetail = document.getElementById('grvt-risk-detail');
   const grvtSummaryTime = document.getElementById('grvt-summary-time');
@@ -13522,7 +13507,6 @@
           // BTC/ETH Volatility panel removed.
           renderPriceChart(data);
           renderParaPriceChart(data);
-          renderTransferChart(data);
           renderAgents(data);
           renderPara(data);
           renderGrvt(data);
