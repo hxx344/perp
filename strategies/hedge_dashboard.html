@@ -11720,7 +11720,7 @@
           for (const [agentId, snapshot] of entries) {
             const summary = snapshot?.summary && typeof snapshot.summary === 'object' ? snapshot.summary : {};
             const agentLabel = summary.label || summary.account_label || summary.name || agentId;
-            const ts = Number(summary.updated_at ?? snapshot?.updated_at);
+            const ts = Number(summary.updated_at ?? summary.last_update_ts ?? snapshot?.updated_at ?? snapshot?.last_update_ts);
             const span = document.createElement('span');
             span.classList.add('badge');
             if (Number.isFinite(ts)) {
@@ -12093,7 +12093,13 @@
           const agentLabel = summary?.label || summary?.account_label || summary?.name || agentId;
           transferOptions.push({ agentId, label: agentLabel, defaults: transferDefaults });
           const accounts = Array.isArray(snapshot.accounts) ? snapshot.accounts : [];
-          const snapshotTs = Number(summary.updated_at ?? snapshot.updated_at);
+          const snapshotTs = Number(
+            summary.updated_at ??
+            summary.last_update_ts ??
+            summary.updated_ts ??
+            snapshot.updated_at ??
+            snapshot.last_update_ts,
+          );
           if (Number.isFinite(snapshotTs) && snapshotTs > latestUpdate) {
             latestUpdate = snapshotTs;
           }
@@ -12119,10 +12125,16 @@
               const walletValue = parseDecimal(
                 account.balance ??
                 account.available_balance ??
+                account.wallet_balance ??
+                account.walletBalance ??
                 summary.balance ??
                 summary.available_balance ??
+                summary.wallet_balance ??
+                summary.walletBalance ??
                 snapshot.balance ??
-                snapshot.available_balance
+                snapshot.available_balance ??
+                snapshot.wallet_balance ??
+                snapshot.walletBalance
               );
               const availableBalanceValue = parseDecimal(
                 account.available_balance ??
@@ -12132,10 +12144,16 @@
               const equityValue = parseDecimal(
                 account.equity ??
                 account.available_equity ??
+                account.total_equity ??
+                account.totalEquity ??
                 summary.equity ??
                 summary.available_equity ??
+                summary.total_equity ??
+                summary.totalEquity ??
                 snapshot.equity ??
-                snapshot.available_equity
+                snapshot.available_equity ??
+                snapshot.total_equity ??
+                snapshot.totalEquity
               );
               const availableEquityValue = parseDecimal(
                 account.available_equity ??
@@ -12194,14 +12212,22 @@
             const fallbackWallet = parseDecimal(
               summary.balance ??
               summary.available_balance ??
+              summary.wallet_balance ??
+              summary.walletBalance ??
               snapshot.balance ??
-              snapshot.available_balance
+              snapshot.available_balance ??
+              snapshot.wallet_balance ??
+              snapshot.walletBalance
             );
             const fallbackEquity = parseDecimal(
               summary.equity ??
               summary.available_equity ??
+              summary.total_equity ??
+              summary.totalEquity ??
               snapshot.equity ??
-              snapshot.available_equity
+              snapshot.available_equity ??
+              snapshot.total_equity ??
+              snapshot.totalEquity
             );
             const fallbackAvailableBalance = parseDecimal(
               summary.available_balance ??
