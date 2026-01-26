@@ -2292,14 +2292,6 @@
             <div class="value" id="grvt-total-pnl">--</div>
           </article>
           <article class="card grvt-summary-card">
-            <h3>ETH PnL</h3>
-            <div class="value" id="grvt-eth-pnl">--</div>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>BTC PnL</h3>
-            <div class="value" id="grvt-btc-pnl">--</div>
-          </article>
-          <article class="card grvt-summary-card">
             <h3>Net Equity</h3>
             <div class="value" id="grvt-total-equity">--</div>
             <p class="summary-sub" id="grvt-wallet-balance">Wallet --</p>
@@ -2314,6 +2306,11 @@
             <div class="value risk-pill risk-pill-summary" id="grvt-risk-level">--</div>
             <p class="grvt-risk-detail" id="grvt-risk-detail">Awaiting data…</p>
           </article>
+          <article class="card grvt-summary-card">
+            <h3>Avg Maint</h3>
+            <div class="value" id="grvt-avg-maint">--</div>
+            <p class="summary-sub">(Σ maint req / Σ equity)</p>
+          </article>
           <article class="card grvt-summary-card" id="grvt-reduce-suggestion-card">
             <h3>减仓建议</h3>
             <div class="value" id="grvt-reduce-suggestion-main">--</div>
@@ -2321,8 +2318,9 @@
           </article>
           <article class="card grvt-summary-card">
             <h3>Last Update</h3>
-            <div class="value" id="grvt-summary-time">--</div>
-            <p class="grvt-summary-updated" id="grvt-summary-updated">Updated —</p>
+            <div class="value hidden" id="grvt-summary-time">--</div>
+            <p class="grvt-summary-updated hidden" id="grvt-summary-updated">Updated —</p>
+            <div class="summary-sub" id="grvt-source-updates"></div>
           </article>
         </div>
         <div>
