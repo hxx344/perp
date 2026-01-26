@@ -2316,6 +2316,11 @@
             <div class="value risk-pill risk-pill-summary" id="grvt-risk-level">--</div>
             <p class="grvt-risk-detail" id="grvt-risk-detail">Awaiting data…</p>
           </article>
+          <article class="card grvt-summary-card" id="grvt-reduce-suggestion-card">
+            <h3>减仓建议</h3>
+            <div class="value" id="grvt-reduce-suggestion-main">--</div>
+            <p class="summary-sub" id="grvt-reduce-suggestion-detail">等待账户与持仓数据…</p>
+          </article>
           <article class="card grvt-summary-card">
             <h3>Last Update</h3>
             <div class="value" id="grvt-summary-time">--</div>
@@ -3328,6 +3333,10 @@
       return computeReduceSuggestionFromAccounts(accounts, { allowedSymbols: ['BTC', 'ETH'], ffSymbol: 'FF-USD' });
     }
 
+    function computeGrvtReduceSuggestion(accounts) {
+      return computeReduceSuggestionFromAccounts(accounts, { allowedSymbols: ['BTC', 'ETH'], ffSymbol: 'FF-USD' });
+    }
+
     function computeBpReduceSuggestion(accounts) {
       // Backpack follows PARA UX: only propose BTC/ETH paired reduce.
       return computeReduceSuggestionFromAccounts(accounts, {
@@ -3815,6 +3824,9 @@
   const grvtRiskDetail = document.getElementById('grvt-risk-detail');
   const grvtSummaryTime = document.getElementById('grvt-summary-time');
   const grvtSummaryUpdated = document.getElementById('grvt-summary-updated');
+  const grvtReduceSuggestionCard = document.getElementById('grvt-reduce-suggestion-card');
+  const grvtReduceSuggestionMain = document.getElementById('grvt-reduce-suggestion-main');
+  const grvtReduceSuggestionDetail = document.getElementById('grvt-reduce-suggestion-detail');
   const grvtAccountGrid = document.getElementById('grvt-account-grid');
   const grvtAccountsEmpty = document.getElementById('grvt-accounts-empty');
 
@@ -11996,6 +12008,13 @@
           grvtCard.classList.add('hidden');
           grvtEmpty.classList.remove('hidden');
           grvtAccountCount.textContent = '0 accounts';
+          if (grvtReduceSuggestionMain) {
+            grvtReduceSuggestionMain.textContent = '--';
+          }
+          if (grvtReduceSuggestionDetail) {
+            grvtReduceSuggestionDetail.textContent = '等待账户与持仓数据…';
+            grvtReduceSuggestionDetail.style.display = '';
+          }
           if (grvtTotalEquity) {
             grvtTotalEquity.textContent = '--';
           }
@@ -12299,6 +12318,29 @@
         const updatedText = formatTimestamp(latestUpdate);
         grvtSummaryTime.textContent = updatedText ?? '--';
         grvtSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
+
+        // ---- GRVT reduce suggestion (BTC/ETH) ----
+        if (grvtReduceSuggestionMain && grvtReduceSuggestionDetail) {
+          const meaningfulAccounts = flattenedAccounts.filter(
+            (acc) => Array.isArray(acc?.account?.positions) && acc.account.positions.length,
+          );
+          const candidateAccounts = (meaningfulAccounts.length ? meaningfulAccounts : flattenedAccounts).map((acc) => ({
+            name: acc.account?.name ?? acc.summary?.label ?? acc.agentId,
+            total: acc.totalValue,
+            ff_pnl: acc.summary?.ff_pnl,
+            positions: acc.account?.positions,
+          }));
+          const suggestion = computeGrvtReduceSuggestion(candidateAccounts);
+          if (suggestion?.ok) {
+            grvtReduceSuggestionMain.textContent = suggestion.message || '--';
+            grvtReduceSuggestionDetail.textContent = '';
+            grvtReduceSuggestionDetail.style.display = 'none';
+          } else {
+            grvtReduceSuggestionMain.textContent = '—';
+            grvtReduceSuggestionDetail.textContent = '';
+            grvtReduceSuggestionDetail.style.display = 'none';
+          }
+        }
 
         updateGrvtTransferAgents(transferOptions);
 
