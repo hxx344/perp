@@ -3247,8 +3247,23 @@
             pos?.pnl ??
             pos?.P,
           );
-          const entry = coerceNumber(pos?.entryPrice ?? pos?.avgEntryPrice ?? pos?.avgEntry ?? pos?.entry ?? pos?.B);
-          const mark = coerceNumber(pos?.markPrice ?? pos?.mark ?? pos?.indexPrice ?? pos?.lastPrice ?? pos?.price ?? pos?.M);
+          const entry = coerceNumber(
+            pos?.entry_price ??
+            pos?.entryPrice ??
+            pos?.avgEntryPrice ??
+            pos?.avgEntry ??
+            pos?.entry ??
+            pos?.B,
+          );
+          const mark = coerceNumber(
+            pos?.mark_price ??
+            pos?.markPrice ??
+            pos?.mark ??
+            pos?.indexPrice ??
+            pos?.lastPrice ??
+            pos?.price ??
+            pos?.M,
+          );
           const computedPnl = (Number.isFinite(entry) && Number.isFinite(mark)) ? (qty * (mark - entry)) : null;
           const pnl = (computedPnl !== null && Number.isFinite(computedPnl)) ? computedPnl : pnlFallback;
           if (Number.isFinite(pnl) && pnl !== 0) {
@@ -12331,21 +12346,28 @@
           const meaningfulAccounts = flattenedAccounts.filter(
             (acc) => Array.isArray(acc?.account?.positions) && acc.account.positions.length,
           );
-          const candidateAccounts = (meaningfulAccounts.length ? meaningfulAccounts : flattenedAccounts).map((acc) => ({
+          const sourceAccounts = (meaningfulAccounts.length ? meaningfulAccounts : flattenedAccounts).map((acc) => ({
             name: acc.account?.name ?? acc.summary?.label ?? acc.agentId,
             total: acc.totalValue,
             ff_pnl: acc.summary?.ff_pnl,
             positions: acc.account?.positions,
           }));
-          const suggestion = computeGrvtReduceSuggestion(candidateAccounts);
-          if (suggestion?.ok) {
-            grvtReduceSuggestionMain.textContent = suggestion.message || '--';
-            grvtReduceSuggestionDetail.textContent = '';
-            grvtReduceSuggestionDetail.style.display = 'none';
-          } else {
+          const candidateAccounts = sourceAccounts.slice(0, 2);
+          if (candidateAccounts.length < 2) {
             grvtReduceSuggestionMain.textContent = '—';
-            grvtReduceSuggestionDetail.textContent = '';
-            grvtReduceSuggestionDetail.style.display = 'none';
+            grvtReduceSuggestionDetail.textContent = '至少需要 2 个账户才能计算减仓建议';
+            grvtReduceSuggestionDetail.style.display = '';
+          } else {
+            const suggestion = computeGrvtReduceSuggestion(candidateAccounts);
+            if (suggestion?.ok) {
+              grvtReduceSuggestionMain.textContent = suggestion.message || '--';
+              grvtReduceSuggestionDetail.textContent = '';
+              grvtReduceSuggestionDetail.style.display = 'none';
+            } else {
+              grvtReduceSuggestionMain.textContent = '—';
+              grvtReduceSuggestionDetail.textContent = suggestion?.message || '无法计算减仓建议';
+              grvtReduceSuggestionDetail.style.display = '';
+            }
           }
         }
 
