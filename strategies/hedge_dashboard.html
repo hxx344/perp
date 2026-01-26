@@ -7357,7 +7357,7 @@
         }
         let payload;
         try {
-          payload = buildRiskSettingsPayload({ enabledOverride });
+          payload = buildRiskSettingsPayload({ enabledOverride, scope: 'bp' });
         } catch (error) {
           setRiskStatusMessage(error.message || String(error), { scope: 'bp' });
           return;
@@ -7392,9 +7392,13 @@
         await saveBpRiskSettings({ enabledOverride: false });
       }
 
-      function buildRiskSettingsPayload({ enabledOverride } = {}) {
+      function buildRiskSettingsPayload({ enabledOverride, scope = 'global' } = {}) {
         const payload = {};
-        const views = getRiskViews();
+        const views = scope === 'para'
+          ? getRiskViews().filter((view) => view.scope === 'para')
+          : (scope === 'bp'
+            ? getRiskViews().filter((view) => view.scope === 'bp')
+            : getRiskViews().filter((view) => view.scope !== 'para' && view.scope !== 'bp'));
 
         const pickValue = (...inputs) => {
           for (const input of inputs) {
@@ -7438,28 +7442,24 @@
         const thresholdPercent = pickNumber(
           ...views.map((v) => v.thresholdInput),
           ...views.map((v) => v.thresholdSlider),
-          riskThresholdInput,
-          paraRiskThresholdInput,
-          riskThresholdSlider,
-          paraRiskThresholdSlider,
         );
         if (enabled) {
           if (!Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
             throw new Error('请设置大于 0 的触发阈值');
           }
           payload.threshold_percent = thresholdPercent;
-          const resetPercent = pickNumber(...views.map((v) => v.resetInput), riskResetInput, paraRiskResetInput);
+          const resetPercent = pickNumber(...views.map((v) => v.resetInput));
           if (Number.isFinite(resetPercent) && resetPercent > 0) {
             payload.reset_ratio_percent = resetPercent;
           }
         }
 
-        const cooldownMinutes = pickNumber(...views.map((v) => v.cooldownInput), riskCooldownInput, paraRiskCooldownInput);
+  const cooldownMinutes = pickNumber(...views.map((v) => v.cooldownInput));
         if (Number.isFinite(cooldownMinutes) && cooldownMinutes >= 0) {
           payload.cooldown_minutes = cooldownMinutes;
         }
 
-        const barkUrl = pickValue(...views.map((v) => v.barkUrlInput), riskBarkUrlInput, paraRiskBarkUrlInput);
+  const barkUrl = pickValue(...views.map((v) => v.barkUrlInput));
         if (barkUrl) {
           payload.bark_url = barkUrl;
         }
@@ -7473,22 +7473,22 @@
           return candidate;
         };
 
-        const barkAppendValue = pickCheckbox(...views.map((v) => v.barkAppendInput), riskBarkAppendInput);
+  const barkAppendValue = pickCheckbox(...views.map((v) => v.barkAppendInput));
         if (barkAppendValue !== null) {
           payload.bark_append_payload = barkAppendValue;
         }
 
-        const barkTimeout = pickNumber(...views.map((v) => v.barkTimeoutInput), riskBarkTimeoutInput, paraRiskBarkTimeoutInput);
+  const barkTimeout = pickNumber(...views.map((v) => v.barkTimeoutInput));
         if (Number.isFinite(barkTimeout) && barkTimeout > 0) {
           payload.bark_timeout = barkTimeout;
         }
 
-        const titleTemplate = pickValue(...views.map((v) => v.titleTemplateInput), riskTitleTemplateInput, paraRiskTitleTemplateInput);
+  const titleTemplate = pickValue(...views.map((v) => v.titleTemplateInput));
         if (titleTemplate) {
           payload.title_template = titleTemplate;
         }
 
-        const bodyTemplate = pickValue(...views.map((v) => v.bodyTemplateInput), riskBodyTemplateInput, paraRiskBodyTemplateInput);
+  const bodyTemplate = pickValue(...views.map((v) => v.bodyTemplateInput));
         if (bodyTemplate) {
           payload.body_template = bodyTemplate;
         }
@@ -7556,7 +7556,7 @@
         }
         let payload;
         try {
-          payload = buildRiskSettingsPayload({ enabledOverride });
+          payload = buildRiskSettingsPayload({ enabledOverride, scope: 'global' });
         } catch (error) {
           setRiskStatusMessage(error.message || String(error), { scope: 'global' });
           return;
@@ -7593,7 +7593,7 @@
         }
         let payload;
         try {
-          payload = buildRiskSettingsPayload({ enabledOverride });
+          payload = buildRiskSettingsPayload({ enabledOverride, scope: 'para' });
         } catch (error) {
           setRiskStatusMessage(error.message || String(error), { scope: 'para' });
           return;
