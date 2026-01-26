@@ -471,6 +471,10 @@ FEISHU_PARA_PUSH_INTERVAL_ENV = "FEISHU_PARA_PUSH_INTERVAL"
 FEISHU_BP_PUSH_ENABLED_ENV = "FEISHU_BP_PUSH_ENABLED"
 FEISHU_BP_PUSH_INTERVAL_ENV = "FEISHU_BP_PUSH_INTERVAL"
 
+# Feishu webhook push (GRVT snapshot)
+FEISHU_GRVT_PUSH_ENABLED_ENV = "FEISHU_GRVT_PUSH_ENABLED"
+FEISHU_GRVT_PUSH_INTERVAL_ENV = "FEISHU_GRVT_PUSH_INTERVAL"
+
 # Keep the buffer logic aligned with hedge_dashboard.html
 RISK_CAPACITY_DEVIATION_THRESHOLD = 0.12
 RISK_CAPACITY_PENDING_TOLERANCE = 0.10
@@ -1233,10 +1237,16 @@ class HedgeCoordinator:
         self._feishu_bp_push_interval = max(_env_float(FEISHU_BP_PUSH_INTERVAL_ENV, 300.0), 30.0)
         self._feishu_bp_task: Optional[asyncio.Task[Any]] = None
 
+        # Feishu GRVT periodic push
+        self._feishu_grvt_push_enabled = _env_bool(FEISHU_GRVT_PUSH_ENABLED_ENV, False)
+        self._feishu_grvt_push_interval = max(_env_float(FEISHU_GRVT_PUSH_INTERVAL_ENV, 300.0), 30.0)
+        self._feishu_grvt_task: Optional[asyncio.Task[Any]] = None
+
         self._feishu_session: Optional[ClientSession] = None
         self._feishu_start_diagnostic_logged = False
         self._para_risk_capacity_buffer = RiskCapacityBufferState()
         self._bp_risk_capacity_buffer = RiskCapacityBufferState()
+        self._grvt_risk_capacity_buffer = RiskCapacityBufferState()
 
     async def start_background_tasks(self) -> None:
         if not self._feishu_start_diagnostic_logged:
@@ -1255,9 +1265,19 @@ class HedgeCoordinator:
                 self._feishu_bp_push_interval,
                 "set" if self._feishu_webhook_url else "missing",
             )
+            LOGGER.info(
+                "Feishu GRVT push config: enabled=%s interval=%.0fs url=%s",
+                self._feishu_grvt_push_enabled,
+                self._feishu_grvt_push_interval,
+                "set" if self._feishu_webhook_url else "missing",
+            )
 
         if not self._feishu_webhook_url:
-            if self._feishu_para_push_enabled or self._feishu_bp_push_enabled:
+            if (
+                self._feishu_para_push_enabled
+                or self._feishu_bp_push_enabled
+                or self._feishu_grvt_push_enabled
+            ):
                 LOGGER.warning(
                     "Feishu push enabled but %s is missing/blank; push task will NOT start",
                     FEISHU_WEBHOOK_ENV,
@@ -1298,11 +1318,28 @@ class HedgeCoordinator:
                 os.getenv(FEISHU_BP_PUSH_ENABLED_ENV),
             )
 
+        # GRVT push task.
+        if self._feishu_grvt_push_enabled and self._feishu_grvt_task is None:
+            self._feishu_grvt_task = asyncio.create_task(self._run_feishu_grvt_push_loop())
+            LOGGER.info(
+                "Feishu GRVT push enabled: interval=%.0fs url=%s",
+                self._feishu_grvt_push_interval,
+                "set" if self._feishu_webhook_url else "missing",
+            )
+        elif self._feishu_webhook_url and not self._feishu_grvt_push_enabled:
+            LOGGER.info(
+                "Feishu GRVT push is disabled (%s=%s); webhook is configured but push task will NOT start",
+                FEISHU_GRVT_PUSH_ENABLED_ENV,
+                os.getenv(FEISHU_GRVT_PUSH_ENABLED_ENV),
+            )
+
     async def stop_background_tasks(self) -> None:
         task = self._feishu_task
         self._feishu_task = None
         bp_task = self._feishu_bp_task
         self._feishu_bp_task = None
+        grvt_task = self._feishu_grvt_task
+        self._feishu_grvt_task = None
         if task:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -1311,6 +1348,10 @@ class HedgeCoordinator:
             bp_task.cancel()
             with suppress(asyncio.CancelledError):
                 await bp_task
+        if grvt_task:
+            grvt_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await grvt_task
         if self._feishu_session and not self._feishu_session.closed:
             await self._feishu_session.close()
         self._feishu_session = None
@@ -1335,6 +1376,16 @@ class HedgeCoordinator:
             raise
         except Exception as exc:  # pragma: no cover
             LOGGER.warning("Feishu Backpack push loop stopped: %s", exc)
+
+    async def _run_feishu_grvt_push_loop(self) -> None:
+        try:
+            while True:
+                await self._try_send_feishu_grvt_snapshot()
+                await asyncio.sleep(self._feishu_grvt_push_interval)
+        except asyncio.CancelledError:  # pragma: no cover
+            raise
+        except Exception as exc:  # pragma: no cover
+            LOGGER.warning("Feishu GRVT push loop stopped: %s", exc)
 
     def _build_para_risk_push_text(self, now: Optional[float] = None) -> Optional[str]:
         stats = self._para_risk_stats
@@ -1461,6 +1512,114 @@ class HedgeCoordinator:
                         {
                             "tag": "plain_text",
                             "content": f"source: frontend_authority · ts: {int((now or time.time()))}",
+                        }
+                    ],
+                },
+            ],
+        }
+        return {"msg_type": "interactive", "card": card}
+
+    def _build_grvt_risk_push_card(self, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+        values = self._compute_grvt_authority_values()
+        if not values:
+            return None
+
+        inputs = values.get("inputs") if isinstance(values, dict) else None
+        if not isinstance(inputs, dict):
+            inputs = {}
+
+        equity_sum: Decimal = inputs.get("equity_sum") or Decimal("0")
+        total_pnl: Decimal = inputs.get("total_pnl") or Decimal("0")
+        worst_loss: Decimal = values.get("worst_loss") or Decimal("0")
+        worst_agent = inputs.get("worst_agent_id") or "-"
+        worst_label = inputs.get("worst_account_label") or "-"
+        account_count = inputs.get("account_count") or 0
+        capacity_note = values.get("buffer_note")
+        capacity_status = values.get("buffer_status")
+
+        capacity: Optional[Decimal] = values.get("risk_capacity_buffered") or values.get("risk_capacity_raw")
+        if capacity is not None and capacity <= 0:
+            capacity = None
+
+        ratio: Optional[float] = values.get("ratio")
+        ratio_text = _format_percent((ratio or 0.0) * 100, 2) if ratio is not None else "-"
+        color = self._feishu_risk_color(ratio)
+
+        fields: List[Dict[str, Any]] = [
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**总权益**\n{_format_decimal(equity_sum, 2)}",
+                },
+            },
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**持仓PnL合计**\n{_format_decimal(total_pnl, 2)}",
+                },
+            },
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": (
+                        f"**风险基数(Equity-IM)**\n{_format_decimal(capacity, 2)}"
+                        if capacity is not None
+                        else "**风险基数(Equity-IM)**\n-"
+                    ),
+                },
+            },
+            {
+                "is_short": True,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**最坏亏损**\n{_format_decimal(worst_loss, 2)}",
+                },
+            },
+            {
+                "is_short": False,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**最坏账户(PnL)**\n{worst_label} ({worst_agent})",
+                },
+            },
+            {
+                "is_short": False,
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**账户数量**\n{account_count}",
+                },
+            },
+        ]
+
+        if capacity_note:
+            fields.append(
+                {
+                    "is_short": False,
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**备注**\n{capacity_note} ({capacity_status})",
+                    },
+                }
+            )
+
+        header_title = f"[GRVT] 风险播报 · RISK LEVEL: {ratio_text}"
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": color,
+                "title": {"tag": "plain_text", "content": header_title},
+            },
+            "elements": [
+                {"tag": "div", "fields": fields},
+                {
+                    "tag": "note",
+                    "elements": [
+                        {
+                            "tag": "plain_text",
+                            "content": f"source: coordinator_state · ts: {int((now or time.time()))}",
                         }
                     ],
                 },
@@ -1967,6 +2126,30 @@ class HedgeCoordinator:
         except Exception as exc:  # pragma: no cover
             LOGGER.warning("Feishu webhook push error (Backpack): %s", exc)
 
+    async def _try_send_feishu_grvt_snapshot(self) -> None:
+        if not self._feishu_webhook_url or not self._feishu_grvt_push_enabled:
+            return
+        session = self._feishu_session
+        if session is None or session.closed:
+            self._feishu_session = ClientSession(timeout=ClientTimeout(total=10.0))
+            session = self._feishu_session
+
+        async with self._lock:
+            payload = self._build_grvt_risk_push_card()
+        if not payload:
+            return
+        try:
+            async with session.post(self._feishu_webhook_url, json=payload) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    LOGGER.warning(
+                        "Feishu webhook push failed (GRVT, HTTP %s): %s",
+                        resp.status,
+                        body[:200],
+                    )
+        except Exception as exc:  # pragma: no cover
+            LOGGER.warning("Feishu webhook push error (GRVT): %s", exc)
+
     async def _try_send_feishu_para_snapshot(self) -> None:
         if not self._feishu_webhook_url or not self._feishu_para_push_enabled:
             return
@@ -2314,6 +2497,121 @@ class HedgeCoordinator:
             account_count=account_count,
             computed_at=time.time(),
         )
+
+    def _compute_grvt_authority_inputs(self) -> Optional[Dict[str, Any]]:
+        equity_sum = Decimal("0")
+        total_pnl = Decimal("0")
+        total_initial_margin = Decimal("0")
+        worst_loss = Decimal("0")
+        worst_agent_id: Optional[str] = None
+        worst_account_label: Optional[str] = None
+        account_count = 0
+        latest_update: Optional[float] = None
+        any_seen = False
+
+        def _coerce_ts(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                ts = float(value)
+            except Exception:
+                return None
+            if not math.isfinite(ts) or ts <= 0:
+                return None
+            if ts > 1e12:
+                ts = ts / 1000.0
+            return ts
+
+        for agent_id, state in self._states.items():
+            payload = state.grvt_accounts
+            if not isinstance(payload, dict):
+                continue
+            any_seen = True
+
+            summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else None
+            ts_raw = None
+            if isinstance(summary, dict):
+                ts_raw = summary.get("updated_at") or summary.get("last_update_ts") or summary.get("updated_ts")
+            if ts_raw is None:
+                ts_raw = payload.get("updated_at") or payload.get("last_update_ts")
+            safe_ts = _coerce_ts(ts_raw)
+            if safe_ts is not None and (latest_update is None or safe_ts > latest_update):
+                latest_update = safe_ts
+
+            for _, account_label, account_payload in self._flatten_grvt_accounts(agent_id, payload):
+                account_count += 1
+                equity_value = self._select_equity_value(account_payload, summary)
+                if equity_value is not None and equity_value > 0:
+                    equity_sum += equity_value
+
+                pnl_value = self._decimal_from(account_payload.get("total_pnl"))
+                if pnl_value is None:
+                    pnl_value = self._decimal_from(account_payload.get("total"))
+                if pnl_value is not None:
+                    total_pnl += pnl_value
+                    if pnl_value < 0:
+                        abs_loss = abs(pnl_value)
+                        if abs_loss > worst_loss:
+                            worst_loss = abs_loss
+                            worst_agent_id = agent_id
+                            worst_account_label = account_label
+
+                total_initial_margin += self._compute_initial_margin_total(account_payload)
+
+        if not any_seen:
+            return None
+
+        raw_capacity = equity_sum - total_initial_margin
+        return {
+            "equity_sum": equity_sum,
+            "total_pnl": total_pnl,
+            "initial_margin_sum": total_initial_margin,
+            "risk_capacity_raw": raw_capacity,
+            "worst_loss": worst_loss,
+            "worst_agent_id": worst_agent_id,
+            "worst_account_label": worst_account_label,
+            "account_count": account_count,
+            "latest_update": latest_update,
+        }
+
+    def _compute_grvt_authority_values(self) -> Optional[Dict[str, Any]]:
+        inputs = self._compute_grvt_authority_inputs()
+        if not inputs:
+            return None
+
+        latest_update = inputs.get("latest_update")
+        ts_for_buffer = None
+        if isinstance(latest_update, (int, float)) and math.isfinite(float(latest_update)) and float(latest_update) > 0:
+            ts_for_buffer = float(latest_update)
+
+        raw_capacity: Decimal = inputs.get("risk_capacity_raw") or Decimal("0")
+        account_count = inputs.get("account_count") or 0
+        base_note = f"覆盖 {account_count} 个账户 · Equity-IM" if account_count else ""
+
+        buffered_capacity, buffer_note, buffer_status = _evaluate_risk_capacity_buffer(
+            has_value=raw_capacity is not None and raw_capacity > 0,
+            value=raw_capacity if raw_capacity > 0 else None,
+            timestamp=ts_for_buffer,
+            base_note=base_note,
+            state=self._grvt_risk_capacity_buffer,
+        )
+        effective_capacity = buffered_capacity if buffered_capacity is not None else raw_capacity
+
+        worst_loss: Decimal = inputs.get("worst_loss") or Decimal("0")
+        if effective_capacity is None or effective_capacity <= 0 or worst_loss <= 0:
+            ratio = None
+        else:
+            ratio = float(worst_loss / effective_capacity)
+
+        return {
+            "inputs": inputs,
+            "risk_capacity_raw": raw_capacity,
+            "risk_capacity_buffered": effective_capacity,
+            "buffer_note": buffer_note,
+            "buffer_status": buffer_status,
+            "worst_loss": worst_loss,
+            "ratio": ratio,
+        }
 
     def _compute_para_authority_inputs(self) -> Dict[str, Any]:
         """Compute PARA risk components using the same field preference as the dashboard.
