@@ -1880,23 +1880,21 @@
             <h3>Net Equity</h3>
             <div class="value" id="para-total-equity">--</div>
             <p class="summary-sub" id="para-wallet-balance">Wallet --</p>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>风险裕量</h3>
-            <div class="value" id="para-transfer-total">--</div>
-            <p class="summary-sub" id="para-transfer-note">Equity - 1.5×max(IM)</p>
-          </article>
-          <article class="card grvt-summary-card">
-            <h3>Risk Level</h3>
             <div class="value risk-pill risk-pill-summary" id="para-risk-level">--</div>
             <p class="grvt-risk-detail" id="para-risk-detail">Awaiting data…</p>
           </article>
           <article class="card grvt-summary-card">
             <h3>Avg Maint</h3>
-            <div class="value" id="para-avg-maint">--</div>
+          <article class="card grvt-summary-card">
+            <h3>Avg Maint</h3>
+            <div class="value" id="grvt-avg-maint">--</div>
             <p class="summary-sub">(Σ maint req / Σ equity)</p>
           </article>
-          <article class="card grvt-summary-card">
+            <div class="value" id="para-avg-maint">--</div>
+            <p class="summary-sub">(Σ maint req / Σ equity)</p>
+            <div class="value hidden" id="grvt-summary-time">--</div>
+            <p class="grvt-summary-updated hidden" id="grvt-summary-updated">Updated —</p>
+            <div class="summary-sub" id="grvt-source-updates"></div>
             <h3>Last Update</h3>
             <div class="value hidden" id="para-summary-time">--</div>
             <p class="grvt-summary-updated hidden" id="para-summary-updated">Updated —</p>
@@ -3832,8 +3830,6 @@
   const grvtEmpty = document.getElementById('grvt-empty');
   const grvtCard = document.getElementById('grvt-card');
   const grvtTotalPnl = document.getElementById('grvt-total-pnl');
-  const grvtEthPnl = document.getElementById('grvt-eth-pnl');
-  const grvtBtcPnl = document.getElementById('grvt-btc-pnl');
   const grvtTotalEquity = document.getElementById('grvt-total-equity');
   const grvtWalletBalance = document.getElementById('grvt-wallet-balance');
   const grvtTransferableTotal = document.getElementById('grvt-transfer-total');
@@ -3844,6 +3840,8 @@
   const grvtPriceChartLegend = document.getElementById('grvt-price-chart-legend');
   const grvtRiskLevel = document.getElementById('grvt-risk-level');
   const grvtRiskDetail = document.getElementById('grvt-risk-detail');
+  const grvtAvgMaint = document.getElementById('grvt-avg-maint');
+  const grvtSourceUpdates = document.getElementById('grvt-source-updates');
   const grvtSummaryTime = document.getElementById('grvt-summary-time');
   const grvtSummaryUpdated = document.getElementById('grvt-summary-updated');
   const grvtReduceSuggestionCard = document.getElementById('grvt-reduce-suggestion-card');
@@ -12030,6 +12028,14 @@
           grvtCard.classList.add('hidden');
           grvtEmpty.classList.remove('hidden');
           grvtAccountCount.textContent = '0 accounts';
+          if (grvtAvgMaint) {
+            grvtAvgMaint.textContent = '--';
+            grvtAvgMaint.removeAttribute('title');
+          }
+          if (grvtSourceUpdates) {
+            grvtSourceUpdates.textContent = '--';
+            grvtSourceUpdates.innerHTML = '';
+          }
           if (grvtReduceSuggestionMain) {
             grvtReduceSuggestionMain.textContent = '--';
           }
@@ -12274,8 +12280,6 @@
 
         grvtTotalPnl.textContent = hasTotal ? numberFormatter.format(aggregateTotalPnl) : '--';
   // ETH/BTC PnL removed from Per Account Net PnL.
-  grvtEthPnl.textContent = '--';
-  grvtBtcPnl.textContent = '--';
         if (grvtTotalEquity) {
           grvtTotalEquity.textContent = hasEquity ? numberFormatter.format(aggregateEquity) : '--';
         }
@@ -12338,8 +12342,12 @@
         }
 
         const updatedText = formatTimestamp(latestUpdate);
-        grvtSummaryTime.textContent = updatedText ?? '--';
-        grvtSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
+        if (grvtSummaryTime) {
+          grvtSummaryTime.textContent = updatedText ?? '--';
+        }
+        if (grvtSummaryUpdated) {
+          grvtSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
+        }
 
         // ---- GRVT reduce suggestion (BTC/ETH) ----
         if (grvtReduceSuggestionMain && grvtReduceSuggestionDetail) {
@@ -12402,6 +12410,8 @@
           return bTs - aTs;
         });
 
+        let aggregateMaintRequirement = 0;
+        let aggregateMaintBase = 0;
         for (const entry of flattenedAccounts) {
           const agentId = entry.agentId ?? 'Source';
           const account = entry.account;
@@ -12560,6 +12570,8 @@
             if (ratioBaseValue && Number.isFinite(maintenanceRequirementTotal) && maintenanceRequirementTotal >= 0) {
               const ratio = maintenanceRequirementTotal / ratioBaseValue;
               maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
+              aggregateMaintRequirement += maintenanceRequirementTotal;
+              aggregateMaintBase += ratioBaseValue;
             } else if (ratioBaseValue) {
               maintenanceBadge.textContent = formatPercent(0, 2);
             } else {
@@ -12568,6 +12580,49 @@
           }
 
           grvtAccountGrid.appendChild(card);
+        }
+
+        if (grvtAvgMaint) {
+          const avgMaintPercent = computePercent(aggregateMaintRequirement, aggregateMaintBase);
+          if (Number.isFinite(avgMaintPercent)) {
+            grvtAvgMaint.textContent = formatPercent(avgMaintPercent, 2);
+            grvtAvgMaint.title = `Maint req ${numberFormatter.format(aggregateMaintRequirement)} / Base ${numberFormatter.format(aggregateMaintBase)}`;
+          } else {
+            grvtAvgMaint.textContent = '--';
+            grvtAvgMaint.removeAttribute('title');
+          }
+        }
+
+        if (grvtSourceUpdates) {
+          grvtSourceUpdates.innerHTML = '';
+          for (const [agentId, snapshot] of entries) {
+            const summary = snapshot?.summary && typeof snapshot.summary === 'object' ? snapshot.summary : {};
+            const agentLabel = summary.label || summary.account_label || summary.name || agentId;
+            const ts = Number(summary.updated_at ?? snapshot?.updated_at);
+            const span = document.createElement('span');
+            span.classList.add('badge');
+            if (Number.isFinite(ts)) {
+              const ageSec = Math.max(0, nowSec - ts);
+              const freshnessText = `${formatDuration(ageSec)} ago`;
+              if (ageSec >= PARA_STALE_CRIT_SEC) {
+                span.classList.add('badge-danger');
+                span.textContent = `${agentLabel}: stale · ${freshnessText}`;
+              } else if (ageSec >= PARA_STALE_WARN_SEC) {
+                span.classList.add('badge-warn');
+                span.textContent = `${agentLabel}: delayed · ${freshnessText}`;
+              } else {
+                span.classList.add('badge-info');
+                span.textContent = `${agentLabel}: fresh · ${freshnessText}`;
+              }
+            } else {
+              span.classList.add('badge-muted');
+              span.textContent = `${agentLabel}: time N/A`;
+            }
+            grvtSourceUpdates.appendChild(span);
+          }
+          if (!grvtSourceUpdates.childElementCount) {
+            grvtSourceUpdates.textContent = '--';
+          }
         }
 
         updateGrvtSymbolOptions(Array.from(symbolCandidates));
