@@ -1993,6 +1993,8 @@ class HedgeCoordinator:
             self._alert_settings_updated_at = time.time()
         config = self._alert_settings
         self._risk_alert_threshold = config.threshold
+        if config.threshold is not None:
+            config.reset_ratio = config.threshold
         self._risk_alert_reset = config.reset_ratio
         self._risk_alert_cooldown = config.cooldown
         if config.bark_url:
