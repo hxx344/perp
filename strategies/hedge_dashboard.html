@@ -12444,6 +12444,13 @@
             ? account.positions
                 .slice()
                 .sort((a, b) => {
+                  const aPnl = parseDecimal(a?.pnl ?? a?.unrealized_pnl ?? a?.unrealizedPnl);
+                  const bPnl = parseDecimal(b?.pnl ?? b?.unrealized_pnl ?? b?.unrealizedPnl);
+                  const aAbs = Number.isFinite(aPnl) ? Math.abs(aPnl) : -1;
+                  const bAbs = Number.isFinite(bPnl) ? Math.abs(bPnl) : -1;
+                  if (aAbs !== bAbs) {
+                    return bAbs - aAbs;
+                  }
                   const aSymbol = normalizeSymbolLabel(a?.symbol);
                   const bSymbol = normalizeSymbolLabel(b?.symbol);
                   return aSymbol.localeCompare(bSymbol, undefined, { sensitivity: 'base' });
@@ -12474,7 +12481,9 @@
               const sizeText = formatDecimal(position.net_size, 4);
               const entryText = formatDecimal(position.entry_price, 4);
               const markText = formatDecimal(position.mark_price, 4);
-              const pnlText = formatDecimal(position.pnl, 6);
+              const pnlValue = parseDecimal(position.pnl ?? position.unrealized_pnl ?? position.unrealizedPnl);
+              const pnlText = Number.isFinite(pnlValue) ? formatDecimal(pnlValue, 6) : '--';
+              const pnlClass = percentClass(pnlValue);
               const marginInfo = computePositionMargin(position);
               if (marginInfo && Number.isFinite(marginInfo.maintenanceMargin)) {
                 maintenanceRequirementTotal += marginInfo.maintenanceMargin;
@@ -12492,7 +12501,7 @@
                 <td>${escapeHtml(sizeText)}</td>
                 <td>${escapeHtml(entryText)}</td>
                 <td>${escapeHtml(markText)}</td>
-                <td>${escapeHtml(pnlText)}</td>
+                <td class="${pnlClass}">${escapeHtml(pnlText)}</td>
                 <td>${escapeHtml(notionalText)}</td>
                 <td>${escapeHtml(initialMarginText)}</td>
               `;
