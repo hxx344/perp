@@ -5398,6 +5398,8 @@ class CoordinatorApp:
         with suppress(Exception):
             await self._para_twap_scheduler_rollup_history()
         payload = await self._coordinator.snapshot()
+        with suppress(Exception):
+            await self._maybe_auto_balance(payload, allow_transfer=False)
         payload["grvt_adjustments"] = await self._adjustments.summary()
         payload["para_adjustments"] = await self._para_adjustments.summary()
         payload["auto_balance"] = self._auto_balance_status_snapshot()
@@ -6947,7 +6949,7 @@ class CoordinatorApp:
         snapshot["config"] = self._auto_balance_config_as_payload()
         return snapshot
 
-    async def _maybe_auto_balance(self, snapshot: Dict[str, Any]) -> None:
+    async def _maybe_auto_balance(self, snapshot: Dict[str, Any], allow_transfer: bool = True) -> None:
         if not self._auto_balance_cfg:
             return
         async with self._auto_balance_lock:
@@ -6962,6 +6964,8 @@ class CoordinatorApp:
                 return
             self._auto_balance_status["cooldown_active"] = False
             self._auto_balance_status["cooldown_until"] = cooldown_until
+            if not allow_transfer:
+                return
             if not measurement:
                 return
             if measurement.ratio < cfg.threshold_ratio:

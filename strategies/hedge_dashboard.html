@@ -3168,8 +3168,8 @@
     // - worst account by nonFF total (total - ff_pnl)
     // - L = abs(nonFFTotalWorst) if worst is losing else 0
     // - allocate L across allowed symbols by negative pnl abs
-    // - reduceSize = absPosSize * (allocation / abs(symbolNegPnl))
-    // - headline: choose the symbol with max suggested size
+  // - reduceSize = absPosSize * (allocation / abs(symbolNegPnl))
+  // - headline: choose the symbol with highest loss-reduction efficiency (negAbs / cap)
     function computeReduceSuggestionFromAccounts(accounts, {
       allowedSymbols = ['BTC', 'ETH'],
       ffSymbol = 'FF-USD',
@@ -3327,10 +3327,13 @@
         const allocation = L * r.negAbs / totalNegAbs;
         const ratio = allocation / r.negAbs;
         const size = Math.min(Math.max(r.cap * ratio, 0), r.cap);
-        return { ...r, allocation, size };
+        const efficiency = r.cap > 0 ? (r.negAbs / r.cap) : 0;
+        return { ...r, allocation, size, efficiency };
       });
 
-      computed.sort((x, y) => y.size - x.size);
+  // Prefer the symbol that yields larger loss reduction per unit size.
+  // Tie-break only by symbol name to avoid size/allocation influence.
+  computed.sort((x, y) => (y.efficiency - x.efficiency) || x.symbol.localeCompare(y.symbol));
       const best = computed[0];
       const prefix = messagePrefix ? `${messagePrefix} ` : '';
       const sizeText = bpFormatAtMost4(best.size);
