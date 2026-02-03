@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import defaultdict
 import base64
 import binascii
 import copy
@@ -44,7 +45,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_DOWN
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import Any, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
 from urllib.parse import quote_plus
 
 try:
@@ -3831,6 +3832,8 @@ class CoordinatorApp:
         # Backpack dual-account volume booster (single runner).
         self._bp_dual_volume = BackpackDualVolumeState()
         self._bp_dual_volume_lock = asyncio.Lock()
+    self._bp_ws_clients: Dict[str, Set[web.WebSocketResponse]] = defaultdict(set)
+    self._bp_ws_lock = asyncio.Lock()
 
         # Persisted per-symbol history for the Backpack volume panel.
         # Shape: {"SYMBOL": {"updated_at": ms, "summary": {...}, "recent": [...]}}
@@ -3860,6 +3863,7 @@ class CoordinatorApp:
                 web.post("/update", self.handle_update),
                 web.get("/control", self.handle_control_get),
                 web.post("/control", self.handle_control_update),
+                web.get("/ws/backpack/control", self.handle_bp_control_ws),
                 web.get("/auto_balance/config", self.handle_auto_balance_get),
                 web.post("/auto_balance/config", self.handle_auto_balance_update),
                 web.get("/para/auto_balance/config", self.handle_para_auto_balance_get),
@@ -5103,6 +5107,7 @@ class CoordinatorApp:
                 if len(self._bp_adjustments_history) > self._bp_adjustments_history_limit:
                     self._bp_adjustments_history = self._bp_adjustments_history[: self._bp_adjustments_history_limit]
                 _atomic_write_json(BP_ADJUSTMENTS_HISTORY_FILE, self._bp_adjustments_history)
+                await self._notify_bp_adjustments(agent_id)
 
             try:
                 if phase == "build":
@@ -5934,6 +5939,76 @@ class CoordinatorApp:
 
         return web.json_response(response)
 
+    async def handle_bp_control_ws(self, request: web.Request) -> web.WebSocketResponse:
+        self._enforce_dashboard_auth(request)
+        agent_id = (request.rel_url.query.get("agent_id") or "").strip()
+        if not agent_id:
+            raise web.HTTPBadRequest(text="agent_id is required")
+
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(request)
+
+        async with self._bp_ws_lock:
+            self._bp_ws_clients[agent_id].add(ws)
+
+        try:
+            await self._send_bp_ws_snapshot(agent_id, ws, reason="init")
+            async for msg in ws:
+                if msg.type == web.WSMsgType.TEXT:
+                    text = (msg.data or "").strip().lower()
+                    if text in {"ping", "pong"}:
+                        with suppress(Exception):
+                            await ws.send_json({"type": "pong", "ts": _now_ts()})
+                elif msg.type == web.WSMsgType.ERROR:
+                    break
+        finally:
+            async with self._bp_ws_lock:
+                conns = self._bp_ws_clients.get(agent_id)
+                if conns and ws in conns:
+                    conns.discard(ws)
+                if conns and not conns:
+                    self._bp_ws_clients.pop(agent_id, None)
+            with suppress(Exception):
+                await ws.close()
+        return ws
+
+    async def _send_bp_ws_snapshot(self, agent_id: str, ws: web.WebSocketResponse, *, reason: str) -> None:
+        payload = {
+            "type": "backpack_adjustments",
+            "reason": reason,
+            "agent_id": agent_id,
+            "ts": _now_ts(),
+            "backpack_adjustments": await self._backpack_adjustments.pending_for_agent(agent_id),
+        }
+        await ws.send_json(payload)
+
+    async def _notify_bp_adjustments(self, agent_id: str) -> None:
+        async with self._bp_ws_lock:
+            if not self._bp_ws_clients:
+                return
+            if agent_id == "all":
+                targets: List[Tuple[str, web.WebSocketResponse]] = [
+                    (agent_key, conn)
+                    for agent_key, conns in self._bp_ws_clients.items()
+                    for conn in list(conns)
+                ]
+            else:
+                conns = list(self._bp_ws_clients.get(agent_id, set()))
+                targets = [(agent_id, conn) for conn in conns]
+
+        for agent_key, conn in targets:
+            try:
+                await self._send_bp_ws_snapshot(agent_key, conn, reason="update")
+            except Exception:
+                with suppress(Exception):
+                    await conn.close()
+                async with self._bp_ws_lock:
+                    conns = self._bp_ws_clients.get(agent_key)
+                    if conns and conn in conns:
+                        conns.discard(conn)
+                    if conns and not conns:
+                        self._bp_ws_clients.pop(agent_key, None)
+
     # -----------------------------
     # Backpack auto balance
     # -----------------------------
@@ -6127,6 +6202,7 @@ class CoordinatorApp:
                     },
                 },
             )
+            await self._notify_bp_adjustments(measurement.source_agent)
 
             # Persist to local history for visibility (align with dashboard-created adjustments).
             entry: Dict[str, Any] = {
@@ -6366,6 +6442,7 @@ class CoordinatorApp:
             symbols=symbols,
             payload=payload_dict,
         )
+        await self._notify_bp_adjustments(resolved_agent_id)
 
         # Persist to local history immediately (status will be updated on ack).
         entry: Dict[str, Any] = {

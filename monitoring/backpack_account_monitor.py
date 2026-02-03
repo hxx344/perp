@@ -27,6 +27,7 @@ import logging
 import os
 import sys
 import time
+import threading
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -35,6 +36,11 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 import requests
 from requests.auth import HTTPBasicAuth
 from requests.exceptions import RequestException
+
+try:
+    import websocket  # type: ignore
+except Exception:  # pragma: no cover
+    websocket = None  # type: ignore
 
 import base64
 from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -137,6 +143,9 @@ class BackpackMonitorConfig:
     request_timeout: float = 10.0
     coordinator_username: Optional[str] = None
     coordinator_password: Optional[str] = None
+    control_ws: bool = True
+    control_ws_ping_interval: float = 20.0
+    control_ws_reconnect_delay: float = 3.0
 
 
 class BackpackAccountMonitor:
@@ -159,6 +168,13 @@ class BackpackAccountMonitor:
 
         self._processed_adjustments: Dict[str, Dict[str, Any]] = {}
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        self._process_lock = threading.Lock()
+
+        self._ws_enabled = bool(cfg.control_ws)
+        self._ws_connected = False
+        self._ws_last_message = 0.0
+        self._ws_thread: Optional[threading.Thread] = None
+        self._ws_stop = threading.Event()
 
     def _push(self, payload: Dict[str, Any]) -> None:
         try:
@@ -216,6 +232,104 @@ class BackpackAccountMonitor:
             first_req,
         )
         return payload
+
+    def _build_control_ws_url(self) -> str:
+        base = (self._cfg.coordinator_url or "").rstrip("/")
+        if base.startswith("https://"):
+            base = "wss://" + base[len("https://") :]
+        elif base.startswith("http://"):
+            base = "ws://" + base[len("http://") :]
+        elif not base.startswith("ws://") and not base.startswith("wss://"):
+            base = "ws://" + base
+        return f"{base}/ws/backpack/control?agent_id={self._cfg.agent_id}"
+
+    def _build_control_ws_headers(self) -> List[str]:
+        username = (self._cfg.coordinator_username or "").strip()
+        password = (self._cfg.coordinator_password or "").strip()
+        if not username and not password:
+            return []
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("utf-8")
+        return [f"Authorization: Basic {token}"]
+
+    def _handle_ws_message(self, message: str) -> None:
+        self._ws_last_message = time.time()
+        try:
+            payload = json.loads(message)
+        except Exception:
+            LOGGER.debug("WS message not JSON; ignoring")
+            return
+        if not isinstance(payload, dict):
+            return
+        if "backpack_adjustments" in payload:
+            self._process_adjustments(payload)
+
+    def _control_ws_loop(self) -> None:
+        if websocket is None:
+            LOGGER.warning("websocket-client not available; fallback to polling")
+            self._ws_enabled = False
+            return
+
+        delay = max(self._cfg.control_ws_reconnect_delay, 0.5)
+        while not self._ws_stop.is_set():
+            url = self._build_control_ws_url()
+
+            def _on_open(_):
+                self._ws_connected = True
+                self._ws_last_message = time.time()
+                LOGGER.info("Control WS connected: %s", url)
+
+            def _on_message(_, msg: str):
+                self._handle_ws_message(msg)
+
+            def _on_error(_, err: Exception):
+                LOGGER.warning("Control WS error: %s", err)
+
+            def _on_close(_, status: int, msg: str):
+                self._ws_connected = False
+                LOGGER.info("Control WS closed: %s %s", status, msg)
+
+            app = websocket.WebSocketApp(
+                url,
+                header=self._build_control_ws_headers() or None,
+                on_open=_on_open,
+                on_message=_on_message,
+                on_error=_on_error,
+                on_close=_on_close,
+            )
+
+            try:
+                app.run_forever(
+                    ping_interval=max(self._cfg.control_ws_ping_interval, 5.0),
+                    ping_timeout=max(self._cfg.request_timeout, 5.0),
+                )
+            except Exception as exc:
+                LOGGER.warning("Control WS run failed: %s", exc)
+                self._ws_connected = False
+
+            if self._ws_stop.is_set():
+                break
+            time.sleep(min(delay, 30.0))
+
+    def _start_control_ws_listener(self) -> None:
+        if not self._ws_enabled:
+            return
+        if self._ws_thread and self._ws_thread.is_alive():
+            return
+        self._ws_stop.clear()
+        self._ws_thread = threading.Thread(
+            target=self._control_ws_loop,
+            name=f"bp-control-ws-{self._cfg.agent_id}",
+            daemon=True,
+        )
+        self._ws_thread.start()
+
+    def _should_poll_control(self) -> bool:
+        if not self._ws_enabled:
+            return True
+        if not self._ws_connected:
+            return True
+        age = time.time() - (self._ws_last_message or 0)
+        return age > max(self._cfg.poll_interval * 2, 10.0)
 
     def _acknowledge_adjustment(
         self,
@@ -987,119 +1101,127 @@ class BackpackAccountMonitor:
             raise RuntimeError(f"Unexpected strategyCancel response: {result}")
         return cast(Dict[str, Any], result)
 
-    def _process_adjustments(self) -> None:
-        LOGGER.debug("Begin processing adjustments agent_id=%s", self._cfg.agent_id)
-        snapshot = self._fetch_agent_control()
-        if not snapshot:
-            LOGGER.debug("No control snapshot received")
-            LOGGER.debug("End processing adjustments agent_id=%s (no snapshot)", self._cfg.agent_id)
+    def _process_adjustments(self, snapshot: Optional[Dict[str, Any]] = None) -> None:
+        if not self._process_lock.acquire(blocking=False):
+            LOGGER.debug("Skip processing adjustments (busy) agent_id=%s", self._cfg.agent_id)
             return
-        agent_block = snapshot.get("agent")
-        if not isinstance(agent_block, dict):
-            # Coordinator's /control for our use-case returns agent_id/pending_adjustments at
-            # the top-level (and backpack_adjustments as a sibling field). There may be no
-            # nested "agent" block at all.
-            LOGGER.debug("Control snapshot missing agent block; continuing with top-level fields")
-            agent_block = {}
-        # The coordinator exposes Backpack adjustments via the dedicated
-        # top-level field `backpack_adjustments` (newer contract) so we don't
-        # piggyback on the shared `pending_adjustments` queue.
-        pending = snapshot.get("backpack_adjustments")
-        if not isinstance(pending, list):
-            # Backwards compatibility: older coordinator versions only provide
-            # the generic per-agent pending queue.
-            pending = agent_block.get("pending_adjustments")
+        try:
+            LOGGER.debug("Begin processing adjustments agent_id=%s", self._cfg.agent_id)
+            if snapshot is None:
+                snapshot = self._fetch_agent_control()
+            if not snapshot:
+                LOGGER.debug("No control snapshot received")
+                LOGGER.debug("End processing adjustments agent_id=%s (no snapshot)", self._cfg.agent_id)
+                return
 
-        raw_bp = snapshot.get("backpack_adjustments")
-        raw_pending = agent_block.get("pending_adjustments")
-        bp_count = len(raw_bp) if isinstance(raw_bp, list) else "n/a"
-        pending_count = len(raw_pending) if isinstance(raw_pending, list) else "n/a"
-        LOGGER.debug(
-            "Control poll agent_id=%s backpack_adjustments=%s pending_adjustments=%s",
-            self._cfg.agent_id,
-            bp_count,
-            pending_count,
-        )
+            agent_block = snapshot.get("agent")
+            if not isinstance(agent_block, dict):
+                # Coordinator's /control for our use-case returns agent_id/pending_adjustments at
+                # the top-level (and backpack_adjustments as a sibling field). There may be no
+                # nested "agent" block at all.
+                LOGGER.debug("Control snapshot missing agent block; continuing with top-level fields")
+                agent_block = {}
+            # The coordinator exposes Backpack adjustments via the dedicated
+            # top-level field `backpack_adjustments` (newer contract) so we don't
+            # piggyback on the shared `pending_adjustments` queue.
+            pending = snapshot.get("backpack_adjustments")
+            if not isinstance(pending, list):
+                # Backwards compatibility: older coordinator versions only provide
+                # the generic per-agent pending queue.
+                pending = agent_block.get("pending_adjustments")
 
-        if not isinstance(pending, list) or not pending:
-            self._prune_processed_adjustments()
-            LOGGER.debug("End processing adjustments agent_id=%s (no pending)", self._cfg.agent_id)
-            return
-
-        for entry in pending:
-            if not isinstance(entry, dict):
-                continue
-            request_id = entry.get("request_id")
-            if not request_id:
-                continue
-
+            raw_bp = snapshot.get("backpack_adjustments")
+            raw_pending = agent_block.get("pending_adjustments")
+            bp_count = len(raw_bp) if isinstance(raw_bp, list) else "n/a"
+            pending_count = len(raw_pending) if isinstance(raw_pending, list) else "n/a"
             LOGGER.debug(
-                "Picked adjustment request_id=%s provider=%s",
-                request_id,
-                entry.get("provider") or entry.get("exchange"),
+                "Control poll agent_id=%s backpack_adjustments=%s pending_adjustments=%s",
+                self._cfg.agent_id,
+                bp_count,
+                pending_count,
             )
 
-            # Ignore adjustments not meant for Backpack monitor.
-            provider = str(entry.get("provider") or entry.get("exchange") or "").strip().lower()
-            if provider and provider not in {"backpack", "bp"}:
-                continue
+            if not isinstance(pending, list) or not pending:
+                self._prune_processed_adjustments()
+                LOGGER.debug("End processing adjustments agent_id=%s (no pending)", self._cfg.agent_id)
+                return
 
-            cached = self._processed_adjustments.get(request_id)
-            if cached and cached.get("acked"):
-                continue
-            if cached and cached.get("inflight"):
-                continue
+            for entry in pending:
+                if not isinstance(entry, dict):
+                    continue
+                request_id = entry.get("request_id")
+                if not request_id:
+                    continue
 
-            def _worker(entry_copy: Dict[str, Any], req_id: str) -> None:
-                status = "failed"
-                note: Optional[str] = None
-                extra: Optional[Dict[str, Any]] = None
-                try:
-                    status, note, extra = self._execute_adjustment(entry_copy)
-                except Exception as exc:
+                LOGGER.debug(
+                    "Picked adjustment request_id=%s provider=%s",
+                    request_id,
+                    entry.get("provider") or entry.get("exchange"),
+                )
+
+                # Ignore adjustments not meant for Backpack monitor.
+                provider = str(entry.get("provider") or entry.get("exchange") or "").strip().lower()
+                if provider and provider not in {"backpack", "bp"}:
+                    continue
+
+                cached = self._processed_adjustments.get(request_id)
+                if cached and cached.get("acked"):
+                    continue
+                if cached and cached.get("inflight"):
+                    continue
+
+                def _worker(entry_copy: Dict[str, Any], req_id: str) -> None:
                     status = "failed"
-                    note = f"execution error: {exc}"
-                    LOGGER.error("Adjustment %s execution failed: %s", req_id, exc)
+                    note: Optional[str] = None
+                    extra: Optional[Dict[str, Any]] = None
+                    try:
+                        status, note, extra = self._execute_adjustment(entry_copy)
+                    except Exception as exc:
+                        status = "failed"
+                        note = f"execution error: {exc}"
+                        LOGGER.error("Adjustment %s execution failed: %s", req_id, exc)
 
-                LOGGER.debug("ACK adjustment request_id=%s status=%s note=%s", req_id, status, note)
+                    LOGGER.debug("ACK adjustment request_id=%s status=%s note=%s", req_id, status, note)
 
-                acked = self._acknowledge_adjustment(req_id, status, note, extra)
-                if not acked:
-                    LOGGER.warning("ACK rejected/failed for request_id=%s status=%s", req_id, status)
-                self._processed_adjustments[req_id] = {
-                    "status": status,
-                    "note": note,
-                    "extra": extra,
-                    "acked": acked,
-                    "timestamp": time.time(),
-                    "inflight": False,
-                }
+                    acked = self._acknowledge_adjustment(req_id, status, note, extra)
+                    if not acked:
+                        LOGGER.warning("ACK rejected/failed for request_id=%s status=%s", req_id, status)
+                    self._processed_adjustments[req_id] = {
+                        "status": status,
+                        "note": note,
+                        "extra": extra,
+                        "acked": acked,
+                        "timestamp": time.time(),
+                        "inflight": False,
+                    }
 
-            self._processed_adjustments[request_id] = {
-                "status": "pending",
-                "note": None,
-                "acked": False,
-                "timestamp": time.time(),
-                "inflight": True,
-            }
-            try:
-                self._executor.submit(_worker, dict(entry), str(request_id))
-            except Exception as exc:
-                LOGGER.error("Failed to submit adjustment %s: %s", request_id, exc)
                 self._processed_adjustments[request_id] = {
-                    "status": "failed",
-                    "note": f"submit failed: {exc}",
+                    "status": "pending",
+                    "note": None,
                     "acked": False,
                     "timestamp": time.time(),
-                    "inflight": False,
+                    "inflight": True,
                 }
+                try:
+                    self._executor.submit(_worker, dict(entry), str(request_id))
+                except Exception as exc:
+                    LOGGER.error("Failed to submit adjustment %s: %s", request_id, exc)
+                    self._processed_adjustments[request_id] = {
+                        "status": "failed",
+                        "note": f"submit failed: {exc}",
+                        "acked": False,
+                        "timestamp": time.time(),
+                        "inflight": False,
+                    }
 
-        self._prune_processed_adjustments()
-        LOGGER.debug(
-            "End processing adjustments agent_id=%s (scheduled=%s)",
-            self._cfg.agent_id,
-            len(pending),
-        )
+            self._prune_processed_adjustments()
+            LOGGER.debug(
+                "End processing adjustments agent_id=%s (scheduled=%s)",
+                self._cfg.agent_id,
+                len(pending),
+            )
+        finally:
+            self._process_lock.release()
 
     def _prune_processed_adjustments(self, ttl: float = 3600.0) -> None:
         if not self._processed_adjustments:
@@ -1117,10 +1239,12 @@ class BackpackAccountMonitor:
         else:
             self._push(payload)
             LOGGER.info("Pushed Backpack monitor snapshot for %s", self._cfg.label)
-        self._process_adjustments()
+        if self._should_poll_control():
+            self._process_adjustments()
         LOGGER.debug("Monitor cycle end label=%s agent_id=%s", self._cfg.label, self._cfg.agent_id)
 
     def run_forever(self) -> None:
+        self._start_control_ws_listener()
         while True:
             started = time.time()
             try:
@@ -1185,6 +1309,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--coordinator-username", default=os.getenv("COORDINATOR_USERNAME"))
     parser.add_argument("--coordinator-password", default=os.getenv("COORDINATOR_PASSWORD"))
+    parser.add_argument(
+        "--control-ws",
+        action=argparse.BooleanOptionalAction,
+        default=os.getenv("BACKPACK_CONTROL_WS", "1").lower() not in {"0", "false", "no"},
+        help="Enable WebSocket control push (fallback to polling if disabled/unavailable).",
+    )
+    parser.add_argument(
+        "--control-ws-ping-interval",
+        type=float,
+        default=float(os.getenv("BACKPACK_CONTROL_WS_PING_INTERVAL", "20")),
+        help="WebSocket ping interval in seconds.",
+    )
+    parser.add_argument(
+        "--control-ws-reconnect-delay",
+        type=float,
+        default=float(os.getenv("BACKPACK_CONTROL_WS_RECONNECT_DELAY", "3")),
+        help="WebSocket reconnect delay in seconds.",
+    )
     parser.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "INFO"))
     parser.add_argument(
         "--env-file",
@@ -1211,6 +1353,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         request_timeout=float(args.timeout),
         coordinator_username=args.coordinator_username,
         coordinator_password=args.coordinator_password,
+        control_ws=bool(args.control_ws),
+        control_ws_ping_interval=float(args.control_ws_ping_interval),
+        control_ws_reconnect_delay=float(args.control_ws_reconnect_delay),
     )
 
     client = _build_backpack_client()
