@@ -8624,7 +8624,7 @@ async def _run_app(args: argparse.Namespace) -> None:
 
     if (args.dashboard_username or "") or (args.dashboard_password or ""):
         LOGGER.info("Dashboard authentication enabled; protected endpoints require HTTP Basic credentials")
-    runner = web.AppRunner(coordinator_app.app)
+    runner = web.AppRunner(coordinator_app.app, shutdown_timeout=2.0)
     await runner.setup()
 
     site = web.TCPSite(runner, host=args.host, port=args.port)
@@ -8633,9 +8633,13 @@ async def _run_app(args: argparse.Namespace) -> None:
     LOGGER.info("hedge coordinator listening on %s:%s", args.host, args.port)
 
     stop_event = asyncio.Event()
+    shutdown_logged = False
 
     def _shutdown_handler() -> None:
-        LOGGER.info("received termination signal; shutting down coordinator")
+        nonlocal shutdown_logged
+        if not shutdown_logged:
+            LOGGER.info("received termination signal; shutting down coordinator")
+            shutdown_logged = True
         stop_event.set()
 
     loop = asyncio.get_running_loop()
@@ -8650,7 +8654,10 @@ async def _run_app(args: argparse.Namespace) -> None:
 
     await stop_event.wait()
 
-    await runner.cleanup()
+    try:
+        await asyncio.wait_for(runner.cleanup(), timeout=5.0)
+    except asyncio.TimeoutError:
+        LOGGER.warning("Coordinator cleanup timed out; forcing exit")
 
 
 def _parse_args() -> argparse.Namespace:
