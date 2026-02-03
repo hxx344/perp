@@ -3871,7 +3871,7 @@ class CoordinatorApp:
                 web.get("/para/twap_scheduler/config", self.handle_para_twap_scheduler_get),
                 web.post("/para/twap_scheduler/config", self.handle_para_twap_scheduler_update),
                 web.get("/backpack/auto_balance/config", self.handle_bp_auto_balance_get),
-                web.post("/backpack/auto_balance/config", self.handle_bp_auto_balance_get),
+                web.post("/backpack/auto_balance/config", self.handle_bp_auto_balance_update),
                 web.get("/risk_alert/settings", self.handle_risk_alert_settings),
                 web.post("/risk_alert/settings", self.handle_risk_alert_update),
                 web.get("/para/risk_alert/settings", self.handle_para_risk_alert_settings),
@@ -6078,6 +6078,45 @@ class CoordinatorApp:
 
     async def handle_bp_auto_balance_get(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)
+        return web.json_response({
+            "config": self._bp_auto_balance_config_as_payload(),
+            "status": self._bp_auto_balance_status_snapshot(),
+        })
+
+    async def handle_bp_auto_balance_update(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="auto balance payload must be JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="auto balance payload must be an object")
+
+        with suppress(Exception):
+            LOGGER.info(
+                "Dashboard Backpack auto balance save requested (remote=%s keys=%s)",
+                getattr(request, "remote", None),
+                sorted(list(body.keys())),
+            )
+
+        action_raw = body.get("action")
+        action = str(action_raw).strip().lower() if isinstance(action_raw, str) else None
+        enabled_flag = body.get("enabled")
+        if enabled_flag is False or action == "disable":
+            self._update_bp_auto_balance_config(None)
+            self._persist_bp_auto_balance_config()
+            return web.json_response({
+                "config": None,
+                "status": self._bp_auto_balance_status_snapshot(),
+            })
+
+        try:
+            config = self._parse_auto_balance_config(body, default_currency="USDC")
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+
+        self._update_bp_auto_balance_config(config)
+        self._persist_bp_auto_balance_config()
         return web.json_response({
             "config": self._bp_auto_balance_config_as_payload(),
             "status": self._bp_auto_balance_status_snapshot(),
