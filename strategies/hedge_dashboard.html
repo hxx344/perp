@@ -3124,6 +3124,21 @@
             <button type="button" class="button-danger" id="bp-dual-volume-stop">停止</button>
             <p class="summary-sub" id="bp-dual-volume-status" style="margin:0;">等待配置…</p>
           </div>
+
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin-top: 1rem;">
+            <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+              <h2>双号成交额（quote）</h2>
+              <div class="value" id="bp-dual-volume-quote">--</div>
+            </article>
+            <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+              <h2>总磨损（返佣后）</h2>
+              <div class="value" id="bp-dual-wear-total-net">--</div>
+            </article>
+            <article class="card" style="background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);">
+              <h2>每万磨损</h2>
+              <div class="value" id="bp-dual-wear-per10k">--</div>
+            </article>
+          </div>
         </article>
       </section>
     </section>
@@ -3202,6 +3217,9 @@
   const bpDualStopBtn = document.getElementById('bp-dual-volume-stop');
   const bpDualStatus = document.getElementById('bp-dual-volume-status');
   const bpDualRunning = document.getElementById('bp-dual-volume-running');
+  const bpDualVolumeQuote = document.getElementById('bp-dual-volume-quote');
+  const bpDualWearTotalNet = document.getElementById('bp-dual-wear-total-net');
+  const bpDualWearPer10k = document.getElementById('bp-dual-wear-per10k');
 
     function bpFormatNumber(value, decimals = 2) {
       const num = Number(value);
@@ -3859,6 +3877,16 @@
       if (Number.isFinite(spreadBps)) meta.push(`spread ${bpFormatNumber(spreadBps, 2)}bps`);
       if (gate) meta.push(`gate ${gate}`);
       bpDualStatus.textContent = meta.length ? `${baseText} · ${meta.join(' · ')}` : baseText;
+      if (bpDualVolumeQuote) {
+        bpDualVolumeQuote.textContent = status.volume_quote ?? '--';
+      }
+      if (bpDualWearTotalNet) {
+        bpDualWearTotalNet.textContent = status.wear_total_net ?? '--';
+      }
+      if (bpDualWearPer10k) {
+        const val = status.wear_total_net_per_10k;
+        bpDualWearPer10k.textContent = (val == null || val === '') ? '--' : bpFormatNumber(Number(val), 2);
+      }
     }
 
     async function bpRefreshDualVolumeStatus({ force = false } = {}) {

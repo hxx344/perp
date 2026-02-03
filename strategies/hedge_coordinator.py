@@ -455,6 +455,8 @@ class BackpackDualVolumeConfig:
 @dataclass
 class BackpackDualVolumeState:
     running: bool = False
+    volume_quote: Decimal = Decimal("0")
+    wear_total_net: Decimal = Decimal("0")
     run_id: str = ""
     started_at: Optional[float] = None
     last_error: str = ""
@@ -4904,6 +4906,8 @@ class CoordinatorApp:
             state.last_action = ""
             state.phase = "build"
             state.last_positions = {}
+            state.volume_quote = Decimal("0")
+            state.wear_total_net = Decimal("0")
             state.cfg = cfg
             state.task = asyncio.create_task(self._bp_dual_volume_runner(state.run_id))
 
@@ -5145,6 +5149,21 @@ class CoordinatorApp:
                         _enqueue(cfg.agent_b, "reduce", qty_b),
                     )
                     action_note = f"reduce qty={qty_a}/{qty_b}"
+
+                # Update dual-volume stats (best-effort, based on L1).
+                fee_rate = Decimal("0.00026")
+                net_fee_rate = Decimal("0.00026") * Decimal("0.55")
+                qty_pair = min(qty_a, qty_b)
+                quote_a = (qty_a * ask1) if qty_a > 0 else Decimal("0")
+                quote_b = (qty_b * bid1) if qty_b > 0 else Decimal("0")
+                volume_quote = quote_a + quote_b
+                wear_spread = (ask1 - bid1) * qty_pair if qty_pair > 0 else Decimal("0")
+                fee_net = volume_quote * net_fee_rate if volume_quote > 0 else Decimal("0")
+                wear_total_net = wear_spread + fee_net
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.volume_quote += volume_quote
+                        self._bp_dual_volume.wear_total_net += wear_total_net
 
                 consecutive_failures = 0
                 last_cycle_at = _now_ts()
@@ -7947,6 +7966,13 @@ class CoordinatorApp:
             "last_action_at": state.last_action_at,
             "last_action": state.last_action,
             "last_positions": copy.deepcopy(state.last_positions),
+            "volume_quote": self._decimal_to_str(state.volume_quote),
+            "wear_total_net": self._decimal_to_str(state.wear_total_net),
+            "wear_total_net_per_10k": (
+                float((state.wear_total_net / state.volume_quote) * Decimal("10000"))
+                if state.volume_quote and state.volume_quote > 0
+                else None
+            ),
             "config": {
                 "symbol": cfg.symbol,
                 "qty_per_cycle": str(cfg.qty_per_cycle),
