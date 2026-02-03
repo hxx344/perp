@@ -2848,95 +2848,6 @@
             </label>
           </div>
           <div class="grvt-auto-actions">
-
-        <div class="grvt-risk-panel" id="bp-risk-panel" style="margin-top: 1rem;">
-          <div class="grvt-adjust-header">
-            <div>
-              <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Bark 告警（Backpack）</h3>
-              <p class="summary-sub" style="margin: 0;">针对 Backpack 账户权益风险的 Bark 推送配置</p>
-            </div>
-            <div class="risk-status-pill" id="bp-risk-settings-status">加载中…</div>
-          </div>
-          <div class="risk-settings-grid">
-            <section class="risk-settings-card">
-              <div class="risk-toggle">
-                <input type="checkbox" id="bp-risk-alert-enabled" />
-                <span>启用风险告警</span>
-              </div>
-              <div class="risk-slider">
-                <label class="risk-slider-label" for="bp-risk-threshold-slider">
-                  <span id="bp-risk-threshold-label">阈值 --%</span>
-                </label>
-                <input type="range" id="bp-risk-threshold-slider" min="5" max="90" step="0.5" value="30" />
-                <div class="risk-slider-scale">
-                  <span>5%</span>
-                  <span>25%</span>
-                  <span>50%</span>
-                  <span>90%</span>
-                </div>
-              </div>
-              <div class="risk-inline-inputs">
-                <label>
-                  触发阈值 (%)
-                  <input type="number" id="bp-risk-threshold-input" min="1" max="90" step="0.5" />
-                </label>
-                <label>
-                  重置阈值 (%)
-                  <input type="number" id="bp-risk-reset-input" min="1" max="90" step="0.5" />
-                </label>
-                <label>
-                  冷却 (分钟)
-                  <input type="number" id="bp-risk-cooldown-input" min="0" max="360" step="1" />
-                </label>
-              </div>
-              <p class="risk-meta" id="bp-risk-ratio-meta">等待风险数据…</p>
-            </section>
-            <section class="risk-settings-card">
-              <div class="risk-bark-grid">
-                <label>
-                  Bark URL
-                  <input type="text" id="bp-risk-bark-url" placeholder="https://api.day.app/xxxxx/%7Btitle%7D/%7Bbody%7D" />
-                </label>
-                <label>
-                  请求超时 (秒)
-                  <input type="number" id="bp-risk-bark-timeout" min="1" max="60" step="0.5" />
-                </label>
-              </div>
-            </section>
-          </div>
-          <div class="risk-settings-actions">
-            <div class="risk-actions-left">
-              <button type="button" id="bp-risk-settings-save">保存配置</button>
-              <button type="button" class="button-success" id="bp-risk-settings-test">测试 Bark</button>
-              <button type="button" class="button-ghost" id="bp-risk-settings-refresh">重新读取</button>
-              <button type="button" class="button-danger" id="bp-risk-settings-disable">关闭告警</button>
-            </div>
-            <p class="risk-settings-message" id="bp-risk-settings-message">未加载</p>
-            <p class="risk-settings-message" id="bp-risk-test-message"></p>
-          </div>
-          <div class="risk-history-card">
-            <div class="risk-history-header">
-              <h3>告警历史 (Backpack)</h3>
-              <button type="button" class="button-ghost" id="bp-risk-history-refresh">刷新</button>
-            </div>
-            <p class="risk-history-status" id="bp-risk-history-status">等待告警数据…</p>
-            <div class="risk-history-table-wrapper">
-              <table class="risk-history-table">
-                <thead>
-                  <tr>
-                    <th>时间</th>
-                    <th>来源</th>
-                    <th>账户</th>
-                    <th>风险%</th>
-                    <th>亏损 / 裕量</th>
-                  </tr>
-                </thead>
-                <tbody id="bp-risk-history-body"></tbody>
-              </table>
-              <p class="risk-history-empty hidden" id="bp-risk-history-empty">暂无告警</p>
-            </div>
-          </div>
-        </div>
             <button type="button" id="bp-auto-save">保存配置</button>
             <button type="button" class="button-danger" id="bp-auto-disable">停用</button>
             <button type="button" class="button-ghost" id="bp-auto-refresh">刷新状态</button>
@@ -2955,6 +2866,95 @@
                 <li>无执行记录</li>
               </ul>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grvt-risk-panel" id="bp-risk-panel" style="margin-top: 1rem;">
+        <div class="grvt-adjust-header">
+          <div>
+            <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">Bark 告警（Backpack）</h3>
+            <p class="summary-sub" style="margin: 0;">针对 Backpack 账户权益风险的 Bark 推送配置</p>
+          </div>
+          <div class="risk-status-pill" id="bp-risk-settings-status">加载中…</div>
+        </div>
+        <div class="risk-settings-grid">
+          <section class="risk-settings-card">
+            <div class="risk-toggle">
+              <input type="checkbox" id="bp-risk-alert-enabled" />
+              <span>启用风险告警</span>
+            </div>
+            <div class="risk-slider">
+              <label class="risk-slider-label" for="bp-risk-threshold-slider">
+                <span id="bp-risk-threshold-label">阈值 --%</span>
+              </label>
+              <input type="range" id="bp-risk-threshold-slider" min="5" max="90" step="0.5" value="30" />
+              <div class="risk-slider-scale">
+                <span>5%</span>
+                <span>25%</span>
+                <span>50%</span>
+                <span>90%</span>
+              </div>
+            </div>
+            <div class="risk-inline-inputs">
+              <label>
+                触发阈值 (%)
+                <input type="number" id="bp-risk-threshold-input" min="1" max="90" step="0.5" />
+              </label>
+              <label>
+                重置阈值 (%)
+                <input type="number" id="bp-risk-reset-input" min="1" max="90" step="0.5" />
+              </label>
+              <label>
+                冷却 (分钟)
+                <input type="number" id="bp-risk-cooldown-input" min="0" max="360" step="1" />
+              </label>
+            </div>
+            <p class="risk-meta" id="bp-risk-ratio-meta">等待风险数据…</p>
+          </section>
+          <section class="risk-settings-card">
+            <div class="risk-bark-grid">
+              <label>
+                Bark URL
+                <input type="text" id="bp-risk-bark-url" placeholder="https://api.day.app/xxxxx/%7Btitle%7D/%7Bbody%7D" />
+              </label>
+              <label>
+                请求超时 (秒)
+                <input type="number" id="bp-risk-bark-timeout" min="1" max="60" step="0.5" />
+              </label>
+            </div>
+          </section>
+        </div>
+        <div class="risk-settings-actions">
+          <div class="risk-actions-left">
+            <button type="button" id="bp-risk-settings-save">保存配置</button>
+            <button type="button" class="button-success" id="bp-risk-settings-test">测试 Bark</button>
+            <button type="button" class="button-ghost" id="bp-risk-settings-refresh">重新读取</button>
+            <button type="button" class="button-danger" id="bp-risk-settings-disable">关闭告警</button>
+          </div>
+          <p class="risk-settings-message" id="bp-risk-settings-message">未加载</p>
+          <p class="risk-settings-message" id="bp-risk-test-message"></p>
+        </div>
+        <div class="risk-history-card">
+          <div class="risk-history-header">
+            <h3>告警历史 (Backpack)</h3>
+            <button type="button" class="button-ghost" id="bp-risk-history-refresh">刷新</button>
+          </div>
+          <p class="risk-history-status" id="bp-risk-history-status">等待告警数据…</p>
+          <div class="risk-history-table-wrapper">
+            <table class="risk-history-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>来源</th>
+                  <th>账户</th>
+                  <th>风险%</th>
+                  <th>亏损 / 裕量</th>
+                </tr>
+              </thead>
+              <tbody id="bp-risk-history-body"></tbody>
+            </table>
+            <p class="risk-history-empty hidden" id="bp-risk-history-empty">暂无告警</p>
           </div>
         </div>
       </div>
