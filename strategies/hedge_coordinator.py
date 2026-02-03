@@ -4566,12 +4566,19 @@ class CoordinatorApp:
 
     async def _on_cleanup(self, app: web.Application) -> None:
         del app  # unused
+        async def _await_with_timeout(coro: Awaitable[Any], timeout_s: float, label: str) -> None:
+            try:
+                await asyncio.wait_for(coro, timeout=timeout_s)
+            except asyncio.TimeoutError:
+                LOGGER.warning("Cleanup timeout: %s (>%ss)", label, timeout_s)
+            except Exception as exc:
+                LOGGER.warning("Cleanup failed (%s): %s", label, exc)
         # volatility monitor removed
-        await self._coordinator.stop_background_tasks()
+        await _await_with_timeout(self._coordinator.stop_background_tasks(), 5.0, "background tasks")
 
         if self._bp_bbo_ws is not None:
             with suppress(Exception):
-                await self._bp_bbo_ws.stop()
+                await _await_with_timeout(self._bp_bbo_ws.stop(), 5.0, "bp bbo ws")
 
         # Stop backpack volume task if running.
         tasks: List[asyncio.Task] = []
@@ -4585,7 +4592,7 @@ class CoordinatorApp:
             task.cancel()
         for task in tasks:
             with suppress(Exception):
-                await task
+                await _await_with_timeout(task, 5.0, "bp volume task")
 
         # Stop backpack dual-volume task if running.
         dual_task: Optional[asyncio.Task] = None
@@ -4597,7 +4604,7 @@ class CoordinatorApp:
         if dual_task:
             dual_task.cancel()
             with suppress(Exception):
-                await dual_task
+                await _await_with_timeout(dual_task, 5.0, "bp dual volume task")
 
         # Best-effort persist.
         with suppress(Exception):
@@ -5937,7 +5944,7 @@ class CoordinatorApp:
         with suppress(Exception):
             response["backpack_adjustments"] = await self._backpack_adjustments.pending_for_agent(agent_id)
 
-        return web.json_response(response)
+        return web.json_response(response, dumps=lambda obj: json.dumps(obj, default=str))
 
     async def handle_bp_control_ws(self, request: web.Request) -> web.WebSocketResponse:
         self._enforce_dashboard_auth(request)
