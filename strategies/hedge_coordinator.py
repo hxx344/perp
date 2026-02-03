@@ -7836,6 +7836,21 @@ class CoordinatorApp:
         if summary_block is None:
             return None
 
+        # Prefer collateral/balances snapshots if present (monitor attaches raw API payloads).
+        collateral = summary_block.get("collateral") if isinstance(summary_block.get("collateral"), dict) else None
+        balances = summary_block.get("balances") if isinstance(summary_block.get("balances"), dict) else None
+        if isinstance(collateral, dict):
+            value = HedgeCoordinator._decimal_from(collateral.get("netEquity"))
+            if value is not None:
+                return value
+        if isinstance(balances, dict):
+            usdc = balances.get("USDC") if isinstance(balances.get("USDC"), dict) else None
+            if isinstance(usdc, dict):
+                key = "available" if prefer_available else "total"
+                value = HedgeCoordinator._decimal_from(usdc.get(key))
+                if value is not None:
+                    return value
+
         fields_available = ("available_equity", "available_balance", "equity", "balance")
         fields_equity_first = ("equity", "balance", "available_equity", "available_balance")
         fields = fields_available if prefer_available else fields_equity_first
@@ -7843,6 +7858,19 @@ class CoordinatorApp:
             value = HedgeCoordinator._decimal_from(summary_block.get(field))
             if value is not None:
                 return value
+
+        # Final fallback: try the first account entry (monitor always sends one).
+        accounts = bp_block.get("accounts")
+        if isinstance(accounts, list) and accounts:
+            first = accounts[0] if isinstance(accounts[0], dict) else None
+            if isinstance(first, dict):
+                for field in fields:
+                    value = HedgeCoordinator._decimal_from(first.get(field))
+                    if value is not None:
+                        return value
+                value = HedgeCoordinator._decimal_from(first.get("account_value"))
+                if value is not None:
+                    return value
         return None
 
     @staticmethod
