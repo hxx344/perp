@@ -5987,7 +5987,7 @@ class CoordinatorApp:
             "ts": _now_ts(),
             "backpack_adjustments": await self._backpack_adjustments.pending_for_agent(agent_id),
         }
-        await ws.send_json(payload)
+        await ws.send_json(payload, dumps=lambda obj: json.dumps(obj, default=str))
 
     async def _notify_bp_adjustments(self, agent_id: str) -> None:
         async with self._bp_ws_lock:
