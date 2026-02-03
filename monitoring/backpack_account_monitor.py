@@ -1249,7 +1249,7 @@ class BackpackAccountMonitor:
             LOGGER.warning("Skipping coordinator update; unable to collect Backpack account data")
         else:
             self._push(payload)
-            LOGGER.info("Pushed Backpack monitor snapshot for %s", self._cfg.label)
+            LOGGER.debug("Pushed Backpack monitor snapshot for %s", self._cfg.label)
         if self._should_poll_control():
             self._process_adjustments()
         LOGGER.debug("Monitor cycle end label=%s agent_id=%s", self._cfg.label, self._cfg.agent_id)
