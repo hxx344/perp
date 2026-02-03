@@ -3087,8 +3087,12 @@
               <select id="bp-dual-volume-symbol"></select>
             </label>
             <label>
-              单次开/减仓（base qty）
-              <input type="number" id="bp-dual-volume-qty" min="0" step="0.001" value="0.2" />
+              单次开/减仓最小（base qty）
+              <input type="number" id="bp-dual-volume-qty-min" min="0" step="0.001" value="0.2" />
+            </label>
+            <label>
+              单次开/减仓最大（base qty）
+              <input type="number" id="bp-dual-volume-qty-max" min="0" step="0.001" value="0.2" />
             </label>
             <label>
               目标持仓量（绝对值）
@@ -3206,7 +3210,8 @@
 
   // Backpack dual-volume controls
   const bpDualSymbolSelect = document.getElementById('bp-dual-volume-symbol');
-  const bpDualQtyInput = document.getElementById('bp-dual-volume-qty');
+  const bpDualQtyMinInput = document.getElementById('bp-dual-volume-qty-min');
+  const bpDualQtyMaxInput = document.getElementById('bp-dual-volume-qty-max');
   const bpDualTargetInput = document.getElementById('bp-dual-volume-target');
   const bpDualSpreadInput = document.getElementById('bp-dual-volume-max-spread-bps');
   const bpDualCooldownMinInput = document.getElementById('bp-dual-volume-cooldown-min');
@@ -3841,7 +3846,10 @@
         }
       };
       setValue(bpDualSymbolSelect, config.symbol, bpDualSymbolSelect?.value || '');
-      setValue(bpDualQtyInput, config.qty_per_cycle ?? config.qty, bpDualQtyInput?.value || '');
+  const qtyMin = config.qty_per_cycle_min ?? config.qty_per_cycle ?? config.qty;
+  const qtyMax = config.qty_per_cycle_max ?? config.qty_per_cycle ?? config.qty;
+  setValue(bpDualQtyMinInput, qtyMin, bpDualQtyMinInput?.value || '');
+  setValue(bpDualQtyMaxInput, qtyMax, bpDualQtyMaxInput?.value || '');
       setValue(bpDualTargetInput, config.target_position ?? config.target, bpDualTargetInput?.value || '');
       setValue(bpDualSpreadInput, config.max_spread_bps ?? config.spread_bps, bpDualSpreadInput?.value || '');
       setValue(bpDualCooldownMinInput, config.cooldown_ms_min ?? config.cooldown_min_ms, bpDualCooldownMinInput?.value || '0');
@@ -3989,7 +3997,8 @@
 
     const bpDualInputs = [
       bpDualSymbolSelect,
-      bpDualQtyInput,
+      bpDualQtyMinInput,
+      bpDualQtyMaxInput,
       bpDualTargetInput,
       bpDualSpreadInput,
       bpDualCooldownMinInput,
@@ -4010,7 +4019,8 @@
       try {
         const body = {
           symbol: bpDualSymbolSelect?.value || '',
-          qty_per_cycle: String(bpDualQtyInput?.value || '0'),
+          qty_per_cycle_min: String(bpDualQtyMinInput?.value || '0'),
+          qty_per_cycle_max: String(bpDualQtyMaxInput?.value || '0'),
           target_position: String(bpDualTargetInput?.value || '0'),
           max_spread_bps: Number(bpDualSpreadInput?.value || '0'),
           cooldown_ms: 1500,

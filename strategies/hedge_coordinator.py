@@ -441,7 +441,8 @@ class BackpackVolumeMultiState:
 @dataclass
 class BackpackDualVolumeConfig:
     symbol: str = ""
-    qty_per_cycle: Decimal = Decimal("0")
+    qty_per_cycle_min: Decimal = Decimal("0")
+    qty_per_cycle_max: Decimal = Decimal("0")
     target_position: Decimal = Decimal("0")
     max_spread_bps: float = 0.0
     cooldown_ms: int = 1500
@@ -450,6 +451,7 @@ class BackpackDualVolumeConfig:
     depth_safety_factor: float = 0.7
     agent_a: str = ""
     agent_b: str = ""
+    qty_scale: int = 3
 
 
 @dataclass
@@ -4855,11 +4857,21 @@ class CoordinatorApp:
             return web.json_response({"ok": False, "error": "symbol required"}, status=400)
 
         qty_per_cycle = _decimal(payload.get("qty_per_cycle"), "0")
+        qty_per_cycle_min = _decimal(payload.get("qty_per_cycle_min"), "0")
+        qty_per_cycle_max = _decimal(payload.get("qty_per_cycle_max"), "0")
         target_position = _decimal(payload.get("target_position"), "0")
         max_spread_bps = float(payload.get("max_spread_bps") or 0.0)
 
-        if qty_per_cycle <= 0:
-            return web.json_response({"ok": False, "error": "qty_per_cycle must be > 0"}, status=400)
+        if qty_per_cycle_min <= 0 and qty_per_cycle <= 0:
+            return web.json_response({"ok": False, "error": "qty_per_cycle_min must be > 0"}, status=400)
+        if qty_per_cycle_max <= 0:
+            qty_per_cycle_max = qty_per_cycle_min if qty_per_cycle_min > 0 else qty_per_cycle
+        if qty_per_cycle_min <= 0:
+            qty_per_cycle_min = qty_per_cycle if qty_per_cycle > 0 else qty_per_cycle_max
+        if qty_per_cycle_min <= 0 or qty_per_cycle_max <= 0:
+            return web.json_response({"ok": False, "error": "qty_per_cycle_min/max must be > 0"}, status=400)
+        if qty_per_cycle_min > qty_per_cycle_max:
+            return web.json_response({"ok": False, "error": "qty_per_cycle_min must be <= qty_per_cycle_max"}, status=400)
         if target_position <= 0:
             return web.json_response({"ok": False, "error": "target_position must be > 0"}, status=400)
         if max_spread_bps <= 0:
@@ -4879,9 +4891,14 @@ class CoordinatorApp:
         if agent_a == agent_b:
             return web.json_response({"ok": False, "error": "agent_a and agent_b must differ"}, status=400)
 
+        qty_scale = 3
+        with suppress(Exception):
+            exp = qty_per_cycle_min.normalize().as_tuple().exponent
+            qty_scale = max(0, -int(exp))
         cfg = BackpackDualVolumeConfig(
             symbol=symbol.strip().upper(),
-            qty_per_cycle=qty_per_cycle,
+            qty_per_cycle_min=qty_per_cycle_min,
+            qty_per_cycle_max=qty_per_cycle_max,
             target_position=target_position,
             max_spread_bps=max_spread_bps,
             cooldown_ms=int(payload.get("cooldown_ms") or 1500),
@@ -4890,6 +4907,7 @@ class CoordinatorApp:
             depth_safety_factor=float(payload.get("depth_safety_factor") or 0.7),
             agent_a=agent_a,
             agent_b=agent_b,
+            qty_scale=qty_scale,
         )
 
         async with self._bp_dual_volume_lock:
@@ -4999,7 +5017,10 @@ class CoordinatorApp:
 
             cap_qty = min(bid1_qty, ask1_qty)
             safe_qty = cap_qty * Decimal(str(max(0.0, min(cfg.depth_safety_factor, 1.0))))
-            qty_exec = min(cfg.qty_per_cycle, safe_qty)
+            qty_cycle = Decimal(str(random.uniform(float(cfg.qty_per_cycle_min), float(cfg.qty_per_cycle_max))))
+            if cfg.qty_scale >= 0:
+                qty_cycle = qty_cycle.quantize(Decimal("1e-%d" % cfg.qty_scale))
+            qty_exec = min(qty_cycle, safe_qty)
 
             async with self._bp_dual_volume_lock:
                 if self._bp_dual_volume.run_id == run_id:
@@ -5009,12 +5030,12 @@ class CoordinatorApp:
                     self._bp_dual_volume.last_spread_bps = spread_bps
                     self._bp_dual_volume.last_qty_exec = str(qty_exec)
 
-            if cap_qty < (cfg.qty_per_cycle * Decimal("2")):
+            if cap_qty < (cfg.qty_per_cycle_max * Decimal("2")):
                 async with self._bp_dual_volume_lock:
                     if self._bp_dual_volume.run_id == run_id:
                         self._bp_dual_volume.last_gate = "waiting_depth"
                         self._bp_dual_volume.last_note = (
-                            f"waiting_depth: cap_qty={cap_qty} < 2*qty_per_cycle={cfg.qty_per_cycle * Decimal('2')}"
+                            f"waiting_depth: cap_qty={cap_qty} < 2*qty_per_cycle_max={cfg.qty_per_cycle_max * Decimal('2')}"
                         )
                 await asyncio.sleep(0.25)
                 continue
@@ -5122,8 +5143,8 @@ class CoordinatorApp:
 
             try:
                 if phase == "build":
-                    qty_a = min(cfg.qty_per_cycle, max(cfg.target_position - abs_a, Decimal("0")))
-                    qty_b = min(cfg.qty_per_cycle, max(cfg.target_position - abs_b, Decimal("0")))
+                    qty_a = min(qty_cycle, max(cfg.target_position - abs_a, Decimal("0")))
+                    qty_b = min(qty_cycle, max(cfg.target_position - abs_b, Decimal("0")))
                     if qty_a <= 0 and qty_b <= 0:
                         async with self._bp_dual_volume_lock:
                             if self._bp_dual_volume.run_id == run_id:
@@ -5136,8 +5157,8 @@ class CoordinatorApp:
                     )
                     action_note = f"build long/short qty={qty_a}/{qty_b}"
                 else:
-                    qty_a = min(cfg.qty_per_cycle, abs_a) if abs_a > 0 else Decimal("0")
-                    qty_b = min(cfg.qty_per_cycle, abs_b) if abs_b > 0 else Decimal("0")
+                    qty_a = min(qty_cycle, abs_a) if abs_a > 0 else Decimal("0")
+                    qty_b = min(qty_cycle, abs_b) if abs_b > 0 else Decimal("0")
                     if qty_a <= 0 and qty_b <= 0:
                         async with self._bp_dual_volume_lock:
                             if self._bp_dual_volume.run_id == run_id:
@@ -7975,7 +7996,8 @@ class CoordinatorApp:
             ),
             "config": {
                 "symbol": cfg.symbol,
-                "qty_per_cycle": str(cfg.qty_per_cycle),
+                "qty_per_cycle_min": str(cfg.qty_per_cycle_min),
+                "qty_per_cycle_max": str(cfg.qty_per_cycle_max),
                 "target_position": str(cfg.target_position),
                 "max_spread_bps": cfg.max_spread_bps,
                 "cooldown_ms": cfg.cooldown_ms,
