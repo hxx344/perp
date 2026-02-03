@@ -3832,8 +3832,8 @@ class CoordinatorApp:
         # Backpack dual-account volume booster (single runner).
         self._bp_dual_volume = BackpackDualVolumeState()
         self._bp_dual_volume_lock = asyncio.Lock()
-    self._bp_ws_clients: Dict[str, Set[web.WebSocketResponse]] = defaultdict(set)
-    self._bp_ws_lock = asyncio.Lock()
+        self._bp_ws_clients: Dict[str, Set[web.WebSocketResponse]] = defaultdict(set)
+        self._bp_ws_lock = asyncio.Lock()
 
         # Persisted per-symbol history for the Backpack volume panel.
         # Shape: {"SYMBOL": {"updated_at": ms, "summary": {...}, "recent": [...]}}
