@@ -12231,8 +12231,9 @@
           return;
         }
 
-        const grvtMap = data?.grvt_accounts ?? {};
-        const entries = Object.entries(grvtMap);
+  const grvtMap = data?.grvt_accounts ?? {};
+  const entries = Object.entries(grvtMap);
+  const nowSec = Date.now() / 1000;
         const symbolCandidates = new Set();
         const instrumentList = Array.isArray(data?.instruments) ? data.instruments : [];
         for (const instrument of instrumentList) {
