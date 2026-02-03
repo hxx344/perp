@@ -4953,6 +4953,7 @@ class CoordinatorApp:
                 if not state.running or state.run_id != run_id:
                     return
                 cfg = copy.deepcopy(state.cfg)
+                prev_phase = state.phase
 
             symbol = str(getattr(cfg, "symbol", "") or "").strip()
             if not symbol:
@@ -5083,8 +5084,15 @@ class CoordinatorApp:
             )
 
             max_abs = max(abs_a, abs_b)
-            phase = "reduce" if (mismatch or (max_abs >= cfg.target_position)) else "build"
-            if abs_a <= 0 and abs_b <= 0:
+            should_reduce = mismatch or (max_abs >= cfg.target_position)
+            still_has_position = (abs_a > 0) or (abs_b > 0)
+            if prev_phase == "reduce" and still_has_position:
+                phase = "reduce"
+            elif should_reduce:
+                phase = "reduce"
+            else:
+                phase = "build"
+            if not still_has_position:
                 phase = "build"
 
             async with self._bp_dual_volume_lock:
