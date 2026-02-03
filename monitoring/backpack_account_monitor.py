@@ -848,7 +848,11 @@ class BackpackAccountMonitor:
         method = getattr(self._client, "place_market_order", None)
         if not callable(method):
             raise RuntimeError("Backpack client is missing place_market_order")
-        return method(symbol=symbol, side=side, quantity=quantity)
+        try:
+            return method(symbol=symbol, side=side, quantity=quantity)
+        except TypeError:
+            # BackpackClient in this repo expects (contract_id, quantity, direction)
+            return method(symbol, quantity, side)
 
     def _internal_transfer(
         self,
