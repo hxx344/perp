@@ -21,6 +21,7 @@ wire `_place_twap_order()` and `_poll_twap_progress()` similar to Paradex.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import concurrent.futures
 import json
 import logging
@@ -848,11 +849,17 @@ class BackpackAccountMonitor:
         method = getattr(self._client, "place_market_order", None)
         if not callable(method):
             raise RuntimeError("Backpack client is missing place_market_order")
-        try:
-            return method(symbol=symbol, side=side, quantity=quantity)
-        except TypeError:
-            # BackpackClient in this repo expects (contract_id, quantity, direction)
-            return method(symbol, quantity, side)
+        def _invoke() -> Any:
+            try:
+                return method(symbol=symbol, side=side, quantity=quantity)
+            except TypeError:
+                # BackpackClient in this repo expects (contract_id, quantity, direction)
+                return method(symbol, quantity, side)
+
+        result = _invoke()
+        if asyncio.iscoroutine(result):
+            return asyncio.run(result)
+        return result
 
     def _internal_transfer(
         self,
