@@ -437,6 +437,41 @@ class BackpackVolumeMultiState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
+@dataclass
+class BackpackDualVolumeConfig:
+    symbol: str = ""
+    qty_per_cycle: Decimal = Decimal("0")
+    target_position: Decimal = Decimal("0")
+    max_spread_bps: float = 0.0
+    cooldown_ms: int = 1500
+    cooldown_ms_min: int = 0
+    cooldown_ms_max: int = 0
+    depth_safety_factor: float = 0.7
+    agent_a: str = ""
+    agent_b: str = ""
+
+
+@dataclass
+class BackpackDualVolumeState:
+    running: bool = False
+    run_id: str = ""
+    started_at: Optional[float] = None
+    last_error: str = ""
+    last_note: str = ""
+    last_gate: str = ""
+    last_bid1: str = ""
+    last_ask1: str = ""
+    last_cap_qty: str = ""
+    last_spread_bps: Optional[float] = None
+    last_qty_exec: str = ""
+    phase: str = "build"
+    last_action_at: Optional[float] = None
+    last_action: str = ""
+    last_positions: Dict[str, Any] = field(default_factory=dict)
+    cfg: BackpackDualVolumeConfig = field(default_factory=BackpackDualVolumeConfig)
+    task: Optional[asyncio.Task] = None
+
+
 
 def _env_debug(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
@@ -3793,6 +3828,10 @@ class CoordinatorApp:
         # Backpack volume booster state (multi-runner, keyed by symbol).
         self._bp_volume = BackpackVolumeMultiState()
 
+        # Backpack dual-account volume booster (single runner).
+        self._bp_dual_volume = BackpackDualVolumeState()
+        self._bp_dual_volume_lock = asyncio.Lock()
+
         # Persisted per-symbol history for the Backpack volume panel.
         # Shape: {"SYMBOL": {"updated_at": ms, "summary": {...}, "recent": [...]}}
         self._bp_volume_history: Dict[str, Dict[str, Any]] = {}
@@ -3859,6 +3898,11 @@ class CoordinatorApp:
                 web.get("/api/backpack/volume/status", self.handle_bp_volume_status),
                 web.get("/api/backpack/volume/metrics", self.handle_bp_volume_metrics),
                 web.post("/api/backpack/volume/history/clear", self.handle_bp_volume_history_clear),
+
+                # Backpack dual-account volume booster
+                web.get("/api/backpack/dual_volume/status", self.handle_bp_dual_volume_status),
+                web.post("/api/backpack/dual_volume/start", self.handle_bp_dual_volume_start),
+                web.post("/api/backpack/dual_volume/stop", self.handle_bp_dual_volume_stop),
 
                 # Backpack BBO preview (L1 bid/ask + capacity + estimated wear)
                 web.get("/api/backpack/bbo", self.handle_bp_bbo_preview),
@@ -4539,6 +4583,18 @@ class CoordinatorApp:
             with suppress(Exception):
                 await task
 
+        # Stop backpack dual-volume task if running.
+        dual_task: Optional[asyncio.Task] = None
+        async with self._bp_dual_volume_lock:
+            if self._bp_dual_volume.task:
+                self._bp_dual_volume.running = False
+                dual_task = self._bp_dual_volume.task
+                self._bp_dual_volume.task = None
+        if dual_task:
+            dual_task.cancel()
+            with suppress(Exception):
+                await dual_task
+
         # Best-effort persist.
         with suppress(Exception):
             self._save_bp_volume_history()
@@ -4766,6 +4822,338 @@ class CoordinatorApp:
             self._bp_volume_history.pop(symbol, None)
             self._save_bp_volume_history()
         return web.json_response({"ok": True, "symbol": symbol})
+
+    async def handle_bp_dual_volume_status(self, request: web.Request) -> web.Response:
+        del request
+        async with self._bp_dual_volume_lock:
+            payload = self._bp_dual_volume_status_payload()
+        return web.json_response({"ok": True, **payload})
+
+    async def handle_bp_dual_volume_start(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        symbol = str(payload.get("symbol") or "").strip()
+        if not symbol:
+            return web.json_response({"ok": False, "error": "symbol required"}, status=400)
+
+        qty_per_cycle = _decimal(payload.get("qty_per_cycle"), "0")
+        target_position = _decimal(payload.get("target_position"), "0")
+        max_spread_bps = float(payload.get("max_spread_bps") or 0.0)
+
+        if qty_per_cycle <= 0:
+            return web.json_response({"ok": False, "error": "qty_per_cycle must be > 0"}, status=400)
+        if target_position <= 0:
+            return web.json_response({"ok": False, "error": "target_position must be > 0"}, status=400)
+        if max_spread_bps <= 0:
+            return web.json_response({"ok": False, "error": "max_spread_bps must be > 0"}, status=400)
+
+        agent_a = str(payload.get("agent_a") or "").strip()
+        agent_b = str(payload.get("agent_b") or "").strip()
+
+        if not agent_a or not agent_b:
+            cfg = self._bp_auto_balance_cfg
+            if cfg:
+                agent_a = agent_a or cfg.agent_a
+                agent_b = agent_b or cfg.agent_b
+
+        if not agent_a or not agent_b:
+            return web.json_response({"ok": False, "error": "agent_a/agent_b required"}, status=400)
+        if agent_a == agent_b:
+            return web.json_response({"ok": False, "error": "agent_a and agent_b must differ"}, status=400)
+
+        cfg = BackpackDualVolumeConfig(
+            symbol=symbol.strip().upper(),
+            qty_per_cycle=qty_per_cycle,
+            target_position=target_position,
+            max_spread_bps=max_spread_bps,
+            cooldown_ms=int(payload.get("cooldown_ms") or 1500),
+            cooldown_ms_min=int(payload.get("cooldown_ms_min") or 0),
+            cooldown_ms_max=int(payload.get("cooldown_ms_max") or 0),
+            depth_safety_factor=float(payload.get("depth_safety_factor") or 0.7),
+            agent_a=agent_a,
+            agent_b=agent_b,
+        )
+
+        async with self._bp_dual_volume_lock:
+            state = self._bp_dual_volume
+            if state.running and state.task:
+                return web.json_response({"ok": True, "running": True, "run_id": state.run_id})
+            state.running = True
+            state.run_id = uuid.uuid4().hex
+            state.started_at = _now_ts()
+            state.last_error = ""
+            state.last_note = ""
+            state.last_gate = ""
+            state.last_action_at = None
+            state.last_action = ""
+            state.phase = "build"
+            state.last_positions = {}
+            state.cfg = cfg
+            state.task = asyncio.create_task(self._bp_dual_volume_runner(state.run_id))
+
+        return web.json_response({"ok": True, "running": True, "run_id": self._bp_dual_volume.run_id})
+
+    async def handle_bp_dual_volume_stop(self, request: web.Request) -> web.Response:
+        del request
+        task: Optional[asyncio.Task] = None
+        async with self._bp_dual_volume_lock:
+            if self._bp_dual_volume.task:
+                self._bp_dual_volume.running = False
+                task = self._bp_dual_volume.task
+                self._bp_dual_volume.task = None
+        if task:
+            task.cancel()
+        return web.json_response({"ok": True, "running": False})
+
+    async def _bp_dual_volume_runner(self, run_id: str) -> None:
+        consecutive_failures = 0
+        last_cycle_at: float = 0.0
+
+        while True:
+            async with self._bp_dual_volume_lock:
+                state = self._bp_dual_volume
+                if not state.running or state.run_id != run_id:
+                    return
+                cfg = copy.deepcopy(state.cfg)
+
+            symbol = str(getattr(cfg, "symbol", "") or "").strip()
+            if not symbol:
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_error = "cycle_failed: invalid symbol"
+                        self._bp_dual_volume.running = False
+                return
+
+            # Cooldown scheduling (same logic as single volume runner).
+            cooldown_s = 0.0
+            try:
+                mn = int(getattr(cfg, "cooldown_ms_min", 0) or 0)
+                mx = int(getattr(cfg, "cooldown_ms_max", 0) or 0)
+                if mx > 0:
+                    if mn < 0:
+                        mn = 0
+                    if mx < mn:
+                        mx = mn
+                    cooldown_ms = random.randint(mn, mx)
+                    cooldown_s = max(0.0, float(cooldown_ms) / 1000.0)
+                else:
+                    cooldown_s = max(0.0, float(cfg.cooldown_ms) / 1000.0)
+            except Exception:
+                cooldown_s = max(0.0, float(cfg.cooldown_ms) / 1000.0)
+            now = _now_ts()
+            if last_cycle_at and (now - last_cycle_at) < cooldown_s:
+                await asyncio.sleep(min(0.25, cooldown_s))
+                continue
+
+            # Fetch L1 (WS-only).
+            quote: Optional[Tuple[Decimal, Decimal, Decimal, Decimal]] = None
+            if getattr(self, "_bp_bbo_ws", None) is not None:
+                with suppress(Exception):
+                    quote = await self._bp_bbo_ws.get_quote(symbol)  # type: ignore[union-attr]
+            if not quote:
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_gate = "bbo_ws_warming_up"
+                        self._bp_dual_volume.last_note = f"waiting_ws_bbo: symbol={symbol}"
+                await asyncio.sleep(0.25)
+                continue
+
+            bid1, bid1_qty, ask1, ask1_qty = quote
+            if bid1 <= 0 or ask1 <= 0:
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_gate = "invalid_l1"
+                        self._bp_dual_volume.last_bid1 = str(bid1)
+                        self._bp_dual_volume.last_ask1 = str(ask1)
+                await asyncio.sleep(0.5)
+                continue
+
+            mid = (bid1 + ask1) / Decimal("2")
+            spread_abs = ask1 - bid1
+            spread_bps = 0.0
+            try:
+                if mid > 0:
+                    spread_bps = float((spread_abs / mid) * Decimal("10000"))
+            except Exception:
+                spread_bps = 0.0
+
+            cap_qty = min(bid1_qty, ask1_qty)
+            safe_qty = cap_qty * Decimal(str(max(0.0, min(cfg.depth_safety_factor, 1.0))))
+            qty_exec = min(cfg.qty_per_cycle, safe_qty)
+
+            async with self._bp_dual_volume_lock:
+                if self._bp_dual_volume.run_id == run_id:
+                    self._bp_dual_volume.last_bid1 = str(bid1)
+                    self._bp_dual_volume.last_ask1 = str(ask1)
+                    self._bp_dual_volume.last_cap_qty = str(cap_qty)
+                    self._bp_dual_volume.last_spread_bps = spread_bps
+                    self._bp_dual_volume.last_qty_exec = str(qty_exec)
+
+            if cap_qty < (cfg.qty_per_cycle * Decimal("2")):
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_gate = "waiting_depth"
+                        self._bp_dual_volume.last_note = (
+                            f"waiting_depth: cap_qty={cap_qty} < 2*qty_per_cycle={cfg.qty_per_cycle * Decimal('2')}"
+                        )
+                await asyncio.sleep(0.25)
+                continue
+
+            # Position snapshot
+            try:
+                snapshot = await self._coordinator.snapshot()
+            except Exception as exc:
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_gate = "snapshot"
+                        self._bp_dual_volume.last_note = f"snapshot_failed: {exc}"
+                await asyncio.sleep(0.5)
+                continue
+
+            agents_block = snapshot.get("agents") if isinstance(snapshot, dict) else None
+            if not isinstance(agents_block, dict):
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_gate = "no_agents"
+                        self._bp_dual_volume.last_note = "missing agents snapshot"
+                await asyncio.sleep(0.5)
+                continue
+
+            entry_a = agents_block.get(cfg.agent_a)
+            entry_b = agents_block.get(cfg.agent_b)
+            if not isinstance(entry_a, dict) or not isinstance(entry_b, dict):
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_gate = "missing_agent"
+                        self._bp_dual_volume.last_note = f"missing agent snapshot: {cfg.agent_a}/{cfg.agent_b}"
+                await asyncio.sleep(0.5)
+                continue
+
+            side_a, abs_a = self._extract_bp_position_for_agent(entry_a, symbol=symbol)
+            side_b, abs_b = self._extract_bp_position_for_agent(entry_b, symbol=symbol)
+            abs_a = abs_a or Decimal("0")
+            abs_b = abs_b or Decimal("0")
+
+            desired_a = "long"
+            desired_b = "short"
+            mismatch = (
+                (side_a is not None and side_a != desired_a and abs_a > 0)
+                or (side_b is not None and side_b != desired_b and abs_b > 0)
+            )
+
+            max_abs = max(abs_a, abs_b)
+            phase = "reduce" if (mismatch or (max_abs >= cfg.target_position)) else "build"
+            if abs_a <= 0 and abs_b <= 0:
+                phase = "build"
+
+            async with self._bp_dual_volume_lock:
+                if self._bp_dual_volume.run_id == run_id:
+                    self._bp_dual_volume.phase = phase
+                    self._bp_dual_volume.last_positions = {
+                        "agent_a": {"agent_id": cfg.agent_a, "side": side_a, "abs_qty": str(abs_a)},
+                        "agent_b": {"agent_id": cfg.agent_b, "side": side_b, "abs_qty": str(abs_b)},
+                    }
+
+            if spread_bps <= 0 or spread_bps > cfg.max_spread_bps:
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_gate = "spread"
+                await asyncio.sleep(0.25)
+                continue
+
+            if qty_exec <= 0:
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_gate = "qty_exec"
+                await asyncio.sleep(0.25)
+                continue
+
+            async def _enqueue(agent_id: str, action: str, qty: Decimal, side_override: Optional[str] = None) -> None:
+                if qty <= 0:
+                    return
+                payload_dict: Dict[str, Any] = {"order_mode": "market"}
+                if side_override:
+                    payload_dict["side"] = side_override
+                adj = self._backpack_adjustments.create(
+                    agent_id=agent_id,
+                    action=action,
+                    magnitude=qty,
+                    symbols=[symbol],
+                    payload=payload_dict,
+                )
+                entry: Dict[str, Any] = {
+                    "request_id": adj.request_id,
+                    "created_at": getattr(adj, "created_at", None),
+                    "action": action,
+                    "magnitude": str(qty),
+                    "target_symbols": [symbol],
+                    "symbols": [symbol],
+                    "agent_id": agent_id,
+                    "overall_status": "pending",
+                    "status": "pending",
+                    "agents": [],
+                    "payload": payload_dict,
+                }
+                self._bp_adjustments_history.insert(0, entry)
+                if len(self._bp_adjustments_history) > self._bp_adjustments_history_limit:
+                    self._bp_adjustments_history = self._bp_adjustments_history[: self._bp_adjustments_history_limit]
+                _atomic_write_json(BP_ADJUSTMENTS_HISTORY_FILE, self._bp_adjustments_history)
+
+            try:
+                if phase == "build":
+                    qty_a = min(cfg.qty_per_cycle, max(cfg.target_position - abs_a, Decimal("0")))
+                    qty_b = min(cfg.qty_per_cycle, max(cfg.target_position - abs_b, Decimal("0")))
+                    if qty_a <= 0 and qty_b <= 0:
+                        async with self._bp_dual_volume_lock:
+                            if self._bp_dual_volume.run_id == run_id:
+                                self._bp_dual_volume.last_note = "target reached; waiting to reduce"
+                        await asyncio.sleep(0.25)
+                        continue
+                    await asyncio.gather(
+                        _enqueue(cfg.agent_a, "add", qty_a, "buy"),
+                        _enqueue(cfg.agent_b, "add", qty_b, "sell"),
+                    )
+                    action_note = f"build long/short qty={qty_a}/{qty_b}"
+                else:
+                    qty_a = min(cfg.qty_per_cycle, abs_a) if abs_a > 0 else Decimal("0")
+                    qty_b = min(cfg.qty_per_cycle, abs_b) if abs_b > 0 else Decimal("0")
+                    if qty_a <= 0 and qty_b <= 0:
+                        async with self._bp_dual_volume_lock:
+                            if self._bp_dual_volume.run_id == run_id:
+                                self._bp_dual_volume.last_note = "positions flat; waiting to build"
+                        await asyncio.sleep(0.25)
+                        continue
+                    await asyncio.gather(
+                        _enqueue(cfg.agent_a, "reduce", qty_a),
+                        _enqueue(cfg.agent_b, "reduce", qty_b),
+                    )
+                    action_note = f"reduce qty={qty_a}/{qty_b}"
+
+                consecutive_failures = 0
+                last_cycle_at = _now_ts()
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_gate = "executed"
+                        self._bp_dual_volume.last_note = action_note
+                        self._bp_dual_volume.last_action_at = last_cycle_at
+                        self._bp_dual_volume.last_action = action_note
+            except Exception as exc:
+                consecutive_failures += 1
+                async with self._bp_dual_volume_lock:
+                    if self._bp_dual_volume.run_id == run_id:
+                        self._bp_dual_volume.last_error = f"cycle_failed: {exc}"
+                        self._bp_dual_volume.last_gate = "cycle_failed"
+                        if consecutive_failures >= 3:
+                            self._bp_dual_volume.running = False
+                await asyncio.sleep(0.5)
+                continue
+
+            await asyncio.sleep(0)
 
     async def handle_bp_volume_start(self, request: web.Request) -> web.Response:
         if BackpackClient is None:
@@ -7340,6 +7728,87 @@ class CoordinatorApp:
             if value is not None:
                 return value
         return None
+
+    @staticmethod
+    def _normalize_bp_position_symbol(raw: str) -> str:
+        text = str(raw or "").strip().upper()
+        if not text:
+            return text
+        return text.replace("_", "-")
+
+    def _extract_bp_position_for_agent(
+        self,
+        agent_payload: Dict[str, Any],
+        *,
+        symbol: str,
+    ) -> Tuple[Optional[str], Optional[Decimal]]:
+        bp_block = agent_payload.get("backpack_accounts") if isinstance(agent_payload, dict) else None
+        if not isinstance(bp_block, dict):
+            return (None, None)
+        positions = bp_block.get("positions")
+        if not isinstance(positions, list):
+            return (None, None)
+        wanted = self._normalize_bp_position_symbol(symbol)
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            sym = pos.get("symbol") or pos.get("market") or pos.get("marketSymbol")
+            if not sym:
+                continue
+            if self._normalize_bp_position_symbol(sym) != wanted:
+                continue
+            signed_qty = (
+                HedgeCoordinator._decimal_from(pos.get("quantity"))
+                or HedgeCoordinator._decimal_from(pos.get("position"))
+                or HedgeCoordinator._decimal_from(pos.get("size"))
+                or HedgeCoordinator._decimal_from(pos.get("positionSize"))
+                or HedgeCoordinator._decimal_from(pos.get("basePosition"))
+                or HedgeCoordinator._decimal_from(pos.get("netQuantity"))
+                or HedgeCoordinator._decimal_from(pos.get("net_position"))
+            )
+            if signed_qty is not None and signed_qty != 0:
+                return ("long" if signed_qty > 0 else "short", abs(signed_qty))
+            direction = str(pos.get("side") or pos.get("direction") or pos.get("positionSide") or "").strip().lower()
+            if direction in {"long", "buy"}:
+                abs_qty = HedgeCoordinator._decimal_from(pos.get("quantity")) or HedgeCoordinator._decimal_from(pos.get("size"))
+                return ("long", abs(abs_qty) if abs_qty is not None else None)
+            if direction in {"short", "sell"}:
+                abs_qty = HedgeCoordinator._decimal_from(pos.get("quantity")) or HedgeCoordinator._decimal_from(pos.get("size"))
+                return ("short", abs(abs_qty) if abs_qty is not None else None)
+        return (None, None)
+
+    def _bp_dual_volume_status_payload(self) -> Dict[str, Any]:
+        state = self._bp_dual_volume
+        cfg = state.cfg
+        return {
+            "running": bool(state.running),
+            "run_id": state.run_id,
+            "started_at": state.started_at,
+            "last_error": state.last_error,
+            "last_note": state.last_note,
+            "last_gate": state.last_gate,
+            "last_bid1": state.last_bid1,
+            "last_ask1": state.last_ask1,
+            "last_cap_qty": state.last_cap_qty,
+            "last_spread_bps": state.last_spread_bps,
+            "last_qty_exec": state.last_qty_exec,
+            "phase": state.phase,
+            "last_action_at": state.last_action_at,
+            "last_action": state.last_action,
+            "last_positions": copy.deepcopy(state.last_positions),
+            "config": {
+                "symbol": cfg.symbol,
+                "qty_per_cycle": str(cfg.qty_per_cycle),
+                "target_position": str(cfg.target_position),
+                "max_spread_bps": cfg.max_spread_bps,
+                "cooldown_ms": cfg.cooldown_ms,
+                "cooldown_ms_min": cfg.cooldown_ms_min,
+                "cooldown_ms_max": cfg.cooldown_ms_max,
+                "depth_safety_factor": cfg.depth_safety_factor,
+                "agent_a": cfg.agent_a,
+                "agent_b": cfg.agent_b,
+            },
+        }
 
     def _extract_equity_from_agent(self, agent_payload: Dict[str, Any], *, prefer_available: bool) -> Optional[Decimal]:
         grvt_block = agent_payload.get("grvt_accounts")

@@ -3071,6 +3071,60 @@
             </table>
           </div>
         </article>
+
+        <article class="card" style="grid-column: 1 / -1;">
+          <div style="display:flex; align-items:flex-start; justify-content:space-between; gap: 1rem; flex-wrap: wrap;">
+            <div>
+              <h2 style="margin:0;">Backpack 双号刷量</h2>
+              <p class="summary-sub" style="margin: .35rem 0 0;">价差小于阈值时，A 做多 / B 做空，达到目标持仓后减仓到 0 再循环</p>
+            </div>
+            <span class="badge badge-muted" id="bp-dual-volume-running">stopped</span>
+          </div>
+
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: .75rem; margin-top: 1rem;">
+            <label>
+              交易对
+              <select id="bp-dual-volume-symbol"></select>
+            </label>
+            <label>
+              单次开/减仓（base qty）
+              <input type="number" id="bp-dual-volume-qty" min="0" step="0.001" value="0.2" />
+            </label>
+            <label>
+              目标持仓量（绝对值）
+              <input type="number" id="bp-dual-volume-target" min="0" step="0.001" value="1" />
+            </label>
+            <label>
+              差价阈值（bps）
+              <input type="number" id="bp-dual-volume-max-spread-bps" min="0" step="0.1" value="2" />
+            </label>
+            <label>
+              随机间隔最小值（ms）
+              <input type="number" id="bp-dual-volume-cooldown-min" min="0" step="1" value="0" />
+            </label>
+            <label>
+              随机间隔最大值（ms）
+              <input type="number" id="bp-dual-volume-cooldown-max" min="0" step="1" value="0" />
+            </label>
+          </div>
+
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; margin-top: 0.85rem;">
+            <label>
+              账号 A（做多）
+              <select id="bp-dual-volume-agent-a"></select>
+            </label>
+            <label>
+              账号 B（做空）
+              <select id="bp-dual-volume-agent-b"></select>
+            </label>
+          </div>
+
+          <div style="display:flex; gap:.75rem; align-items:center; margin-top: 1rem; flex-wrap: wrap;">
+            <button type="button" class="button-success" id="bp-dual-volume-start">启动</button>
+            <button type="button" class="button-danger" id="bp-dual-volume-stop">停止</button>
+            <p class="summary-sub" id="bp-dual-volume-status" style="margin:0;">等待配置…</p>
+          </div>
+        </article>
       </section>
     </section>
 
@@ -3134,6 +3188,20 @@
   const bpBboQty = document.getElementById('bp-bbo-qty');
   const bpBboWear = document.getElementById('bp-bbo-wear');
   const bpBboWearMeta = document.getElementById('bp-bbo-wear-meta');
+
+  // Backpack dual-volume controls
+  const bpDualSymbolSelect = document.getElementById('bp-dual-volume-symbol');
+  const bpDualQtyInput = document.getElementById('bp-dual-volume-qty');
+  const bpDualTargetInput = document.getElementById('bp-dual-volume-target');
+  const bpDualSpreadInput = document.getElementById('bp-dual-volume-max-spread-bps');
+  const bpDualCooldownMinInput = document.getElementById('bp-dual-volume-cooldown-min');
+  const bpDualCooldownMaxInput = document.getElementById('bp-dual-volume-cooldown-max');
+  const bpDualAgentASelect = document.getElementById('bp-dual-volume-agent-a');
+  const bpDualAgentBSelect = document.getElementById('bp-dual-volume-agent-b');
+  const bpDualStartBtn = document.getElementById('bp-dual-volume-start');
+  const bpDualStopBtn = document.getElementById('bp-dual-volume-stop');
+  const bpDualStatus = document.getElementById('bp-dual-volume-status');
+  const bpDualRunning = document.getElementById('bp-dual-volume-running');
 
     function bpFormatNumber(value, decimals = 2) {
       const num = Number(value);
@@ -3555,27 +3623,31 @@
       try {
         const data = await bpFetchJson('/api/backpack/volume/markets');
         const markets = Array.isArray(data.markets) ? data.markets : [];
-        bpSymbolSelect.innerHTML = '';
-        for (const sym of markets) {
-          const opt = document.createElement('option');
-          opt.value = sym;
-          opt.textContent = sym;
-          bpSymbolSelect.appendChild(opt);
-        }
-        if (markets.length === 0) {
-          const opt = document.createElement('option');
-          opt.value = '';
-          opt.textContent = 'No PERP markets';
-          bpSymbolSelect.appendChild(opt);
+        const selects = [bpSymbolSelect, bpDualSymbolSelect].filter(Boolean);
+        for (const select of selects) {
+          select.innerHTML = '';
+          for (const sym of markets) {
+            const opt = document.createElement('option');
+            opt.value = sym;
+            opt.textContent = sym;
+            select.appendChild(opt);
+          }
+          if (markets.length === 0) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'No PERP markets';
+            select.appendChild(opt);
+          }
         }
       } catch (e) {
         bpStatus.textContent = `市场加载失败：${e.message}`;
-        if (bpSymbolSelect) {
-          bpSymbolSelect.innerHTML = '';
+        const selects = [bpSymbolSelect, bpDualSymbolSelect].filter(Boolean);
+        for (const select of selects) {
+          select.innerHTML = '';
           const opt = document.createElement('option');
           opt.value = '';
           opt.textContent = 'Markets load failed (check server logs)';
-          bpSymbolSelect.appendChild(opt);
+          select.appendChild(opt);
         }
       }
     }
@@ -3714,15 +3786,15 @@
         bpSetStatusLine({ baseText, liveSym: '', viewingSym: viewingSymbol, cacheHint: '' });
       }
 
-  // Always refresh BBO preview (shows when switching symbol even if not running).
-  await bpRefreshBboPreview();
+    // Always refresh BBO preview (shows when switching symbol even if not running).
+    await bpRefreshBboPreview();
 
       try {
-  const metrics = await bpFetchJson(`/api/backpack/volume/metrics?symbol=${encodeURIComponent(viewingSymbol || '')}`);
+    const metrics = await bpFetchJson(`/api/backpack/volume/metrics?symbol=${encodeURIComponent(viewingSymbol || '')}`);
         const liveSym = bpPickLiveSymbol(statusPayload, metrics);
 
-  // Backend now persists per-symbol history to disk; avoid localStorage writes to prevent
-  // "clear then refresh" from immediately repopulating client cache.
+    // Backend now persists per-symbol history to disk; avoid localStorage writes to prevent
+    // "clear then refresh" from immediately repopulating client cache.
 
         // Only update the visible cards/table if the user is viewing the same symbol as live.
         if (!viewingSymbol || (liveSym && liveSym === viewingSymbol)) {
@@ -3734,6 +3806,77 @@
       } catch (e) {
         bpShowNoCache(viewingSymbol);
         bpStatus.textContent = `指标获取失败：${e.message}`;
+      }
+
+      // Dual-volume status refresh (separate card).
+      await bpRefreshDualVolumeStatus();
+    }
+
+    function bpApplyDualVolumeConfig(config, { markClean = false } = {}) {
+      if (!config) return;
+      const setValue = (element, value, fallback = '') => {
+        if (!element) return;
+        if (value === null || value === undefined || value === '') {
+          element.value = fallback;
+        } else {
+          element.value = value;
+        }
+      };
+      setValue(bpDualSymbolSelect, config.symbol, bpDualSymbolSelect?.value || '');
+      setValue(bpDualQtyInput, config.qty_per_cycle ?? config.qty, bpDualQtyInput?.value || '');
+      setValue(bpDualTargetInput, config.target_position ?? config.target, bpDualTargetInput?.value || '');
+      setValue(bpDualSpreadInput, config.max_spread_bps ?? config.spread_bps, bpDualSpreadInput?.value || '');
+      setValue(bpDualCooldownMinInput, config.cooldown_ms_min ?? config.cooldown_min_ms, bpDualCooldownMinInput?.value || '0');
+      setValue(bpDualCooldownMaxInput, config.cooldown_ms_max ?? config.cooldown_max_ms, bpDualCooldownMaxInput?.value || '0');
+      if (bpDualAgentASelect && config.agent_a) {
+        bpDualAgentASelect.value = config.agent_a;
+      }
+      if (bpDualAgentBSelect && config.agent_b) {
+        bpDualAgentBSelect.value = config.agent_b;
+      }
+      if (markClean) {
+        bpDualVolumeDirty = false;
+      }
+    }
+
+    function bpRenderDualVolumeStatus(status) {
+      if (!status) return;
+      const running = !!status.running;
+      if (bpDualRunning) {
+        bpDualRunning.textContent = running ? 'running' : 'stopped';
+        bpDualRunning.className = running ? 'badge badge-info' : 'badge badge-muted';
+      }
+      const err = status.last_error ? String(status.last_error) : '';
+      const note = status.last_note ? String(status.last_note) : '';
+      const phase = status.phase ? String(status.phase) : '';
+      const gate = status.last_gate ? String(status.last_gate) : '';
+      const spreadBps = Number(status.last_spread_bps);
+      const baseText = err
+        ? `错误：${err}`
+        : (note ? `提示：${note}` : (running ? '运行中' : '未运行'));
+      const meta = [];
+      if (phase) meta.push(`phase ${phase}`);
+      if (Number.isFinite(spreadBps)) meta.push(`spread ${bpFormatNumber(spreadBps, 2)}bps`);
+      if (gate) meta.push(`gate ${gate}`);
+      bpDualStatus.textContent = meta.length ? `${baseText} · ${meta.join(' · ')}` : baseText;
+    }
+
+    async function bpRefreshDualVolumeStatus({ force = false } = {}) {
+      try {
+        const data = await bpFetchJson('/api/backpack/dual_volume/status');
+        bpDualVolumeLastStatus = data;
+        bpRenderDualVolumeStatus(data);
+        if (data?.config && (force || !bpDualVolumeDirty)) {
+          bpApplyDualVolumeConfig(data.config, { markClean: true });
+        }
+      } catch (e) {
+        if (bpDualStatus) {
+          bpDualStatus.textContent = `双号刷量状态获取失败：${e.message}`;
+        }
+        if (bpDualRunning) {
+          bpDualRunning.textContent = 'unknown';
+          bpDualRunning.className = 'badge badge-muted';
+        }
       }
     }
 
@@ -3813,6 +3956,68 @@
         await bpRefresh();
       } catch (e) {
         bpStatus.textContent = `停止失败：${e.message}`;
+      }
+    });
+
+    const bpDualInputs = [
+      bpDualSymbolSelect,
+      bpDualQtyInput,
+      bpDualTargetInput,
+      bpDualSpreadInput,
+      bpDualCooldownMinInput,
+      bpDualCooldownMaxInput,
+      bpDualAgentASelect,
+      bpDualAgentBSelect,
+    ];
+    bpDualInputs.forEach((element) => {
+      if (!element) return;
+      element.addEventListener('change', () => markBpDualVolumeDirty());
+      element.addEventListener('input', () => markBpDualVolumeDirty());
+    });
+
+    bpDualStartBtn && bpDualStartBtn.addEventListener('click', async () => {
+      if (bpDualVolumeBusy) return;
+      bpDualVolumeBusy = true;
+      bpDualStatus.textContent = '启动中…';
+      try {
+        const body = {
+          symbol: bpDualSymbolSelect?.value || '',
+          qty_per_cycle: String(bpDualQtyInput?.value || '0'),
+          target_position: String(bpDualTargetInput?.value || '0'),
+          max_spread_bps: Number(bpDualSpreadInput?.value || '0'),
+          cooldown_ms: 1500,
+          cooldown_ms_min: Number(bpDualCooldownMinInput?.value || '0'),
+          cooldown_ms_max: Number(bpDualCooldownMaxInput?.value || '0'),
+          depth_safety_factor: 0.7,
+          agent_a: bpDualAgentASelect?.value || '',
+          agent_b: bpDualAgentBSelect?.value || '',
+        };
+        await bpFetchJson('/api/backpack/dual_volume/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        bpDualVolumeDirty = false;
+        await bpRefreshDualVolumeStatus({ force: true });
+      } catch (e) {
+        bpDualStatus.textContent = `启动失败：${e.message}`;
+      } finally {
+        bpDualVolumeBusy = false;
+      }
+    });
+
+    bpDualStopBtn && bpDualStopBtn.addEventListener('click', async () => {
+      if (bpDualVolumeBusy) return;
+      bpDualVolumeBusy = true;
+      bpDualStatus.textContent = '停止中…';
+      try {
+        await bpFetchJson('/api/backpack/dual_volume/stop', { method: 'POST' });
+        bpDualVolumeDirty = false;
+        await bpRefreshDualVolumeStatus({ force: true });
+      } catch (e) {
+        bpDualStatus.textContent = `停止失败：${e.message}`;
+      } finally {
+        bpDualVolumeBusy = false;
       }
     });
 
@@ -4278,6 +4483,9 @@
   let bpAutoBusy = false;
   let bpAutoDirty = false;
   let bpAutoLastConfig = null;
+  let bpDualVolumeLastStatus = null;
+  let bpDualVolumeDirty = false;
+  let bpDualVolumeBusy = false;
   let riskSettingsBusy = false;
   let paraRiskSettingsBusy = false;
   let riskSettingsDirty = false;
@@ -5504,6 +5712,10 @@
         }
       }
 
+      function markBpDualVolumeDirty() {
+        bpDualVolumeDirty = true;
+      }
+
       function renderAutoBalanceList(element, items, emptyLabel) {
         if (!element) {
           return;
@@ -5626,9 +5838,7 @@
       }
 
       function updateBpAutoBalanceAgentOptions(agentMap) {
-        if (!bpAutoAgentASelect || !bpAutoAgentBSelect) {
-          return;
-        }
+        const hasBpAuto = !!(bpAutoAgentASelect && bpAutoAgentBSelect);
         const entries = agentMap && typeof agentMap === 'object'
           ? Object.entries(agentMap)
           : [];
@@ -5670,13 +5880,26 @@
             select.value = '';
           }
         };
-        rebuild(bpAutoAgentASelect, bpAutoAgentASelect.value);
-        rebuild(bpAutoAgentBSelect, bpAutoAgentBSelect.value);
-        if (!bpAutoAgentASelect.value && bpAutoLastConfig?.agent_a && hasOption(bpAutoAgentASelect, bpAutoLastConfig.agent_a)) {
-          bpAutoAgentASelect.value = bpAutoLastConfig.agent_a;
+        if (hasBpAuto) {
+          rebuild(bpAutoAgentASelect, bpAutoAgentASelect.value);
+          rebuild(bpAutoAgentBSelect, bpAutoAgentBSelect.value);
+          if (!bpAutoAgentASelect.value && bpAutoLastConfig?.agent_a && hasOption(bpAutoAgentASelect, bpAutoLastConfig.agent_a)) {
+            bpAutoAgentASelect.value = bpAutoLastConfig.agent_a;
+          }
+          if (!bpAutoAgentBSelect.value && bpAutoLastConfig?.agent_b && hasOption(bpAutoAgentBSelect, bpAutoLastConfig.agent_b)) {
+            bpAutoAgentBSelect.value = bpAutoLastConfig.agent_b;
+          }
         }
-        if (!bpAutoAgentBSelect.value && bpAutoLastConfig?.agent_b && hasOption(bpAutoAgentBSelect, bpAutoLastConfig.agent_b)) {
-          bpAutoAgentBSelect.value = bpAutoLastConfig.agent_b;
+        if (bpDualAgentASelect || bpDualAgentBSelect) {
+          rebuild(bpDualAgentASelect, bpDualAgentASelect?.value);
+          rebuild(bpDualAgentBSelect, bpDualAgentBSelect?.value);
+          const dualCfg = bpDualVolumeLastStatus?.config;
+          if (!bpDualAgentASelect?.value && dualCfg?.agent_a && hasOption(bpDualAgentASelect, dualCfg.agent_a)) {
+            bpDualAgentASelect.value = dualCfg.agent_a;
+          }
+          if (!bpDualAgentBSelect?.value && dualCfg?.agent_b && hasOption(bpDualAgentBSelect, dualCfg.agent_b)) {
+            bpDualAgentBSelect.value = dualCfg.agent_b;
+          }
         }
       }
 

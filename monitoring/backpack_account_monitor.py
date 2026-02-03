@@ -555,10 +555,21 @@ class BackpackAccountMonitor:
             raw_positions = None
         pos_side, pos_abs_qty = _extract_position_side_and_qty(raw_positions, symbol)
 
-        if pos_side is None:
+        side_override_raw = payload_cfg.get("side") or payload_cfg.get("order_side") or payload_cfg.get("position_side")
+        side_override = str(side_override_raw or "").strip().lower()
+        if side_override in {"long", "buy"}:
+            side_override = "buy"
+        elif side_override in {"short", "sell"}:
+            side_override = "sell"
+        else:
+            side_override = ""
+
+        if pos_side is None and not side_override:
             raise ValueError(f"Unable to infer current position direction for {symbol}; refuse to guess side")
 
-        if action == "add":
+        if side_override:
+            side = side_override
+        elif action == "add":
             side = "buy" if pos_side == "long" else "sell"
         else:
             side = "sell" if pos_side == "long" else "buy"
