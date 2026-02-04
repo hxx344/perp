@@ -1885,19 +1885,13 @@
           </article>
           <article class="card grvt-summary-card">
             <h3>Avg Maint</h3>
-          <article class="card grvt-summary-card">
-            <h3>Avg Maint</h3>
-            <div class="value" id="grvt-avg-maint">--</div>
-            <p class="summary-sub">(Σ maint req / Σ equity)</p>
-          </article>
             <div class="value" id="para-avg-maint">--</div>
             <p class="summary-sub">(Σ maint req / Σ equity)</p>
-            <div class="value hidden" id="grvt-summary-time">--</div>
-            <p class="grvt-summary-updated hidden" id="grvt-summary-updated">Updated —</p>
-            <div class="summary-sub" id="grvt-source-updates"></div>
+          </article>
+          <article class="card grvt-summary-card">
             <h3>Last Update</h3>
-            <div class="value hidden" id="para-summary-time">--</div>
-            <p class="grvt-summary-updated hidden" id="para-summary-updated">Updated —</p>
+            <div class="value" id="para-summary-time">--</div>
+            <p class="grvt-summary-updated" id="para-summary-updated">Updated —</p>
             <div class="summary-sub" id="para-source-updates"></div>
           </article>
           <article class="card grvt-summary-card" id="para-reduce-suggestion-card">
@@ -2297,6 +2291,11 @@
             <p class="summary-sub" id="grvt-wallet-balance">Wallet --</p>
           </article>
           <article class="card grvt-summary-card">
+            <h3>持仓金额</h3>
+            <div class="value" id="grvt-total-position">--</div>
+            <p class="summary-sub">两个账号合计持仓名义金额</p>
+          </article>
+          <article class="card grvt-summary-card">
             <h3>风险基数</h3>
             <div class="value" id="grvt-transfer-total">--</div>
             <p class="summary-sub" id="grvt-transfer-note">Σ Equity - Σ 初始保证金</p>
@@ -2306,11 +2305,6 @@
             <div class="value risk-pill risk-pill-summary" id="grvt-risk-level">--</div>
             <p class="grvt-risk-detail" id="grvt-risk-detail">Awaiting data…</p>
           </article>
-          <article class="card grvt-summary-card">
-            <h3>Avg Maint</h3>
-            <div class="value" id="grvt-avg-maint">--</div>
-            <p class="summary-sub">(Σ maint req / Σ equity)</p>
-          </article>
           <article class="card grvt-summary-card" id="grvt-reduce-suggestion-card">
             <h3>减仓建议</h3>
             <div class="value" id="grvt-reduce-suggestion-main">--</div>
@@ -2318,8 +2312,8 @@
           </article>
           <article class="card grvt-summary-card">
             <h3>Last Update</h3>
-            <div class="value hidden" id="grvt-summary-time">--</div>
-            <p class="grvt-summary-updated hidden" id="grvt-summary-updated">Updated —</p>
+            <div class="value" id="grvt-summary-time">--</div>
+            <p class="grvt-summary-updated" id="grvt-summary-updated">Updated —</p>
             <div class="summary-sub" id="grvt-source-updates"></div>
           </article>
         </div>
@@ -4114,6 +4108,7 @@
   const grvtCard = document.getElementById('grvt-card');
   const grvtTotalPnl = document.getElementById('grvt-total-pnl');
   const grvtTotalEquity = document.getElementById('grvt-total-equity');
+  const grvtTotalPosition = document.getElementById('grvt-total-position');
   const grvtWalletBalance = document.getElementById('grvt-wallet-balance');
   const grvtTransferableTotal = document.getElementById('grvt-transfer-total');
   const grvtTransferableNote = document.getElementById('grvt-transfer-note');
@@ -12348,6 +12343,9 @@
           if (grvtTotalEquity) {
             grvtTotalEquity.textContent = '--';
           }
+          if (grvtTotalPosition) {
+            grvtTotalPosition.textContent = '--';
+          }
           if (grvtWalletBalance) {
             grvtWalletBalance.textContent = 'Wallet --';
           }
@@ -12572,9 +12570,10 @@
 
     let aggregateEquity = 0;
     let aggregateWallet = 0;
-  let aggregateInitialMargin = 0;
-  let hasEquity = false;
-  let hasWallet = false;
+    let aggregateInitialMargin = 0;
+    let aggregatePositionNotional = 0;
+    let hasEquity = false;
+    let hasWallet = false;
         let worstLossAccount = null;
 
         for (const entry of flattenedAccounts) {
@@ -12588,6 +12587,21 @@
           }
           if (Number.isFinite(entry.initialMarginTotal)) {
             aggregateInitialMargin += entry.initialMarginTotal;
+          }
+          const positionsRaw = Array.isArray(entry.account?.positions) ? entry.account.positions : [];
+          if (positionsRaw.length) {
+            for (const position of positionsRaw) {
+              const marginInfo = computePositionMargin(position);
+              if (marginInfo && Number.isFinite(marginInfo.notional)) {
+                aggregatePositionNotional += marginInfo.notional;
+              } else {
+                const sizeVal = parseDecimal(position?.net_size ?? position?.size ?? position?.quantity);
+                const priceVal = parseDecimal(position?.mark_price ?? position?.markPrice ?? position?.entry_price ?? position?.entryPrice);
+                if (Number.isFinite(sizeVal) && Number.isFinite(priceVal)) {
+                  aggregatePositionNotional += Math.abs(sizeVal * priceVal);
+                }
+              }
+            }
           }
           const totalValue = Number(entry.totalValue);
           if (Number.isFinite(totalValue) && totalValue < 0) {
@@ -12610,6 +12624,11 @@
   // ETH/BTC PnL removed from Per Account Net PnL.
         if (grvtTotalEquity) {
           grvtTotalEquity.textContent = hasEquity ? numberFormatter.format(aggregateEquity) : '--';
+        }
+        if (grvtTotalPosition) {
+          grvtTotalPosition.textContent = aggregatePositionNotional > 0
+            ? numberFormatter.format(aggregatePositionNotional)
+            : '--';
         }
         if (grvtWalletBalance) {
           grvtWalletBalance.textContent = hasWallet
@@ -12672,9 +12691,11 @@
         const updatedText = formatTimestamp(latestUpdate);
         if (grvtSummaryTime) {
           grvtSummaryTime.textContent = updatedText ?? '--';
+          grvtSummaryTime.classList.remove('hidden');
         }
         if (grvtSummaryUpdated) {
           grvtSummaryUpdated.textContent = updatedText ? `Updated ${updatedText}` : 'Updated —';
+          grvtSummaryUpdated.classList.remove('hidden');
         }
 
         // ---- GRVT reduce suggestion (BTC/ETH) ----
