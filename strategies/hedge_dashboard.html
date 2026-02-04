@@ -3265,6 +3265,7 @@
       allowedSymbols = ['BTC', 'ETH'],
       ffSymbol = 'FF-USD',
       messagePrefix = '',
+      topN = 1,
     } = {}) {
       const baseRes = { ok: false, message: '' };
       if (!Array.isArray(accounts) || accounts.length !== 2) {
@@ -3406,7 +3407,9 @@
       }
 
       if (!rows.length) {
-        return { ...baseRes, message: '缺少可计算的减仓候选（仅 BTC/ETH）' };
+        const hasRestriction = Array.isArray(allowedSymbols) && allowedSymbols.length;
+        const restrictionText = hasRestriction ? `（仅 ${allowedSymbols.join('/')}）` : '';
+        return { ...baseRes, message: `缺少可计算的减仓候选${restrictionText}` };
       }
 
       const totalNegAbs = rows.reduce((acc, r) => acc + r.negAbs, 0);
@@ -3422,17 +3425,27 @@
         return { ...r, allocation, size, efficiency };
       });
 
-  // Prefer the symbol that yields larger loss reduction per unit size.
-  // Tie-break only by symbol name to avoid size/allocation influence.
-  computed.sort((x, y) => (y.efficiency - x.efficiency) || x.symbol.localeCompare(y.symbol));
-      const best = computed[0];
+      // Prefer the symbol that yields larger loss reduction per unit size.
+      // Tie-break only by symbol name to avoid size/allocation influence.
+      computed.sort((x, y) => (y.efficiency - x.efficiency) || x.symbol.localeCompare(y.symbol));
+      const limit = Math.max(1, Math.min(Number(topN) || 1, computed.length));
+      const picks = computed.slice(0, limit).map((row) => {
+        const sizeText = bpFormatAtMost4(row.size);
+        return {
+          symbol: row.symbol,
+          size: row.size,
+          message: `${row.symbol} 双边减仓 ${sizeText}${row.symbol}`,
+          efficiency: row.efficiency,
+        };
+      });
+      const best = picks[0];
       const prefix = messagePrefix ? `${messagePrefix} ` : '';
-      const sizeText = bpFormatAtMost4(best.size);
       return {
         ok: true,
         symbol: best.symbol,
         size: best.size,
-        message: `${prefix}${best.symbol} 双边减仓 ${sizeText}${best.symbol}`,
+        message: `${prefix}${best.message}`,
+        top: picks,
       };
     }
 
@@ -3442,7 +3455,11 @@
     }
 
     function computeGrvtReduceSuggestion(accounts) {
-      return computeReduceSuggestionFromAccounts(accounts, { allowedSymbols: ['BTC', 'ETH'], ffSymbol: 'FF-USD' });
+      return computeReduceSuggestionFromAccounts(accounts, {
+        allowedSymbols: [],
+        ffSymbol: 'FF-USD',
+        topN: 3,
+      });
     }
 
     function computeBpReduceSuggestion(accounts) {
@@ -12654,8 +12671,15 @@
             const suggestion = computeGrvtReduceSuggestion(candidateAccounts);
             if (suggestion?.ok) {
               grvtReduceSuggestionMain.textContent = suggestion.message || '--';
-              grvtReduceSuggestionDetail.textContent = '';
-              grvtReduceSuggestionDetail.style.display = 'none';
+              const topList = Array.isArray(suggestion.top) ? suggestion.top : [];
+              if (topList.length > 1) {
+                const lines = topList.map((row, idx) => `${idx + 1}. ${row.message}`);
+                grvtReduceSuggestionDetail.textContent = `TOP${topList.length}：${lines.join('；')}`;
+                grvtReduceSuggestionDetail.style.display = '';
+              } else {
+                grvtReduceSuggestionDetail.textContent = '';
+                grvtReduceSuggestionDetail.style.display = 'none';
+              }
             } else {
               grvtReduceSuggestionMain.textContent = '—';
               grvtReduceSuggestionDetail.textContent = suggestion?.message || '无法计算减仓建议';
