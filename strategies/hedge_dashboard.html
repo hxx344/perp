@@ -3392,6 +3392,23 @@
         return base;
       };
 
+      const resolveCapForSymbol = (capMap, baseSym, rawSym) => {
+        if (!capMap || typeof capMap !== 'object') return 0;
+        let cap = coerceNumber(capMap?.[baseSym]);
+        if (cap > 0) return cap;
+        if (rawSym && rawSym !== baseSym) {
+          cap = coerceNumber(capMap?.[rawSym]);
+          if (cap > 0) return cap;
+        }
+        let total = 0;
+        for (const [key, value] of Object.entries(capMap)) {
+          if (normalizeCandidateSymbol(key) === baseSym) {
+            total += coerceNumber(value);
+          }
+        }
+        return total;
+      };
+
       const rows = [];
       for (const [symRaw, pnlRaw] of Object.entries(worst.symbolPnl || {})) {
         const sym = normalizeCandidateSymbol(symRaw);
@@ -3401,7 +3418,7 @@
 
         const pnl = coerceNumber(pnlRaw);
         if (pnl >= 0) continue;
-        const cap = coerceNumber(worst.symbolCap?.[symRaw] ?? worst.symbolCap?.[sym]);
+        const cap = resolveCapForSymbol(worst.symbolCap, sym, symRaw);
         if (cap <= 0) continue;
         rows.push({ symbol: sym, negAbs: Math.abs(pnl), cap });
       }
