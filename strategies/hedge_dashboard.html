@@ -3266,6 +3266,7 @@
       ffSymbol = 'FF-USD',
       messagePrefix = '',
       topN = 1,
+      allocationMode = 'proportional',
     } = {}) {
       const baseRes = { ok: false, message: '' };
       if (!Array.isArray(accounts) || accounts.length !== 2) {
@@ -3429,14 +3430,21 @@
         return { ...baseRes, message: `缺少可计算的减仓候选${restrictionText}` };
       }
 
-      const totalNegAbs = rows.reduce((acc, r) => acc + r.negAbs, 0);
-      if (!(totalNegAbs > 0)) {
-        return { ...baseRes, message: '减仓候选数据异常' };
+      let totalNegAbs = 0;
+      if (allocationMode === 'proportional') {
+        totalNegAbs = rows.reduce((acc, r) => acc + r.negAbs, 0);
+        if (!(totalNegAbs > 0)) {
+          return { ...baseRes, message: '减仓候选数据异常' };
+        }
       }
 
       const computed = rows.map((r) => {
-        const allocation = L * r.negAbs / totalNegAbs;
-        const ratio = allocation / r.negAbs;
+        const allocation = (allocationMode === 'proportional')
+          ? (L * r.negAbs / totalNegAbs)
+          : Math.min(L, r.negAbs);
+        const ratio = r.negAbs > 0
+          ? ((allocationMode === 'proportional') ? (allocation / r.negAbs) : (L / r.negAbs))
+          : 0;
         const size = Math.min(Math.max(r.cap * ratio, 0), r.cap);
         const efficiency = r.cap > 0 ? (r.negAbs / r.cap) : 0;
         return { ...r, allocation, size, efficiency };
@@ -3476,6 +3484,7 @@
         allowedSymbols: [],
         ffSymbol: 'FF-USD',
         topN: 3,
+        allocationMode: 'single',
       });
     }
 
