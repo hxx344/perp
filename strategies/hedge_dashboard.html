@@ -12914,8 +12914,8 @@
               const initialMarginText = marginInfo && Number.isFinite(marginInfo.initialMargin)
                 ? numberFormatter.format(marginInfo.initialMargin)
                 : '--';
-              const row = document.createElement('tr');
-              row.innerHTML = `
+              const rowEl = document.createElement('tr');
+              rowEl.innerHTML = `
                 <td>${escapeHtml(position.symbol ?? '--')}</td>
                 <td>${escapeHtml(side)}</td>
                 <td>${escapeHtml(sizeText)}</td>
@@ -12925,7 +12925,7 @@
                 <td>${escapeHtml(notionalText)}</td>
                 <td>${escapeHtml(initialMarginText)}</td>
               `;
-              body.appendChild(row);
+              body.appendChild(rowEl);
             }
             card.appendChild(table);
           } else {
