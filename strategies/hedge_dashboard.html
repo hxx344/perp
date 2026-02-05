@@ -13022,13 +13022,12 @@
             : '--';
         }
         if (grvtTotalPositionNet) {
-          const lines = positionNetByAccount
-            .filter(row => Number.isFinite(row.netValue))
-            .map((row) => {
-              const label = row.name ? `${row.name}(${row.agentId})` : row.agentId;
-              return `${label}: ${numberFormatter.format(row.netValue)}`;
-            });
-          grvtTotalPositionNet.textContent = lines.length ? lines.join(' / ') : '--';
+          const base = positionNetByAccount.filter(row => Number.isFinite(row.netValue));
+          const first = base[0];
+          const second = base[1];
+          const firstText = first ? `账户1: ${numberFormatter.format(first.netValue)}` : '账户1: --';
+          const secondText = second ? `账户2: ${numberFormatter.format(second.netValue)}` : '账户2: --';
+          grvtTotalPositionNet.innerHTML = `${escapeHtml(firstText)}<br>${escapeHtml(secondText)}`;
         }
 
         if (grvtAvgMaint) {
