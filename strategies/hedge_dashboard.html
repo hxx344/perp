@@ -4581,6 +4581,8 @@
   let paraLatestRiskRatio = null;
   let bpLatestRiskRatio = null;
   let grvtLatestRiskRatio = null;
+  let grvtSymbolOptionsKey = '';
+  let grvtAccountGridKey = '';
   let paraRiskHistoryEntries = [];
   let bpRiskHistoryEntries = [];
 
@@ -8357,6 +8359,11 @@
         const normalized = Array.from(
           new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => normalizeSymbolLabel(symbol)).filter(Boolean))
         ).sort();
+        const nextKey = normalized.join('|');
+        if (nextKey === grvtSymbolOptionsKey && grvtAdjustSymbolsSelect.options.length === normalized.length) {
+          return;
+        }
+        grvtSymbolOptionsKey = nextKey;
         const previousValue = normalizeSymbolLabel(grvtAdjustSymbolsSelect.value);
         grvtAdjustSymbolsSelect.innerHTML = '';
         grvtAdjustSymbolsSelect.disabled = normalized.length === 0;
@@ -12744,12 +12751,15 @@
           return;
         }
 
-        grvtAccountGrid.innerHTML = '';
-
         if (!flattenedAccounts.length) {
           if (grvtAccountsEmpty) {
             grvtAccountsEmpty.classList.remove('hidden');
             grvtAccountsEmpty.textContent = 'Waiting for account data…';
+          }
+          if (grvtAccountGrid) {
+            grvtAccountGrid.innerHTML = '';
+            grvtAccountGridKey = '';
+            grvtAccountGrid.dataset.renderKey = '';
           }
           return;
         }
@@ -12769,11 +12779,68 @@
           return bTs - aTs;
         });
 
+        const accountRenderKey = flattenedAccounts
+          .map((entry) => {
+            const count = Array.isArray(entry.account?.positions) ? entry.account.positions.length : 0;
+            const ts = Number(entry.updatedTs) || 0;
+            return `${entry.agentId ?? 'Source'}:${ts}:${count}`;
+          })
+          .join('|');
+        const shouldRebuildGrid = !grvtAccountGridKey || grvtAccountGridKey !== accountRenderKey;
+        grvtAccountGridKey = accountRenderKey;
+
         let aggregateMaintRequirement = 0;
         let aggregateMaintBase = 0;
+        const accountStats = [];
         for (const entry of flattenedAccounts) {
-          const agentId = entry.agentId ?? 'Source';
           const account = entry.account;
+          const positionsRaw = Array.isArray(account?.positions) ? account.positions : [];
+          let accountNetPosition = 0;
+          let accountPositionNotional = 0;
+          const positionInfo = positionsRaw.length
+            ? positionsRaw.map((position) => {
+                const marginInfo = getMarginInfo(position);
+                let notional = (marginInfo && Number.isFinite(marginInfo.notional)) ? marginInfo.notional : null;
+                if (!(Number.isFinite(notional))) {
+                  const sizeVal = parseDecimal(position?.net_size ?? position?.size ?? position?.quantity);
+                  const priceVal = parseDecimal(position?.mark_price ?? position?.markPrice ?? position?.entry_price ?? position?.entryPrice);
+                  if (Number.isFinite(sizeVal) && Number.isFinite(priceVal)) {
+                    notional = Math.abs(sizeVal * priceVal);
+                  }
+                }
+                if (Number.isFinite(notional)) {
+                  accountPositionNotional += Math.abs(notional);
+                }
+                const netSizeVal = parseDecimal(position?.net_size ?? position?.size ?? position?.quantity);
+                const netPriceVal = parseDecimal(position?.mark_price ?? position?.markPrice ?? position?.entry_price ?? position?.entryPrice);
+                if (Number.isFinite(netSizeVal) && Number.isFinite(netPriceVal)) {
+                  accountNetPosition += netSizeVal * netPriceVal;
+                }
+                return { position, marginInfo, notional };
+              })
+            : [];
+          aggregatePositionNotional += accountPositionNotional;
+          positionNetByAccount.push({
+            agentId: entry.agentId ?? 'Source',
+            name: entry.account?.name ? String(entry.account.name) : null,
+            netValue: accountNetPosition,
+          });
+          accountStats.push({
+            entry,
+            account,
+            positionsRaw,
+            positionInfo,
+          });
+        }
+
+        if (shouldRebuildGrid) {
+          grvtAccountGrid.innerHTML = '';
+        }
+
+        for (const stat of accountStats) {
+          const entry = stat.entry;
+          const account = stat.account;
+          const agentId = entry.agentId ?? 'Source';
           const fallbackName = account && account.name ? String(account.name) : 'Account';
           const displayName = account && account.name ? String(account.name) : `${agentId} ${fallbackName}`;
           const accountUpdated = formatTimestamp(entry.updatedTs);
@@ -12781,13 +12848,16 @@
           const walletValue = entry.walletValue;
           const riskPercent = Number.isFinite(entry.riskRatio) ? entry.riskRatio * 100 : null;
 
-          if (Array.isArray(account?.positions)) {
-            for (const position of account.positions) {
+          if (stat.positionsRaw.length) {
+            for (const position of stat.positionsRaw) {
               const symbolText = normalizeSymbolLabel(position?.symbol);
               if (symbolText) {
                 symbolCandidates.add(symbolText);
               }
             }
+          }
+          if (!shouldRebuildGrid) {
+            continue;
           }
 
           const card = document.createElement('article');
@@ -12831,31 +12901,9 @@
             ? entry.initialMarginTotal
             : 0;
 
-          const positionsRaw = Array.isArray(account?.positions) ? account.positions : [];
-          let accountNetPosition = 0;
-          let accountPositionNotional = 0;
-          const positions = positionsRaw.length
-            ? positionsRaw
-                .map((position) => {
-                  const marginInfo = getMarginInfo(position);
-                  let notional = (marginInfo && Number.isFinite(marginInfo.notional)) ? marginInfo.notional : null;
-                  if (!(Number.isFinite(notional))) {
-                    const sizeVal = parseDecimal(position?.net_size ?? position?.size ?? position?.quantity);
-                    const priceVal = parseDecimal(position?.mark_price ?? position?.markPrice ?? position?.entry_price ?? position?.entryPrice);
-                    if (Number.isFinite(sizeVal) && Number.isFinite(priceVal)) {
-                      notional = Math.abs(sizeVal * priceVal);
-                    }
-                  }
-                  if (Number.isFinite(notional)) {
-                    accountPositionNotional += Math.abs(notional);
-                  }
-                  const netSizeVal = parseDecimal(position?.net_size ?? position?.size ?? position?.quantity);
-                  const netPriceVal = parseDecimal(position?.mark_price ?? position?.markPrice ?? position?.entry_price ?? position?.entryPrice);
-                  if (Number.isFinite(netSizeVal) && Number.isFinite(netPriceVal)) {
-                    accountNetPosition += netSizeVal * netPriceVal;
-                  }
-                  return { position, marginInfo, notional };
-                })
+          const positions = stat.positionInfo.length
+            ? stat.positionInfo
+                .slice()
                 .sort((a, b) => {
                   const aPnl = parseDecimal(a?.position?.pnl ?? a?.position?.unrealized_pnl ?? a?.position?.unrealizedPnl);
                   const bPnl = parseDecimal(b?.position?.pnl ?? b?.position?.unrealized_pnl ?? b?.position?.unrealizedPnl);
@@ -12870,12 +12918,6 @@
                 })
                 .slice(0, MAX_GRVT_POSITIONS)
             : [];
-          aggregatePositionNotional += accountPositionNotional;
-          positionNetByAccount.push({
-            agentId: entry.agentId ?? 'Source',
-            name: entry.account?.name ? String(entry.account.name) : null,
-            netValue: accountNetPosition,
-          });
           if (positions.length) {
             const table = document.createElement('table');
             table.className = 'grvt-positions-table';
@@ -12968,6 +13010,10 @@
           }
 
           grvtAccountGrid.appendChild(card);
+        }
+
+        if (shouldRebuildGrid) {
+          grvtAccountGrid.dataset.renderKey = accountRenderKey;
         }
 
         if (grvtTotalPosition) {
