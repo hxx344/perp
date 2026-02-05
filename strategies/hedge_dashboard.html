@@ -12635,14 +12635,14 @@
         const accountLabel = aggregateAccountCount === 1 ? 'account' : 'accounts';
         grvtAccountCount.textContent = `${aggregateAccountCount} ${accountLabel} across ${entries.length} ${sourcesLabel}`;
 
-        grvtTotalPnl.textContent = hasTotal ? numberFormatter.format(aggregateTotalPnl) : '--';
+  grvtTotalPnl.textContent = hasTotal ? formatDecimal(aggregateTotalPnl, 3) : '--';
   // ETH/BTC PnL removed from Per Account Net PnL.
         if (grvtTotalEquity) {
-          grvtTotalEquity.textContent = hasEquity ? numberFormatter.format(aggregateEquity) : '--';
+          grvtTotalEquity.textContent = hasEquity ? formatDecimal(aggregateEquity, 3) : '--';
         }
         if (grvtWalletBalance) {
           grvtWalletBalance.textContent = hasWallet
-            ? `Wallet ${numberFormatter.format(aggregateWallet)}`
+            ? `Wallet ${formatDecimal(aggregateWallet, 3)}`
             : 'Wallet --';
         }
         const rawRiskCapacity = hasEquity ? aggregateEquity - aggregateInitialMargin : null;
@@ -12662,7 +12662,7 @@
 
         if (grvtTransferableTotal) {
           grvtTransferableTotal.textContent = Number.isFinite(effectiveRiskCapacity)
-            ? numberFormatter.format(effectiveRiskCapacity)
+            ? formatDecimal(effectiveRiskCapacity, 3)
             : '--';
         }
         if (grvtTransferableNote) {
@@ -13018,15 +13018,15 @@
 
         if (grvtTotalPosition) {
           grvtTotalPosition.textContent = aggregatePositionNotional > 0
-            ? numberFormatter.format(aggregatePositionNotional)
+            ? formatDecimal(aggregatePositionNotional, 3)
             : '--';
         }
         if (grvtTotalPositionNet) {
           const base = positionNetByAccount.filter(row => Number.isFinite(row.netValue));
           const first = base[0];
           const second = base[1];
-          const firstText = first ? `账户1: ${numberFormatter.format(first.netValue)}` : '账户1: --';
-          const secondText = second ? `账户2: ${numberFormatter.format(second.netValue)}` : '账户2: --';
+          const firstText = first ? `账户1: ${formatDecimal(first.netValue, 3)}` : '账户1: --';
+          const secondText = second ? `账户2: ${formatDecimal(second.netValue, 3)}` : '账户2: --';
           grvtTotalPositionNet.innerHTML = `${escapeHtml(firstText)}<br>${escapeHtml(secondText)}`;
         }
 
