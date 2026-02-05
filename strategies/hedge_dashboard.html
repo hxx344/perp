@@ -4583,6 +4583,11 @@
   let grvtLatestRiskRatio = null;
   let grvtSymbolOptionsKey = '';
   let grvtAccountGridKey = '';
+  let paraSymbolOptionsKey = '';
+  let paraTwapSymbolOptionsKey = '';
+  let paraAccountGridKey = '';
+  let bpSymbolOptionsKey = '';
+  let bpAccountGridKey = '';
   let paraRiskHistoryEntries = [];
   let bpRiskHistoryEntries = [];
 
@@ -8419,6 +8424,11 @@
         const normalized = Array.from(
           new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => normalizeSymbolLabel(symbol)).filter(Boolean))
         ).sort();
+        const nextKey = normalized.join('|');
+        if (nextKey === paraSymbolOptionsKey && paraAdjustSymbolsSelect.options.length === normalized.length) {
+          return;
+        }
+        paraSymbolOptionsKey = nextKey;
         const previousValue = normalizeSymbolLabel(paraAdjustSymbolsSelect.value);
         const disabled = normalized.length === 0;
         paraAdjustSymbolsSelect.disabled = disabled;
@@ -8490,6 +8500,11 @@
         const normalized = Array.from(
           new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => normalizeSymbolLabel(symbol)).filter(Boolean))
         ).sort();
+        const nextKey = normalized.join('|');
+        if (nextKey === paraTwapSymbolOptionsKey && paraTwapScheduleSymbolsSelect.options.length === normalized.length) {
+          return;
+        }
+        paraTwapSymbolOptionsKey = nextKey;
         const previousValue = normalizeSymbolLabel(paraTwapScheduleSymbolsSelect.value);
         const disabled = normalized.length === 0;
         paraTwapScheduleSymbolsSelect.disabled = disabled;
@@ -8548,6 +8563,11 @@
         const normalized = Array.from(
           new Set((Array.isArray(symbols) ? symbols : []).map((symbol) => normalizeSymbolLabel(symbol)).filter(Boolean))
         ).sort();
+        const nextKey = normalized.join('|');
+        if (nextKey === bpSymbolOptionsKey && bpAdjustSymbolsSelect.options.length === normalized.length) {
+          return;
+        }
+        bpSymbolOptionsKey = nextKey;
         const previousValue = normalizeSymbolLabel(bpAdjustSymbolsSelect.value);
         const disabled = normalized.length === 0;
         bpAdjustSymbolsSelect.disabled = disabled;
@@ -12069,8 +12089,6 @@
           return;
         }
 
-        paraAccountGrid.innerHTML = '';
-
         if (!flattenedAccounts.length) {
           if (paraAvgMaint) {
             paraAvgMaint.textContent = '--';
@@ -12103,6 +12121,19 @@
           return (Number(b.updatedTs ?? 0) || 0) - (Number(a.updatedTs ?? 0) || 0);
         });
 
+        const accountRenderKey = flattenedAccounts
+          .map((entry) => {
+            const count = Array.isArray(entry.positions) ? entry.positions.length : 0;
+            const ts = Number(entry.updatedTs) || 0;
+            return `${entry.agentId ?? 'source'}:${ts}:${count}`;
+          })
+          .join('|');
+        const shouldRebuildGrid = !paraAccountGridKey || paraAccountGridKey !== accountRenderKey;
+        paraAccountGridKey = accountRenderKey;
+        if (shouldRebuildGrid) {
+          paraAccountGrid.innerHTML = '';
+        }
+
         for (const entry of flattenedAccounts) {
           const positions = Array.isArray(entry.positions)
             ? entry.positions.slice().sort((a, b) => {
@@ -12118,6 +12149,25 @@
                 return aSymbol.localeCompare(bSymbol, undefined, { sensitivity: 'base' });
               })
             : [];
+
+          const maintenanceRequirementTotal = Number.isFinite(entry.initialMarginTotal)
+            ? 0.5 * entry.initialMarginTotal
+            : 0;
+          const ratioBaseValue = Number.isFinite(entry.equity) && entry.equity > 0
+            ? entry.equity
+            : null;
+
+          if (ratioBaseValue && Number.isFinite(maintenanceRequirementTotal) && maintenanceRequirementTotal >= 0) {
+            const ratio = maintenanceRequirementTotal / ratioBaseValue;
+            if (Number.isFinite(ratio)) {
+              aggregateMaintRequirement += maintenanceRequirementTotal;
+              aggregateMaintBase += ratioBaseValue;
+            }
+          }
+
+          if (!shouldRebuildGrid) {
+            continue;
+          }
 
           const card = document.createElement('article');
           card.className = 'grvt-account-card';
@@ -12182,13 +12232,6 @@
               <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
             </dl>
           `;
-
-          const maintenanceRequirementTotal = Number.isFinite(entry.initialMarginTotal)
-            ? 0.5 * entry.initialMarginTotal
-            : 0;
-          const ratioBaseValue = Number.isFinite(entry.equity) && entry.equity > 0
-            ? entry.equity
-            : null;
 
           if (positions.length) {
             const table = document.createElement('table');
@@ -12277,8 +12320,6 @@
             if (ratioBaseValue && Number.isFinite(maintenanceRequirementTotal) && maintenanceRequirementTotal >= 0) {
               const ratio = maintenanceRequirementTotal / ratioBaseValue;
               maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
-              aggregateMaintRequirement += maintenanceRequirementTotal;
-              aggregateMaintBase += ratioBaseValue;
             } else if (ratioBaseValue) {
               maintenanceBadge.textContent = formatPercent(0, 2);
             } else {
@@ -12287,6 +12328,10 @@
           }
 
           paraAccountGrid.appendChild(card);
+        }
+
+        if (shouldRebuildGrid) {
+          paraAccountGrid.dataset.renderKey = accountRenderKey;
         }
 
         if (paraAvgMaint) {
@@ -13515,7 +13560,6 @@
             return;
           }
 
-          bpAccountGrid.innerHTML = '';
           if (!flattenedAccounts.length) {
             if (bpAccountsEmpty) {
               bpAccountsEmpty.classList.remove('hidden');
@@ -13535,6 +13579,21 @@
             }
             return (Number(b.updatedTs ?? 0) || 0) - (Number(a.updatedTs ?? 0) || 0);
           });
+
+          const accountRenderKey = flattenedAccounts
+            .map((entry) => {
+              const count = Array.isArray(entry.positions) ? entry.positions.length : 0;
+              const ts = Number(entry.updatedTs) || 0;
+              return `${entry.agentId ?? 'source'}:${ts}:${count}`;
+            })
+            .join('|');
+          const shouldRebuildGrid = !bpAccountGridKey || bpAccountGridKey !== accountRenderKey;
+          bpAccountGridKey = accountRenderKey;
+          if (!shouldRebuildGrid) {
+            return;
+          }
+
+          bpAccountGrid.innerHTML = '';
 
           for (const entry of flattenedAccounts) {
             const card = document.createElement('article');
