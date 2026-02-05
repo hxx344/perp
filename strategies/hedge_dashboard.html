@@ -2298,7 +2298,7 @@
           <article class="card grvt-summary-card">
             <h3>净持仓金额</h3>
             <div class="value" id="grvt-total-position-net">--</div>
-            <p class="summary-sub">两个账号合计净持仓名义金额</p>
+            <p class="summary-sub">按账号统计净持仓名义金额</p>
           </article>
           <article class="card grvt-summary-card">
             <h3>风险基数</h3>
@@ -12581,12 +12581,13 @@
     let aggregateWallet = 0;
     let aggregateInitialMargin = 0;
     let aggregatePositionNotional = 0;
-  let aggregatePositionNet = 0;
+  const positionNetByAccount = [];
     let hasEquity = false;
     let hasWallet = false;
         let worstLossAccount = null;
 
         for (const entry of flattenedAccounts) {
+          let accountNetPosition = 0;
           if (Number.isFinite(entry.equityValue)) {
             aggregateEquity += entry.equityValue;
             hasEquity = true;
@@ -12614,10 +12615,15 @@
               const netSizeVal = parseDecimal(position?.net_size ?? position?.size ?? position?.quantity);
               const netPriceVal = parseDecimal(position?.mark_price ?? position?.markPrice ?? position?.entry_price ?? position?.entryPrice);
               if (Number.isFinite(netSizeVal) && Number.isFinite(netPriceVal)) {
-                aggregatePositionNet += netSizeVal * netPriceVal;
+                accountNetPosition += netSizeVal * netPriceVal;
               }
             }
           }
+          positionNetByAccount.push({
+            agentId: entry.agentId ?? 'Source',
+            name: entry.account?.name ? String(entry.account.name) : null,
+            netValue: accountNetPosition,
+          });
           const totalValue = Number(entry.totalValue);
           if (Number.isFinite(totalValue) && totalValue < 0) {
             const absLoss = Math.abs(totalValue);
@@ -12646,9 +12652,13 @@
             : '--';
         }
         if (grvtTotalPositionNet) {
-          grvtTotalPositionNet.textContent = Number.isFinite(aggregatePositionNet)
-            ? numberFormatter.format(aggregatePositionNet)
-            : '--';
+          const lines = positionNetByAccount
+            .filter(row => Number.isFinite(row.netValue))
+            .map((row) => {
+              const label = row.name ? `${row.name}(${row.agentId})` : row.agentId;
+              return `${label}: ${numberFormatter.format(row.netValue)}`;
+            });
+          grvtTotalPositionNet.textContent = lines.length ? lines.join(' / ') : '--';
         }
         if (grvtWalletBalance) {
           grvtWalletBalance.textContent = hasWallet
