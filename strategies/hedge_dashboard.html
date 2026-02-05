@@ -2296,6 +2296,11 @@
             <p class="summary-sub">两个账号合计持仓名义金额</p>
           </article>
           <article class="card grvt-summary-card">
+            <h3>净持仓金额</h3>
+            <div class="value" id="grvt-total-position-net">--</div>
+            <p class="summary-sub">两个账号合计净持仓名义金额</p>
+          </article>
+          <article class="card grvt-summary-card">
             <h3>风险基数</h3>
             <div class="value" id="grvt-transfer-total">--</div>
             <p class="summary-sub" id="grvt-transfer-note">Σ Equity - Σ 初始保证金</p>
@@ -4109,6 +4114,7 @@
   const grvtTotalPnl = document.getElementById('grvt-total-pnl');
   const grvtTotalEquity = document.getElementById('grvt-total-equity');
   const grvtTotalPosition = document.getElementById('grvt-total-position');
+  const grvtTotalPositionNet = document.getElementById('grvt-total-position-net');
   const grvtWalletBalance = document.getElementById('grvt-wallet-balance');
   const grvtTransferableTotal = document.getElementById('grvt-transfer-total');
   const grvtTransferableNote = document.getElementById('grvt-transfer-note');
@@ -12346,6 +12352,9 @@
           if (grvtTotalPosition) {
             grvtTotalPosition.textContent = '--';
           }
+          if (grvtTotalPositionNet) {
+            grvtTotalPositionNet.textContent = '--';
+          }
           if (grvtWalletBalance) {
             grvtWalletBalance.textContent = 'Wallet --';
           }
@@ -12572,6 +12581,7 @@
     let aggregateWallet = 0;
     let aggregateInitialMargin = 0;
     let aggregatePositionNotional = 0;
+  let aggregatePositionNet = 0;
     let hasEquity = false;
     let hasWallet = false;
         let worstLossAccount = null;
@@ -12601,6 +12611,11 @@
                   aggregatePositionNotional += Math.abs(sizeVal * priceVal);
                 }
               }
+              const netSizeVal = parseDecimal(position?.net_size ?? position?.size ?? position?.quantity);
+              const netPriceVal = parseDecimal(position?.mark_price ?? position?.markPrice ?? position?.entry_price ?? position?.entryPrice);
+              if (Number.isFinite(netSizeVal) && Number.isFinite(netPriceVal)) {
+                aggregatePositionNet += netSizeVal * netPriceVal;
+              }
             }
           }
           const totalValue = Number(entry.totalValue);
@@ -12628,6 +12643,11 @@
         if (grvtTotalPosition) {
           grvtTotalPosition.textContent = aggregatePositionNotional > 0
             ? numberFormatter.format(aggregatePositionNotional)
+            : '--';
+        }
+        if (grvtTotalPositionNet) {
+          grvtTotalPositionNet.textContent = Number.isFinite(aggregatePositionNet)
+            ? numberFormatter.format(aggregatePositionNet)
             : '--';
         }
         if (grvtWalletBalance) {
