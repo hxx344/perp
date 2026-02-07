@@ -7114,7 +7114,7 @@ class CoordinatorApp:
             symbols_raw = [body.get("symbol")]
 
         if symbols_raw is None:
-            symbols: Optional[List[str]] = None
+            raise web.HTTPBadRequest(text="symbols is required for GRVT adjustments")
         elif isinstance(symbols_raw, list):
             normalized_symbols: List[str] = []
             for item in symbols_raw:
@@ -7124,6 +7124,9 @@ class CoordinatorApp:
             symbols = normalized_symbols
         else:
             raise web.HTTPBadRequest(text="symbols must be an array of strings")
+
+        if not symbols:
+            raise web.HTTPBadRequest(text="symbols is required for GRVT adjustments")
 
         created_by = request.remote or "dashboard"
         action = cast(AdjustmentAction, action_raw)

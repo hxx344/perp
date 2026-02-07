@@ -10569,12 +10569,16 @@
       }
 
       function updateGrvtAdjustButtons() {
-        const disabled = grvtAdjustLocked;
+        const hasSymbols = !!getSelectedGrvtSymbols();
+        const disabled = grvtAdjustLocked || !hasSymbols;
         [grvtAdjustAddButton, grvtAdjustReduceButton].forEach((button) => {
           if (button) {
             button.disabled = disabled;
           }
         });
+        if (grvtAdjustStatus && !grvtAdjustLocked) {
+          grvtAdjustStatus.textContent = hasSymbols ? '等待指令…' : '请选择币种后再提交';
+        }
       }
 
       async function sendGrvtAdjustment(action) {
@@ -10589,11 +10593,16 @@
           grvtAdjustStatus.textContent = `提交${describeAdjustmentAction(action)}请求…`;
         }
 
-        const payload = { action, magnitude };
         const selectedSymbols = getSelectedGrvtSymbols();
-        if (selectedSymbols) {
-          payload.symbols = selectedSymbols;
+        if (!selectedSymbols || !selectedSymbols.length) {
+          grvtAdjustLocked = false;
+          updateGrvtAdjustButtons();
+          if (grvtAdjustStatus) {
+            grvtAdjustStatus.textContent = '请选择币种后再提交';
+          }
+          return;
         }
+        const payload = { action, magnitude, symbols: selectedSymbols };
 
         try {
           const response = await fetch('/grvt/adjust', {
@@ -10686,7 +10695,7 @@
             }
           }
         } else if (grvtAdjustStatus) {
-          grvtAdjustStatus.textContent = '等待指令…（默认全部币种）';
+          grvtAdjustStatus.textContent = '请选择币种后再提交';
           if (grvtAdjustScope) {
             grvtAdjustScope.textContent = '当前广播：GRVT 监控';
           }
