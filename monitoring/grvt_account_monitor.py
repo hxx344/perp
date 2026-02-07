@@ -11,12 +11,14 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import base64
 import logging
 import os
 import random
 import re
 import sys
 import time
+import threading
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, getcontext
@@ -25,6 +27,10 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 from logging.handlers import RotatingFileHandler
 
 import requests
+try:
+    import websocket  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    websocket = None  # type: ignore
 from requests.auth import HTTPBasicAuth
 from requests.exceptions import RequestException
 
@@ -448,6 +454,9 @@ class GrvtAccountMonitor:
         transfer_log_path: Optional[str] = None,
         disable_transfer_log: bool = False,
         transfer_api_variant: Optional[str] = None,
+        control_ws: bool = True,
+        control_ws_ping_interval: float = 20.0,
+        control_ws_reconnect_delay: float = 3.0,
     ) -> None:
         self._session = session
         self._coordinator_url = coordinator_url.rstrip("/")
@@ -477,6 +486,13 @@ class GrvtAccountMonitor:
         self._control_endpoint = f"{self._coordinator_url}/control"
         self._update_endpoint = f"{self._coordinator_url}/update"
         self._ack_endpoint = f"{self._coordinator_url}/grvt/adjust/ack"
+        self._ws_enabled = bool(control_ws)
+        self._ws_connected = False
+        self._ws_last_message = 0.0
+        self._ws_thread: Optional[threading.Thread] = None
+        self._ws_stop = threading.Event()
+        self._control_ws_ping_interval = float(control_ws_ping_interval)
+        self._control_ws_reconnect_delay = float(control_ws_reconnect_delay)
         self._register_symbol_hint(self._default_symbol)
         self._home_main_account_id = session.main_account_id or os.getenv("GRVT_MAIN_ACCOUNT_ID")
         self._home_sub_account_id = session.sub_account_id or os.getenv("GRVT_TRADING_ACCOUNT_ID")
@@ -1886,18 +1902,111 @@ class GrvtAccountMonitor:
             return False
         return True
 
-    def _process_adjustments(self) -> None:
+    def _build_control_ws_url(self) -> str:
+        base = (self._coordinator_url or "").rstrip("/")
+        if base.startswith("https://"):
+            base = "wss://" + base[len("https://") :]
+        elif base.startswith("http://"):
+            base = "ws://" + base[len("http://") :]
+        elif not base.startswith("ws://") and not base.startswith("wss://"):
+            base = "ws://" + base
+        return f"{base}/ws/grvt/control?agent_id={self._agent_id}"
+
+    def _build_control_ws_headers(self) -> List[str]:
+        username = (self._auth.username if self._auth else "") or ""
+        password = (self._auth.password if self._auth else "") or ""
+        if not username and not password:
+            return []
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("utf-8")
+        return [f"Authorization: Basic {token}"]
+
+    def _handle_ws_message(self, message: str) -> None:
+        self._ws_last_message = time.time()
         try:
-            snapshot = self._fetch_agent_control()
-        except Exception as exc:
-            LOGGER.debug("Skipping adjustment processing; control fetch failed: %s", exc)
+            payload = json.loads(message)
+        except Exception:
+            LOGGER.debug("WS message not JSON; ignoring")
             return
-        if not snapshot:
+        if not isinstance(payload, dict):
             return
-        agent_block = snapshot.get("agent")
-        if not isinstance(agent_block, dict):
+        if "pending_adjustments" in payload:
+            self._process_adjustments_snapshot(payload)
+
+    def _control_ws_loop(self) -> None:
+        if websocket is None:
+            LOGGER.warning("websocket-client not available; fallback to polling")
+            self._ws_enabled = False
             return
-        pending = agent_block.get("pending_adjustments")
+
+        delay = max(self._control_ws_reconnect_delay, 0.5)
+        while not self._ws_stop.is_set():
+            url = self._build_control_ws_url()
+
+            def _on_open(_):
+                self._ws_connected = True
+                self._ws_last_message = time.time()
+                LOGGER.info("GRVT control WS connected: %s", url)
+
+            def _on_message(_, msg: str):
+                self._handle_ws_message(msg)
+
+            def _on_error(_, err: Exception):
+                LOGGER.warning("GRVT control WS error: %s", err)
+
+            def _on_close(_, status: int, msg: str):
+                self._ws_connected = False
+                LOGGER.info("GRVT control WS closed: %s %s", status, msg)
+
+            app = websocket.WebSocketApp(
+                url,
+                header=self._build_control_ws_headers() or None,
+                on_open=_on_open,
+                on_message=_on_message,
+                on_error=_on_error,
+                on_close=_on_close,
+            )
+
+            try:
+                app.run_forever(
+                    ping_interval=max(self._control_ws_ping_interval, 5.0),
+                    ping_timeout=max(self._timeout, 5.0),
+                )
+            except Exception as exc:
+                LOGGER.warning("GRVT control WS run failed: %s", exc)
+                self._ws_connected = False
+
+            if self._ws_stop.is_set():
+                break
+            time.sleep(min(delay, 30.0))
+
+    def _start_control_ws_listener(self) -> None:
+        if not self._ws_enabled:
+            return
+        if self._ws_thread and self._ws_thread.is_alive():
+            return
+        self._ws_stop.clear()
+        self._ws_thread = threading.Thread(
+            target=self._control_ws_loop,
+            name=f"grvt-control-ws-{self._agent_id}",
+            daemon=True,
+        )
+        self._ws_thread.start()
+
+    def _should_poll_control(self) -> bool:
+        if not self._ws_enabled:
+            return True
+        if not self._ws_connected:
+            return True
+        age = time.time() - (self._ws_last_message or 0)
+        return age > max(self._poll_interval * 2, 10.0)
+
+    def _process_adjustments_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        agent_block = snapshot.get("agent") if isinstance(snapshot, dict) else None
+        pending = None
+        if isinstance(agent_block, dict):
+            pending = agent_block.get("pending_adjustments")
+        if pending is None:
+            pending = snapshot.get("pending_adjustments") if isinstance(snapshot, dict) else None
         if not isinstance(pending, list) or not pending:
             self._prune_processed_adjustments()
             return
@@ -1940,6 +2049,18 @@ class GrvtAccountMonitor:
             }
         self._prune_processed_adjustments()
 
+    def _process_adjustments(self) -> None:
+        if not self._should_poll_control():
+            return
+        try:
+            snapshot = self._fetch_agent_control()
+        except Exception as exc:
+            LOGGER.debug("Skipping adjustment processing; control fetch failed: %s", exc)
+            return
+        if not snapshot:
+            return
+        self._process_adjustments_snapshot(snapshot)
+
     def _prune_processed_adjustments(self, ttl: float = 3600.0) -> None:
         if not self._processed_adjustments:
             return
@@ -1976,6 +2097,7 @@ class GrvtAccountMonitor:
 
     def run_forever(self) -> None:
         LOGGER.info("Starting GRVT monitor for account %s", self._session.label)
+        self._start_control_ws_listener()
         while True:
             start = time.time()
             try:
@@ -2015,6 +2137,30 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--poll-interval", type=float, default=DEFAULT_POLL_SECONDS, help="Seconds between refreshes")
     parser.add_argument("--request-timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="HTTP timeout for coordinator updates")
+    parser.add_argument(
+        "--control-ws",
+        default=_env_bool("GRVT_CONTROL_WS", True),
+        action="store_true",
+        help="Enable coordinator control WebSocket for low-latency adjustments",
+    )
+    parser.add_argument(
+        "--no-control-ws",
+        dest="control_ws",
+        action="store_false",
+        help="Disable coordinator control WebSocket and fall back to polling",
+    )
+    parser.add_argument(
+        "--control-ws-ping-interval",
+        type=float,
+        default=float(os.getenv("GRVT_CONTROL_WS_PING_INTERVAL", "20")),
+        help="Seconds between WebSocket pings",
+    )
+    parser.add_argument(
+        "--control-ws-reconnect-delay",
+        type=float,
+        default=float(os.getenv("GRVT_CONTROL_WS_RECONNECT_DELAY", "3")),
+        help="Seconds to wait before reconnecting control WebSocket",
+    )
     parser.add_argument(
         "--max-positions",
         type=int,
@@ -2185,9 +2331,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         default_transfer_currency=args.default_transfer_currency,
         default_transfer_direction=args.default_transfer_direction,
         default_transfer_type=args.default_transfer_type,
-            transfer_log_path=args.transfer_log_file,
-            disable_transfer_log=args.no_transfer_log,
-            transfer_api_variant=args.transfer_api,
+        transfer_log_path=args.transfer_log_file,
+        disable_transfer_log=args.no_transfer_log,
+        transfer_api_variant=args.transfer_api,
+        control_ws=args.control_ws,
+        control_ws_ping_interval=args.control_ws_ping_interval,
+        control_ws_reconnect_delay=args.control_ws_reconnect_delay,
     )
 
     if args.once:

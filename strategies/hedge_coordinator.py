@@ -3838,6 +3838,8 @@ class CoordinatorApp:
         self._bp_dual_volume_lock = asyncio.Lock()
         self._bp_ws_clients: Dict[str, Set[web.WebSocketResponse]] = defaultdict(set)
         self._bp_ws_lock = asyncio.Lock()
+        self._grvt_ws_clients: Dict[str, Set[web.WebSocketResponse]] = defaultdict(set)
+        self._grvt_ws_lock = asyncio.Lock()
 
         # Persisted per-symbol history for the Backpack volume panel.
         # Shape: {"SYMBOL": {"updated_at": ms, "summary": {...}, "recent": [...]}}
@@ -3868,6 +3870,7 @@ class CoordinatorApp:
                 web.get("/control", self.handle_control_get),
                 web.post("/control", self.handle_control_update),
                 web.get("/ws/backpack/control", self.handle_bp_control_ws),
+                web.get("/ws/grvt/control", self.handle_grvt_control_ws),
                 web.get("/auto_balance/config", self.handle_auto_balance_get),
                 web.post("/auto_balance/config", self.handle_auto_balance_update),
                 web.get("/para/auto_balance/config", self.handle_para_auto_balance_get),
@@ -6064,6 +6067,76 @@ class CoordinatorApp:
                     if conns and not conns:
                         self._bp_ws_clients.pop(agent_key, None)
 
+    async def handle_grvt_control_ws(self, request: web.Request) -> web.WebSocketResponse:
+        self._enforce_dashboard_auth(request)
+        agent_id = (request.rel_url.query.get("agent_id") or "").strip()
+        if not agent_id:
+            raise web.HTTPBadRequest(text="agent_id is required")
+
+        ws = web.WebSocketResponse(heartbeat=20)
+        await ws.prepare(request)
+
+        async with self._grvt_ws_lock:
+            self._grvt_ws_clients[agent_id].add(ws)
+
+        try:
+            await self._send_grvt_ws_snapshot(agent_id, ws, reason="init")
+            async for msg in ws:
+                if msg.type == web.WSMsgType.TEXT:
+                    text = (msg.data or "").strip().lower()
+                    if text in {"ping", "pong"}:
+                        with suppress(Exception):
+                            await ws.send_json({"type": "pong", "ts": _now_ts()})
+                elif msg.type == web.WSMsgType.ERROR:
+                    break
+        finally:
+            async with self._grvt_ws_lock:
+                conns = self._grvt_ws_clients.get(agent_id)
+                if conns and ws in conns:
+                    conns.discard(ws)
+                if conns and not conns:
+                    self._grvt_ws_clients.pop(agent_id, None)
+            with suppress(Exception):
+                await ws.close()
+        return ws
+
+    async def _send_grvt_ws_snapshot(self, agent_id: str, ws: web.WebSocketResponse, *, reason: str) -> None:
+        payload = {
+            "type": "grvt_adjustments",
+            "reason": reason,
+            "agent_id": agent_id,
+            "ts": _now_ts(),
+            "pending_adjustments": await self._adjustments.pending_for_agent(agent_id),
+        }
+        await ws.send_json(payload, dumps=lambda obj: json.dumps(obj, default=str))
+
+    async def _notify_grvt_adjustments(self, agent_id: str) -> None:
+        async with self._grvt_ws_lock:
+            if not self._grvt_ws_clients:
+                return
+            if agent_id == "all":
+                targets: List[Tuple[str, web.WebSocketResponse]] = [
+                    (agent_key, conn)
+                    for agent_key, conns in self._grvt_ws_clients.items()
+                    for conn in list(conns)
+                ]
+            else:
+                conns = list(self._grvt_ws_clients.get(agent_id, set()))
+                targets = [(agent_id, conn) for conn in conns]
+
+        for agent_key, conn in targets:
+            try:
+                await self._send_grvt_ws_snapshot(agent_key, conn, reason="update")
+            except Exception:
+                with suppress(Exception):
+                    await conn.close()
+                async with self._grvt_ws_lock:
+                    conns = self._grvt_ws_clients.get(agent_key)
+                    if conns and conn in conns:
+                        conns.discard(conn)
+                    if conns and not conns:
+                        self._grvt_ws_clients.pop(agent_key, None)
+
     # -----------------------------
     # Backpack auto balance
     # -----------------------------
@@ -7053,6 +7126,10 @@ class CoordinatorApp:
             )
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
+
+        for agent_id in agent_ids:
+            with suppress(Exception):
+                await self._notify_grvt_adjustments(agent_id)
 
         return web.json_response({"request": payload})
 
@@ -8376,6 +8453,9 @@ class CoordinatorApp:
             raise web.HTTPNotFound(text=str(exc))
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
+
+        with suppress(Exception):
+            await self._notify_grvt_adjustments(agent_id)
 
         return web.json_response({"request": payload})
 

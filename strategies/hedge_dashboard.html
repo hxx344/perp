@@ -3450,12 +3450,18 @@
           : 0;
         const size = Math.min(Math.max(r.cap * ratio, 0), r.cap);
         const efficiency = r.cap > 0 ? (r.negAbs / r.cap) : 0;
-        return { ...r, allocation, size, efficiency };
+        const coversLoss = r.negAbs >= L;
+        return { ...r, allocation, size, efficiency, coversLoss };
       });
 
       // Prefer the symbol that yields larger loss reduction per unit size.
       // Tie-break only by symbol name to avoid size/allocation influence.
-      computed.sort((x, y) => (y.efficiency - x.efficiency) || x.symbol.localeCompare(y.symbol));
+      computed.sort((x, y) => {
+        if (x.coversLoss !== y.coversLoss) {
+          return x.coversLoss ? -1 : 1;
+        }
+        return (y.efficiency - x.efficiency) || x.symbol.localeCompare(y.symbol);
+      });
       const limit = Math.max(1, Math.min(Number(topN) || 1, computed.length));
       const picks = computed.slice(0, limit).map((row) => {
         const sizeText = bpFormatAtMost4(row.size);
