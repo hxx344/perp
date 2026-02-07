@@ -7089,7 +7089,18 @@ class CoordinatorApp:
 
         agent_ids_raw = body.get("agent_ids")
         if agent_ids_raw is None:
-            agent_ids = await self._coordinator.list_agent_ids()
+            agent_ids = []
+            with suppress(Exception):
+                snap = await self._coordinator.snapshot()
+                agents_block = snap.get("agents") if isinstance(snap, dict) else None
+                if isinstance(agents_block, dict):
+                    for agent_id, payload in agents_block.items():
+                        if not isinstance(agent_id, str):
+                            continue
+                        if isinstance(payload, dict) and "grvt_accounts" in payload:
+                            agent_ids.append(agent_id)
+            if not agent_ids:
+                agent_ids = await self._coordinator.list_agent_ids()
         elif isinstance(agent_ids_raw, list):
             agent_ids = [str(agent).strip() for agent in agent_ids_raw if str(agent).strip()]
         else:
