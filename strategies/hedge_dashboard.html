@@ -3270,6 +3270,7 @@
       messagePrefix = '',
       topN = 1,
       allocationMode = 'proportional',
+      requireFullCoverage = false,
     } = {}) {
       const baseRes = { ok: false, message: '' };
       if (!Array.isArray(accounts) || accounts.length !== 2) {
@@ -3454,16 +3455,23 @@
         return { ...r, allocation, size, efficiency, coversLoss };
       });
 
+      const coverageCandidates = requireFullCoverage
+        ? computed.filter((row) => row.coversLoss)
+        : computed;
+      if (!coverageCandidates.length) {
+        return { ...baseRes, message: '缺少可完全覆盖风险的减仓候选' };
+      }
+
       // Prefer the symbol that yields larger loss reduction per unit size.
       // Tie-break only by symbol name to avoid size/allocation influence.
-      computed.sort((x, y) => {
+      coverageCandidates.sort((x, y) => {
         if (x.coversLoss !== y.coversLoss) {
           return x.coversLoss ? -1 : 1;
         }
         return (y.efficiency - x.efficiency) || x.symbol.localeCompare(y.symbol);
       });
-      const limit = Math.max(1, Math.min(Number(topN) || 1, computed.length));
-      const picks = computed.slice(0, limit).map((row) => {
+      const limit = Math.max(1, Math.min(Number(topN) || 1, coverageCandidates.length));
+      const picks = coverageCandidates.slice(0, limit).map((row) => {
         const sizeText = bpFormatAtMost4(row.size);
         return {
           symbol: row.symbol,
@@ -3494,6 +3502,7 @@
         ffSymbol: 'FF-USD',
         topN: 3,
         allocationMode: 'single',
+        requireFullCoverage: true,
       });
     }
 
