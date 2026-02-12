@@ -673,11 +673,18 @@ class GrvtAccountMonitor:
 
         balance_total: Optional[Decimal] = None
         balance_available: Optional[Decimal] = None
+        account_summary: Dict[str, Any] = {}
         try:
             balance_payload = self._session.client.fetch_balance() or {}
         except Exception as exc:  # pragma: no cover - network path
             LOGGER.warning("Failed to fetch balance for %s: %s", self._session.label, exc)
             balance_payload = {}
+
+        try:
+            account_summary = self._session.client.get_account_summary() or {}
+        except Exception as exc:  # pragma: no cover - network path
+            LOGGER.warning("Failed to fetch account summary for %s: %s", self._session.label, exc)
+            account_summary = {}
 
         if isinstance(balance_payload, dict):
             total_raw = extract_from_paths(balance_payload, *BALANCE_TOTAL_PATHS)
@@ -720,6 +727,8 @@ class GrvtAccountMonitor:
             "available_balance": decimal_to_str(balance_available),
             "equity": decimal_to_str(equity_total),
             "available_equity": decimal_to_str(equity_available),
+            "initial_margin": decimal_to_str(decimal_from(account_summary.get("initial_margin"))),
+            "maintenance_margin": decimal_to_str(decimal_from(account_summary.get("maintenance_margin"))),
             "updated_at": timestamp,
         }
 
@@ -739,6 +748,8 @@ class GrvtAccountMonitor:
                         "available_balance": decimal_to_str(balance_available),
                         "equity": decimal_to_str(equity_total),
                         "available_equity": decimal_to_str(equity_available),
+                        "initial_margin": decimal_to_str(decimal_from(account_summary.get("initial_margin"))),
+                        "maintenance_margin": decimal_to_str(decimal_from(account_summary.get("maintenance_margin"))),
                         "positions": position_rows,
                         "updated_at": timestamp,
                     }

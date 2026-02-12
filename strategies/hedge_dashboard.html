@@ -13166,6 +13166,18 @@
           const maintenanceSource = metrics.querySelector('[data-metric="maintenance"] .maintenance-source');
           let maintenanceRequirementTotal = 0;
           const sourceCounts = { api: 0, schedule: 0, unknown: 0 };
+          let accountMaintSourceSummary = '';
+          const accountMaintRaw = parseDecimal(
+            account?.maintenance_margin ??
+            account?.maintenanceMargin ??
+            entry.summary?.maintenance_margin ??
+            entry.summary?.maintenanceMargin
+          );
+          const useAccountMaint = Number.isFinite(accountMaintRaw) && accountMaintRaw >= 0;
+          if (useAccountMaint) {
+            maintenanceRequirementTotal = accountMaintRaw;
+            accountMaintSourceSummary = '来源：API(账户汇总)';
+          }
           const initialMarginRequirementTotal = Number.isFinite(entry.initialMarginTotal)
             ? entry.initialMarginTotal
             : 0;
@@ -13187,7 +13199,7 @@
                 })
                 .slice(0, MAX_GRVT_POSITIONS)
             : [];
-          if (positions.length) {
+          if (!useAccountMaint && positions.length) {
             const table = document.createElement('table');
             table.className = 'grvt-positions-table';
             table.innerHTML = `
@@ -13247,7 +13259,7 @@
               body.appendChild(rowEl);
             }
             card.appendChild(table);
-          } else {
+          } else if (!useAccountMaint) {
             const empty = document.createElement('p');
             empty.className = 'grvt-positions-empty';
             empty.textContent = account ? 'No open positions' : 'Awaiting account snapshot';
@@ -13277,7 +13289,7 @@
             if (ratioBaseValue && Number.isFinite(maintenanceRequirementTotal) && maintenanceRequirementTotal >= 0) {
               const ratio = maintenanceRequirementTotal / ratioBaseValue;
               maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
-              const summary = formatMaintSourceSummary(sourceCounts);
+              const summary = accountMaintSourceSummary || formatMaintSourceSummary(sourceCounts);
               if (maintenanceSource) {
                 maintenanceSource.textContent = summary || '';
               }
@@ -13292,7 +13304,7 @@
               });
             } else if (ratioBaseValue) {
               maintenanceBadge.textContent = formatPercent(0, 2);
-              const summary = formatMaintSourceSummary(sourceCounts);
+              const summary = accountMaintSourceSummary || formatMaintSourceSummary(sourceCounts);
               if (maintenanceSource) {
                 maintenanceSource.textContent = summary || '';
               }
@@ -13318,9 +13330,11 @@
             }
           }
 
-          maintSourceTotals.api += sourceCounts.api;
-          maintSourceTotals.schedule += sourceCounts.schedule;
-          maintSourceTotals.unknown += sourceCounts.unknown;
+          if (!useAccountMaint) {
+            maintSourceTotals.api += sourceCounts.api;
+            maintSourceTotals.schedule += sourceCounts.schedule;
+            maintSourceTotals.unknown += sourceCounts.unknown;
+          }
 
           grvtAccountGrid.appendChild(card);
         }
