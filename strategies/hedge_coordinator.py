@@ -144,6 +144,7 @@ PERSISTED_GRVT_AUTO_BALANCE_FILE = Path(__file__).with_name(".grvt_auto_balance_
 PERSISTED_PARA_AUTO_BALANCE_FILE = Path(__file__).with_name(".para_auto_balance_config.json")
 PERSISTED_BP_AUTO_BALANCE_FILE = Path(__file__).with_name(".bp_auto_balance_config.json")
 PERSISTED_PARA_TWAP_SCHEDULER_FILE = Path(__file__).with_name(".para_twap_scheduler_config.json")
+PERSISTED_GRVT_EMERGENCY_REDUCE_FILE = Path(__file__).with_name(".grvt_emergency_reduce_config.json")
 BP_VOLUME_HISTORY_FILE = Path(__file__).with_name(".bp_volume_history.json")
 BP_ADJUSTMENTS_HISTORY_FILE = Path(__file__).with_name(".bp_adjustments_history.json")
 DASHBOARD_PATH = Path(__file__).with_name("hedge_dashboard.html")
@@ -2935,6 +2936,39 @@ class HedgeCoordinator:
         return notional * initial_rate
 
     @staticmethod
+    def _compute_position_maintenance_margin(position: Dict[str, Any]) -> Optional[Decimal]:
+        for field in (
+            "maintenance_margin",
+            "maintenanceMargin",
+            "maint_margin",
+            "maintMargin",
+        ):
+            value = HedgeCoordinator._decimal_from(position.get(field))
+            if value is not None:
+                return value
+        size = None
+        for field in ("net_size", "size", "contracts", "amount"):
+            size = HedgeCoordinator._decimal_from(position.get(field))
+            if size is not None:
+                break
+        price = None
+        for field in ("mark_price", "markPrice", "last_price", "entry_price", "entryPrice"):
+            price = HedgeCoordinator._decimal_from(position.get(field))
+            if price is not None:
+                break
+        if size is None or price is None:
+            return None
+        notional = abs(size * price)
+        if notional <= 0:
+            return None
+        base_asset = HedgeCoordinator._extract_base_asset(position.get("symbol"))
+        tier = HedgeCoordinator._resolve_margin_tier(base_asset, notional)
+        if tier is None:
+            return None
+        _, maintenance_rate = tier
+        return notional * maintenance_rate
+
+    @staticmethod
     def _normalize_symbol_label(value: Any) -> str:
         if value is None:
             return ""
@@ -3839,6 +3873,35 @@ class CoordinatorApp:
             "cooldown_active": False,
             "measurement": None,
         }
+
+        # GRVT emergency reduce
+        self._grvt_emergency_reduce_lock = asyncio.Lock()
+        self._grvt_emergency_reduce_cfg: Dict[str, Any] = {
+            "enabled": False,
+            "threshold_percent": 50.0,
+            "split_count": 10,
+            "interval_seconds": 20.0,
+        }
+        self._grvt_emergency_reduce_status: Dict[str, Any] = {
+            "active": False,
+            "paused": False,
+            "last_trigger_at": None,
+            "last_action_at": None,
+            "current_symbol": None,
+            "current_size": None,
+            "split_size": None,
+            "split_count": None,
+            "remaining_splits": None,
+            "interval_seconds": None,
+            "latest_ratio_percent": None,
+            "trigger_agent_id": None,
+            "trigger_account_label": None,
+            "agent_ids": None,
+            "reason": None,
+        }
+        self._grvt_emergency_reduce_task: Optional[asyncio.Task] = None
+        self._grvt_emergency_reduce_history: List[Dict[str, Any]] = []
+        self._grvt_emergency_reduce_history_limit: int = 500
         self._para_auto_balance_cfg: Optional[AutoBalanceConfig] = None
         self._para_auto_balance_lock = asyncio.Lock()
         self._para_auto_balance_cooldown_until: Optional[float] = None
@@ -3937,6 +4000,7 @@ class CoordinatorApp:
         self._load_persisted_para_auto_balance_config()
         self._load_persisted_bp_auto_balance_config()
         self._load_persisted_para_twap_scheduler_config()
+        self._load_persisted_grvt_emergency_reduce_config()
         self._app = web.Application()
         self._app.add_routes(
             [
@@ -3971,6 +4035,8 @@ class CoordinatorApp:
                 web.post("/grvt/adjust", self.handle_grvt_adjust),
                 web.post("/grvt/transfer", self.handle_grvt_transfer),
                 web.post("/grvt/adjust/ack", self.handle_grvt_adjust_ack),
+                web.get("/grvt/emergency_reduce/config", self.handle_grvt_emergency_reduce_get),
+                web.post("/grvt/emergency_reduce/config", self.handle_grvt_emergency_reduce_update),
                 web.get("/para/adjustments", self.handle_para_adjustments),
                 web.post("/para/adjust", self.handle_para_adjust),
                 web.post("/para/transfer", self.handle_para_transfer),
@@ -4588,6 +4654,386 @@ class CoordinatorApp:
         self._update_auto_balance_config(cfg)
         LOGGER.info("Loaded persisted GRVT auto balance config from disk")
 
+    def _load_persisted_grvt_emergency_reduce_config(self) -> None:
+        path = PERSISTED_GRVT_EMERGENCY_REDUCE_FILE
+        if not path.exists():
+            return
+        try:
+            raw = path.read_text(encoding="utf-8")
+            payload = json.loads(raw)
+        except Exception as exc:
+            LOGGER.warning("Failed to load GRVT emergency reduce config: %s", exc)
+            return
+        if not isinstance(payload, dict):
+            return
+        cfg = self._grvt_emergency_reduce_cfg
+        if "enabled" in payload:
+            cfg["enabled"] = bool(payload.get("enabled"))
+        if "threshold_percent" in payload:
+            try:
+                threshold_raw = payload.get("threshold_percent")
+                if threshold_raw is not None:
+                    cfg["threshold_percent"] = float(threshold_raw)
+            except (TypeError, ValueError):
+                pass
+        if "split_count" in payload:
+            try:
+                split_raw = payload.get("split_count")
+                if split_raw is not None:
+                    cfg["split_count"] = int(split_raw)
+            except (TypeError, ValueError):
+                pass
+        if "interval_seconds" in payload:
+            try:
+                interval_raw = payload.get("interval_seconds")
+                if interval_raw is not None:
+                    cfg["interval_seconds"] = float(interval_raw)
+            except (TypeError, ValueError):
+                pass
+        self._sanitize_grvt_emergency_reduce_config()
+
+    def _persist_grvt_emergency_reduce_config(self) -> None:
+        path = PERSISTED_GRVT_EMERGENCY_REDUCE_FILE
+        try:
+            with suppress(Exception):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "enabled": bool(self._grvt_emergency_reduce_cfg.get("enabled")),
+                "threshold_percent": self._grvt_emergency_reduce_cfg.get("threshold_percent"),
+                "split_count": self._grvt_emergency_reduce_cfg.get("split_count"),
+                "interval_seconds": self._grvt_emergency_reduce_cfg.get("interval_seconds"),
+                "updated_at": time.time(),
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            LOGGER.warning("Failed to persist GRVT emergency reduce config: %s", exc)
+
+    def _sanitize_grvt_emergency_reduce_config(self) -> None:
+        cfg = self._grvt_emergency_reduce_cfg
+        try:
+            threshold = float(cfg.get("threshold_percent") or 0)
+        except (TypeError, ValueError):
+            threshold = 0.0
+        try:
+            split_count = int(cfg.get("split_count") or 0)
+        except (TypeError, ValueError):
+            split_count = 0
+        try:
+            interval = float(cfg.get("interval_seconds") or 0)
+        except (TypeError, ValueError):
+            interval = 0.0
+        cfg["threshold_percent"] = max(threshold, 0.0)
+        cfg["split_count"] = max(1, split_count)
+        cfg["interval_seconds"] = max(interval, 1.0)
+
+    def _grvt_emergency_reduce_snapshot(self) -> Dict[str, Any]:
+        cfg = dict(self._grvt_emergency_reduce_cfg)
+        status = dict(self._grvt_emergency_reduce_status)
+        history = list(self._grvt_emergency_reduce_history)[-self._grvt_emergency_reduce_history_limit :]
+        return {"config": cfg, "status": status, "history": history}
+
+    def _record_grvt_emergency_reduce_history(self, entry: Dict[str, Any]) -> None:
+        if not isinstance(entry, dict):
+            return
+        self._grvt_emergency_reduce_history.append(entry)
+        if len(self._grvt_emergency_reduce_history) > self._grvt_emergency_reduce_history_limit:
+            overflow = len(self._grvt_emergency_reduce_history) - self._grvt_emergency_reduce_history_limit
+            if overflow > 0:
+                self._grvt_emergency_reduce_history = self._grvt_emergency_reduce_history[overflow:]
+
+    def _extract_grvt_accounts_from_snapshot(self, snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+        accounts: List[Dict[str, Any]] = []
+        grvt_map = snapshot.get("grvt_accounts") if isinstance(snapshot, dict) else None
+        if isinstance(grvt_map, dict):
+            for agent_id, payload in grvt_map.items():
+                if not isinstance(payload, dict):
+                    continue
+                summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else None
+                raw_rows = payload.get("accounts")
+                account_rows: List[Dict[str, Any]] = []
+                if isinstance(raw_rows, list):
+                    for row in raw_rows:
+                        if isinstance(row, dict):
+                            account_rows.append(row)
+                for account in account_rows:
+                    accounts.append({
+                        "agent_id": agent_id,
+                        "summary": summary,
+                        "account": account,
+                    })
+        return accounts
+
+    def _compute_grvt_maintenance_ratios(self, snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        accounts = self._extract_grvt_accounts_from_snapshot(snapshot)
+        for row in accounts:
+            account = row.get("account") if isinstance(row.get("account"), dict) else None
+            if not account:
+                continue
+            summary = row.get("summary") if isinstance(row.get("summary"), dict) else None
+            equity = self._coordinator._select_equity_value(account, summary)  # type: ignore[attr-defined]
+            positions = account.get("positions") if isinstance(account.get("positions"), list) else []
+            maint_total = Decimal("0")
+            for pos in positions:
+                if not isinstance(pos, dict):
+                    continue
+                margin = HedgeCoordinator._compute_position_maintenance_margin(pos)
+                if margin is not None:
+                    maint_total += margin
+            ratio = None
+            if equity is not None and equity > 0:
+                try:
+                    ratio = float(maint_total / equity)
+                except Exception:
+                    ratio = None
+            results.append({
+                "agent_id": row.get("agent_id"),
+                "account_label": account.get("name") or (summary.get("label") if summary else None),
+                "maintenance": maint_total,
+                "equity": equity,
+                "ratio": ratio,
+            })
+        return results
+
+    def _compute_grvt_reduce_suggestion(self, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        accounts = self._extract_grvt_accounts_from_snapshot(snapshot)
+        if len(accounts) < 2:
+            return None
+
+        def _coerce(value: Any) -> Decimal:
+            try:
+                return Decimal(str(value))
+            except Exception:
+                return Decimal("0")
+
+        def _normalize_symbol(raw: Any) -> str:
+            base = HedgeCoordinator._extract_base_asset(raw)
+            return base.upper() if base else ""
+
+        packed: List[Dict[str, Any]] = []
+        for row in accounts[:2]:
+            account = row.get("account")
+            if not isinstance(account, dict):
+                continue
+            total_pnl = _coerce(account.get("total_pnl"))
+            raw_positions = account.get("positions")
+            positions: List[Dict[str, Any]] = []
+            if isinstance(raw_positions, list):
+                positions = [pos for pos in raw_positions if isinstance(pos, dict)]
+            symbol_pnl: Dict[str, Decimal] = {}
+            symbol_cap: Dict[str, Decimal] = {}
+            for pos in positions:
+                if not isinstance(pos, dict):
+                    continue
+                sym = _normalize_symbol(pos.get("symbol"))
+                if not sym:
+                    continue
+                size = HedgeCoordinator._decimal_from(pos.get("net_size") or pos.get("size") or pos.get("quantity"))
+                if size is None or size == 0:
+                    continue
+                pnl = HedgeCoordinator._decimal_from(pos.get("pnl") or pos.get("unrealized_pnl") or pos.get("unrealizedPnl"))
+                if pnl is None:
+                    entry = HedgeCoordinator._decimal_from(pos.get("entry_price") or pos.get("entryPrice"))
+                    mark = HedgeCoordinator._decimal_from(pos.get("mark_price") or pos.get("markPrice"))
+                    if entry is not None and mark is not None:
+                        pnl = size * (mark - entry)
+                if pnl is None:
+                    pnl = Decimal("0")
+                symbol_pnl[sym] = symbol_pnl.get(sym, Decimal("0")) + pnl
+                symbol_cap[sym] = symbol_cap.get(sym, Decimal("0")) + abs(size)
+            packed.append({
+                "total": total_pnl,
+                "symbol_pnl": symbol_pnl,
+                "symbol_cap": symbol_cap,
+            })
+
+        worst = min(packed, key=lambda row: row.get("total", Decimal("0")))
+        if worst.get("total", Decimal("0")) >= 0:
+            return None
+        loss = abs(worst.get("total", Decimal("0")))
+
+        candidates = []
+        for sym, pnl in worst.get("symbol_pnl", {}).items():
+            if pnl >= 0:
+                continue
+            cap = worst.get("symbol_cap", {}).get(sym, Decimal("0"))
+            if cap <= 0:
+                continue
+            candidates.append({"symbol": sym, "neg_abs": abs(pnl), "cap": cap})
+        if not candidates:
+            return None
+
+        # require full coverage: candidate must cover full loss
+        candidates = [row for row in candidates if row["neg_abs"] >= loss]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda row: (-(row["neg_abs"] / row["cap"]), row["symbol"]))
+        best = candidates[0]
+        ratio = min(Decimal("1"), loss / best["neg_abs"])
+        size = best["cap"] * ratio
+        return {"symbol": best["symbol"], "size": size}
+
+    async def _maybe_grvt_emergency_reduce(self, snapshot: Dict[str, Any]) -> None:
+        async with self._grvt_emergency_reduce_lock:
+            cfg = dict(self._grvt_emergency_reduce_cfg)
+            status = self._grvt_emergency_reduce_status
+            if status.get("active") or status.get("paused"):
+                return
+            if not cfg.get("enabled"):
+                return
+            threshold = float(cfg.get("threshold_percent") or 0)
+            if threshold <= 0:
+                return
+            ratios = self._compute_grvt_maintenance_ratios(snapshot)
+            if not ratios:
+                return
+            max_row = max(ratios, key=lambda row: row.get("ratio") or 0)
+            max_ratio = max_row.get("ratio")
+            if max_ratio is None:
+                return
+            ratio_percent = max_ratio * 100
+            status["latest_ratio_percent"] = ratio_percent
+            if ratio_percent < threshold:
+                return
+
+            suggestion = self._compute_grvt_reduce_suggestion(snapshot)
+            if not suggestion:
+                status["reason"] = "无法计算减仓建议"
+                return
+
+            symbol = suggestion.get("symbol")
+            size = suggestion.get("size")
+            if not symbol or size is None or size <= 0:
+                status["reason"] = "减仓建议无效"
+                return
+
+            split_count = int(cfg.get("split_count") or 1)
+            interval = float(cfg.get("interval_seconds") or 1)
+            agent_ids = []
+            for row in ratios:
+                agent_id = row.get("agent_id")
+                if agent_id and agent_id not in agent_ids:
+                    agent_ids.append(agent_id)
+            if not agent_ids:
+                return
+            plan = {
+                "symbol": str(symbol),
+                "size": Decimal(size),
+                "split_count": max(1, split_count),
+                "interval_seconds": max(1.0, interval),
+                "agent_ids": agent_ids,
+            }
+            status.update({
+                "active": True,
+                "paused": False,
+                "last_trigger_at": time.time(),
+                "current_symbol": plan["symbol"],
+                "current_size": str(plan["size"]),
+                "split_size": str(plan["size"] / Decimal(str(plan["split_count"]))),
+                "split_count": plan["split_count"],
+                "remaining_splits": plan["split_count"],
+                "interval_seconds": plan["interval_seconds"],
+                "trigger_agent_id": max_row.get("agent_id"),
+                "trigger_account_label": max_row.get("account_label"),
+                "agent_ids": list(agent_ids),
+                "reason": None,
+            })
+            self._grvt_emergency_reduce_task = asyncio.create_task(self._run_grvt_emergency_reduce(plan))
+
+    async def _run_grvt_emergency_reduce(self, plan: Dict[str, Any]) -> None:
+        split_count = int(plan.get("split_count") or 1)
+        interval = float(plan.get("interval_seconds") or 1)
+        agent_ids = list(plan.get("agent_ids") or [])
+        symbol = str(plan.get("symbol") or "")
+        size = plan.get("size") or Decimal("0")
+        if size <= 0 or not symbol or not agent_ids:
+            return
+        split_size = size / Decimal(str(split_count))
+        for idx in range(split_count):
+            async with self._grvt_emergency_reduce_lock:
+                status = self._grvt_emergency_reduce_status
+                if status.get("paused"):
+                    status["active"] = False
+                    status["remaining_splits"] = split_count - idx
+                    self._record_grvt_emergency_reduce_history({
+                        "timestamp": time.time(),
+                        "event": "paused",
+                        "symbol": symbol,
+                        "size": str(size),
+                        "step": idx,
+                        "remaining": split_count - idx,
+                    })
+                    return
+            payload = await self._adjustments.create_request(
+                action="reduce",
+                magnitude=float(split_size),
+                agent_ids=agent_ids,
+                symbols=[symbol],
+                created_by="dashboard:emergency_reduce",
+            )
+            now = time.time()
+            async with self._grvt_emergency_reduce_lock:
+                status = self._grvt_emergency_reduce_status
+                status["last_action_at"] = now
+                status["remaining_splits"] = split_count - idx - 1
+                self._record_grvt_emergency_reduce_history({
+                    "timestamp": now,
+                    "event": "split",
+                    "symbol": symbol,
+                    "size": str(size),
+                    "split_size": str(split_size),
+                    "step": idx + 1,
+                    "total_steps": split_count,
+                    "request_id": payload.get("request_id"),
+                })
+            await asyncio.sleep(interval)
+
+        async with self._grvt_emergency_reduce_lock:
+            status = self._grvt_emergency_reduce_status
+            status["active"] = False
+            status["remaining_splits"] = 0
+            self._record_grvt_emergency_reduce_history({
+                "timestamp": time.time(),
+                "event": "completed",
+                "symbol": symbol,
+                "size": str(size),
+                "total_steps": split_count,
+            })
+
+    async def _resume_grvt_emergency_reduce(self) -> None:
+        async with self._grvt_emergency_reduce_lock:
+            status = self._grvt_emergency_reduce_status
+            if status.get("active") or not status.get("paused"):
+                return
+            remaining = status.get("remaining_splits")
+            symbol = status.get("current_symbol")
+            split_size_raw = status.get("split_size")
+            agent_ids = status.get("agent_ids")
+            interval = status.get("interval_seconds") or self._grvt_emergency_reduce_cfg.get("interval_seconds")
+            if not remaining or not symbol or not split_size_raw or not agent_ids:
+                return
+            try:
+                split_size = Decimal(str(split_size_raw))
+            except Exception:
+                return
+            plan = {
+                "symbol": str(symbol),
+                "size": split_size * Decimal(str(remaining)),
+                "split_count": int(remaining),
+                "interval_seconds": float(interval or 1.0),
+                "agent_ids": list(agent_ids),
+            }
+            status["active"] = True
+            status["paused"] = False
+            status["last_trigger_at"] = time.time()
+            self._record_grvt_emergency_reduce_history({
+                "timestamp": time.time(),
+                "event": "resume",
+                "symbol": plan["symbol"],
+                "remaining": int(remaining),
+            })
+            self._grvt_emergency_reduce_task = asyncio.create_task(self._run_grvt_emergency_reduce(plan))
+
     def _persist_para_auto_balance_config(self) -> None:
         path = PERSISTED_PARA_AUTO_BALANCE_FILE
         try:
@@ -4692,6 +5138,13 @@ class CoordinatorApp:
             dual_task.cancel()
             with suppress(Exception):
                 await _await_with_timeout(dual_task, 5.0, "bp dual volume task")
+
+        # Stop GRVT emergency reduce task if running.
+        if self._grvt_emergency_reduce_task:
+            self._grvt_emergency_reduce_task.cancel()
+            with suppress(Exception):
+                await _await_with_timeout(self._grvt_emergency_reduce_task, 5.0, "grvt emergency reduce task")
+            self._grvt_emergency_reduce_task = None
 
         # Best-effort persist.
         with suppress(Exception):
@@ -5936,6 +6389,7 @@ class CoordinatorApp:
         payload["auto_balance"] = self._auto_balance_status_snapshot()
         payload["para_auto_balance"] = self._para_auto_balance_status_snapshot()
         payload["bp_auto_balance"] = self._bp_auto_balance_status_snapshot()
+        payload["grvt_emergency_reduce"] = self._grvt_emergency_reduce_snapshot()
         tasks = [dict(t) for t in (getattr(self, "_para_twap_scheduler_tasks", None) or [])]
         payload["para_twap_scheduler"] = {
             "enabled": bool(tasks),
@@ -6004,6 +6458,7 @@ class CoordinatorApp:
         snapshot["auto_balance"] = self._auto_balance_status_snapshot()
         snapshot["para_auto_balance"] = self._para_auto_balance_status_snapshot()
         snapshot["bp_auto_balance"] = self._bp_auto_balance_status_snapshot()
+        snapshot["grvt_emergency_reduce"] = self._grvt_emergency_reduce_snapshot()
 
         with suppress(Exception):
             await self._para_twap_scheduler_rollup_history()
@@ -6023,6 +6478,8 @@ class CoordinatorApp:
         # status fields after config is enabled.
         with suppress(Exception):
             await self._maybe_para_auto_balance(snapshot)
+        with suppress(Exception):
+            await self._maybe_grvt_emergency_reduce(snapshot)
         return web.json_response(snapshot)
 
     async def handle_control_get(self, request: web.Request) -> web.Response:
@@ -7156,6 +7613,58 @@ class CoordinatorApp:
         self._enforce_dashboard_auth(request)
         summary = await self._adjustments.summary()
         return web.json_response(summary)
+
+    async def handle_grvt_emergency_reduce_get(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        return web.json_response(self._grvt_emergency_reduce_snapshot())
+
+    async def handle_grvt_emergency_reduce_update(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
+        try:
+            body = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="payload must be JSON")
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="payload must be an object")
+        async with self._grvt_emergency_reduce_lock:
+            cfg = self._grvt_emergency_reduce_cfg
+            if "enabled" in body:
+                cfg["enabled"] = self._interpret_bool(body.get("enabled"))
+            if "threshold_percent" in body:
+                threshold = self._extract_numeric_field(body, ["threshold_percent"], field_name="threshold_percent")
+                if threshold is not None:
+                    cfg["threshold_percent"] = threshold
+            if "split_count" in body:
+                split_raw = body.get("split_count")
+                if split_raw is not None:
+                    try:
+                        cfg["split_count"] = int(float(split_raw))
+                    except (TypeError, ValueError):
+                        raise web.HTTPBadRequest(text="split_count must be numeric")
+            if "interval_seconds" in body:
+                interval = self._extract_numeric_field(body, ["interval_seconds"], field_name="interval_seconds")
+                if interval is not None:
+                    cfg["interval_seconds"] = interval
+            self._sanitize_grvt_emergency_reduce_config()
+            self._persist_grvt_emergency_reduce_config()
+
+            status = self._grvt_emergency_reduce_status
+            action = str(body.get("action") or "").strip().lower()
+            paused_flag = body.get("paused") if "paused" in body else None
+            if action == "pause" or paused_flag is True:
+                status["paused"] = True
+                self._record_grvt_emergency_reduce_history({
+                    "timestamp": time.time(),
+                    "event": "pause",
+                })
+            if action == "resume" or paused_flag is False:
+                status["paused"] = False
+                await self._resume_grvt_emergency_reduce()
+
+            if self._interpret_bool(body.get("clear_history")):
+                self._grvt_emergency_reduce_history = []
+
+        return web.json_response(self._grvt_emergency_reduce_snapshot())
 
     async def handle_para_adjustments(self, request: web.Request) -> web.Response:
         self._enforce_dashboard_auth(request)

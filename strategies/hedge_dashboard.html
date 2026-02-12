@@ -2496,6 +2496,77 @@
             </table>
           </div>
         </div>
+        <div class="grvt-adjust-panel" id="grvt-emergency-panel">
+          <div class="grvt-adjust-header">
+            <div>
+              <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">GRVT 紧急减仓</h3>
+              <p class="summary-sub" style="margin: 0;">维护率超过阈值时按减仓建议自动分次减仓</p>
+            </div>
+            <div class="risk-status-pill" id="grvt-emergency-status">加载中…</div>
+          </div>
+          <div class="grvt-adjust-controls" style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+            <label>
+              启用紧急减仓
+              <div class="grvt-auto-checkbox" style="margin-top: 0.35rem;">
+                <input type="checkbox" id="grvt-emergency-enabled" />
+                <span>开关</span>
+              </div>
+            </label>
+            <label>
+              维护率阈值 (%)
+              <input type="number" id="grvt-emergency-threshold" min="1" max="100" step="0.5" value="50" />
+            </label>
+            <label>
+              拆分次数
+              <input type="number" id="grvt-emergency-split-count" min="1" max="50" step="1" value="10" />
+            </label>
+            <label>
+              间隔 (秒)
+              <input type="number" id="grvt-emergency-interval" min="1" max="600" step="1" value="20" />
+            </label>
+          </div>
+          <div class="risk-inline-inputs" style="margin-top: 0.5rem;">
+            <label>
+              账号1 Maint
+              <input type="text" id="grvt-emergency-maint-a" readonly />
+            </label>
+            <label>
+              账号2 Maint
+              <input type="text" id="grvt-emergency-maint-b" readonly />
+            </label>
+          </div>
+          <div class="risk-settings-actions" style="margin-top: 0;">
+            <div class="risk-actions-left">
+              <button type="button" id="grvt-emergency-save">保存配置</button>
+              <button type="button" class="button-ghost" id="grvt-emergency-refresh">重新读取</button>
+              <button type="button" class="button-danger" id="grvt-emergency-pause">暂停</button>
+              <button type="button" class="button-success" id="grvt-emergency-resume">恢复</button>
+            </div>
+            <p class="risk-settings-message" id="grvt-emergency-message">未加载</p>
+          </div>
+          <div class="risk-history-card">
+            <div class="risk-history-header">
+              <h3>紧急减仓历史</h3>
+            </div>
+            <p class="risk-history-status" id="grvt-emergency-history-status">等待历史数据…</p>
+            <div class="risk-history-table-wrapper">
+              <table class="risk-history-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>事件</th>
+                    <th>币种</th>
+                    <th>数量</th>
+                    <th>拆分</th>
+                    <th>请求</th>
+                  </tr>
+                </thead>
+                <tbody id="grvt-emergency-history-body"></tbody>
+              </table>
+              <p class="risk-history-empty hidden" id="grvt-emergency-history-empty">暂无记录</p>
+            </div>
+          </div>
+        </div>
         <div class="grvt-transfer-panel hidden" id="grvt-transfer-panel">
           <div class="grvt-adjust-header">
             <h3 style="margin: 0 0 0.35rem; font-size: 1rem;">账户间资金划转</h3>
@@ -4317,6 +4388,22 @@
   const grvtAdjustStatus = document.getElementById('grvt-adjust-status');
   const grvtAdjustScope = document.getElementById('grvt-adjust-scope');
   const grvtAdjustHistoryBody = document.getElementById('grvt-adjust-history');
+  const grvtEmergencyPanel = document.getElementById('grvt-emergency-panel');
+  const grvtEmergencyStatus = document.getElementById('grvt-emergency-status');
+  const grvtEmergencyMessage = document.getElementById('grvt-emergency-message');
+  const grvtEmergencyEnabledInput = document.getElementById('grvt-emergency-enabled');
+  const grvtEmergencyThresholdInput = document.getElementById('grvt-emergency-threshold');
+  const grvtEmergencySplitCountInput = document.getElementById('grvt-emergency-split-count');
+  const grvtEmergencyIntervalInput = document.getElementById('grvt-emergency-interval');
+  const grvtEmergencySaveButton = document.getElementById('grvt-emergency-save');
+  const grvtEmergencyRefreshButton = document.getElementById('grvt-emergency-refresh');
+  const grvtEmergencyPauseButton = document.getElementById('grvt-emergency-pause');
+  const grvtEmergencyResumeButton = document.getElementById('grvt-emergency-resume');
+  const grvtEmergencyMaintA = document.getElementById('grvt-emergency-maint-a');
+  const grvtEmergencyMaintB = document.getElementById('grvt-emergency-maint-b');
+  const grvtEmergencyHistoryBody = document.getElementById('grvt-emergency-history-body');
+  const grvtEmergencyHistoryEmpty = document.getElementById('grvt-emergency-history-empty');
+  const grvtEmergencyHistoryStatus = document.getElementById('grvt-emergency-history-status');
   const grvtTransferPanel = document.getElementById('grvt-transfer-panel');
   const grvtTransferSourceSelect = document.getElementById('grvt-transfer-source');
   const grvtTransferTargetSelect = document.getElementById('grvt-transfer-target');
@@ -4493,11 +4580,13 @@
       let lastMetricsSnapshot = null;
   let grvtAdjustLocked = false;
   let grvtPendingRequestId = null;
+  let grvtEmergencyBusy = false;
   let paraAdjustLocked = false;
   let paraPendingRequestId = null;
   let bpAdjustLocked = false;
   let bpPendingRequestId = null;
   let bpAdjustStatusStickyUntil = 0;
+  let grvtEmergencyMaintStats = [];
 
   // Allow concurrent TWAPs on the same agent as long as they are for different symbols.
   // We track which symbols are currently active (pending/running/in_progress) for the
@@ -12925,8 +13014,9 @@
         const shouldRebuildGrid = !grvtAccountGridKey || grvtAccountGridKey !== accountRenderKey;
         grvtAccountGridKey = accountRenderKey;
 
-        let aggregateMaintRequirement = 0;
-        let aggregateMaintBase = 0;
+  let aggregateMaintRequirement = 0;
+  let aggregateMaintBase = 0;
+  const emergencyMaintEntries = [];
         const accountStats = [];
         for (const entry of flattenedAccounts) {
           const account = entry.account;
@@ -13138,10 +13228,25 @@
               maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
               aggregateMaintRequirement += maintenanceRequirementTotal;
               aggregateMaintBase += ratioBaseValue;
+              emergencyMaintEntries.push({
+                label: displayName,
+                ratio: formatPercent(ratio * 100, 2),
+                value: ratio,
+              });
             } else if (ratioBaseValue) {
               maintenanceBadge.textContent = formatPercent(0, 2);
+              emergencyMaintEntries.push({
+                label: displayName,
+                ratio: formatPercent(0, 2),
+                value: 0,
+              });
             } else {
               maintenanceBadge.textContent = '—';
+              emergencyMaintEntries.push({
+                label: displayName,
+                ratio: '—',
+                value: null,
+              });
             }
           }
 
@@ -13209,7 +13314,201 @@
           }
         }
 
+        emergencyMaintEntries.sort((a, b) => {
+          if (a.label === b.label) return 0;
+          return String(a.label || '').localeCompare(String(b.label || ''), undefined, { sensitivity: 'base' });
+        });
+        grvtEmergencyMaintStats = emergencyMaintEntries;
         updateGrvtSymbolOptions(Array.from(symbolCandidates));
+      }
+
+      function renderGrvtEmergencyReduce(payload) {
+        if (!grvtEmergencyPanel) {
+          return;
+        }
+        const config = payload?.config || {};
+        const status = payload?.status || {};
+        const history = Array.isArray(payload?.history) ? payload.history : [];
+
+        if (grvtEmergencyEnabledInput) {
+          grvtEmergencyEnabledInput.checked = Boolean(config.enabled);
+        }
+        if (grvtEmergencyThresholdInput && Number.isFinite(Number(config.threshold_percent))) {
+          grvtEmergencyThresholdInput.value = Number(config.threshold_percent).toFixed(1);
+        }
+        if (grvtEmergencySplitCountInput && Number.isFinite(Number(config.split_count))) {
+          grvtEmergencySplitCountInput.value = String(Math.max(1, Math.round(Number(config.split_count))));
+        }
+        if (grvtEmergencyIntervalInput && Number.isFinite(Number(config.interval_seconds))) {
+          grvtEmergencyIntervalInput.value = String(Math.max(1, Math.round(Number(config.interval_seconds))));
+        }
+
+        const paused = Boolean(status.paused);
+        const active = Boolean(status.active);
+        if (grvtEmergencyStatus) {
+          if (active && !paused) {
+            grvtEmergencyStatus.textContent = '运行中';
+          } else if (paused) {
+            grvtEmergencyStatus.textContent = '已暂停';
+          } else {
+            grvtEmergencyStatus.textContent = '待机';
+          }
+        }
+
+        if (grvtEmergencyMessage) {
+          const parts = [];
+          if (Number.isFinite(Number(status.latest_ratio_percent))) {
+            parts.push(`最新 maint ${Number(status.latest_ratio_percent).toFixed(2)}%`);
+          }
+          if (status.current_symbol && status.current_size) {
+            parts.push(`目标 ${status.current_symbol} ${status.current_size}`);
+          }
+          if (Number.isFinite(Number(status.remaining_splits))) {
+            parts.push(`剩余 ${status.remaining_splits}/${status.split_count || '--'}`);
+          }
+          if (status.reason) {
+            parts.push(String(status.reason));
+          }
+          grvtEmergencyMessage.textContent = parts.length ? parts.join(' · ') : '未加载';
+        }
+
+        updateGrvtEmergencyInputsState();
+
+        const maintEntries = Array.isArray(grvtEmergencyMaintStats) ? grvtEmergencyMaintStats : [];
+        if (grvtEmergencyMaintA) {
+          const first = maintEntries[0];
+          grvtEmergencyMaintA.value = first ? `${first.label}: ${first.ratio}` : '--';
+        }
+        if (grvtEmergencyMaintB) {
+          const second = maintEntries[1];
+          grvtEmergencyMaintB.value = second ? `${second.label}: ${second.ratio}` : '--';
+        }
+
+        if (grvtEmergencyHistoryBody && grvtEmergencyHistoryEmpty && grvtEmergencyHistoryStatus) {
+          grvtEmergencyHistoryBody.innerHTML = '';
+          if (!history.length) {
+            grvtEmergencyHistoryEmpty.classList.remove('hidden');
+            grvtEmergencyHistoryStatus.textContent = '暂无记录';
+          } else {
+            grvtEmergencyHistoryEmpty.classList.add('hidden');
+            grvtEmergencyHistoryStatus.textContent = `已加载 ${history.length} 条记录`;
+            const fragment = document.createDocumentFragment();
+            history.forEach((entry) => {
+              const row = document.createElement('tr');
+              const timeText = formatTimestamp(entry?.timestamp) || '—';
+              const event = entry?.event || '--';
+              const symbol = entry?.symbol || '--';
+              const size = entry?.split_size || entry?.size || '--';
+              const step = entry?.step ? `${entry.step}/${entry.total_steps || '--'}` : (entry?.total_steps ? `0/${entry.total_steps}` : '--');
+              const requestId = entry?.request_id || '--';
+              row.innerHTML = `
+                <td>${escapeHtml(timeText)}</td>
+                <td>${escapeHtml(event)}</td>
+                <td>${escapeHtml(symbol)}</td>
+                <td>${escapeHtml(String(size))}</td>
+                <td>${escapeHtml(String(step))}</td>
+                <td>${escapeHtml(String(requestId))}</td>
+              `;
+              fragment.appendChild(row);
+            });
+            grvtEmergencyHistoryBody.appendChild(fragment);
+          }
+        }
+      }
+
+      async function loadGrvtEmergencyReduce({ silent = false } = {}) {
+        if (!grvtEmergencyPanel || grvtEmergencyBusy) {
+          return;
+        }
+        grvtEmergencyBusy = true;
+        if (!silent && grvtEmergencyMessage) {
+          grvtEmergencyMessage.textContent = '读取配置中…';
+        }
+        try {
+          const response = await fetch('/grvt/emergency_reduce/config', { cache: 'no-store' });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          renderGrvtEmergencyReduce(result);
+          if (grvtEmergencyMessage) {
+            grvtEmergencyMessage.textContent = '配置已同步';
+          }
+        } catch (error) {
+          if (grvtEmergencyMessage) {
+            grvtEmergencyMessage.textContent = `读取失败：${error}`;
+          }
+        } finally {
+          grvtEmergencyBusy = false;
+          updateGrvtEmergencyInputsState();
+        }
+      }
+
+      async function saveGrvtEmergencyReduceConfig(action) {
+        if (!grvtEmergencyPanel || grvtEmergencyBusy) {
+          return;
+        }
+        grvtEmergencyBusy = true;
+        if (grvtEmergencyMessage) {
+          grvtEmergencyMessage.textContent = '保存配置中…';
+        }
+        try {
+          const payload = {
+            enabled: Boolean(grvtEmergencyEnabledInput?.checked),
+            threshold_percent: Number(grvtEmergencyThresholdInput?.value || 0),
+            split_count: Number(grvtEmergencySplitCountInput?.value || 0),
+            interval_seconds: Number(grvtEmergencyIntervalInput?.value || 0),
+          };
+          if (action) {
+            payload.action = action;
+          }
+          const response = await fetch('/grvt/emergency_reduce/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          redirectIfUnauthorized(response);
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+          }
+          const result = await response.json();
+          renderGrvtEmergencyReduce(result);
+          if (grvtEmergencyMessage) {
+            grvtEmergencyMessage.textContent = '配置已保存';
+          }
+        } catch (error) {
+          if (grvtEmergencyMessage) {
+            grvtEmergencyMessage.textContent = `保存失败：${error}`;
+          }
+        } finally {
+          grvtEmergencyBusy = false;
+          updateGrvtEmergencyInputsState();
+        }
+      }
+
+      function updateGrvtEmergencyInputsState() {
+        const enabled = Boolean(grvtEmergencyEnabledInput?.checked);
+        const busy = grvtEmergencyBusy;
+        [grvtEmergencyThresholdInput, grvtEmergencySplitCountInput, grvtEmergencyIntervalInput].forEach((input) => {
+          if (input) {
+            input.disabled = busy || !enabled;
+          }
+        });
+        if (grvtEmergencyEnabledInput) {
+          grvtEmergencyEnabledInput.disabled = busy;
+        }
+        if (grvtEmergencyPauseButton) {
+          grvtEmergencyPauseButton.disabled = busy;
+        }
+        if (grvtEmergencyResumeButton) {
+          grvtEmergencyResumeButton.disabled = busy;
+        }
+        if (grvtEmergencySaveButton) {
+          grvtEmergencySaveButton.disabled = busy;
+        }
       }
 
       function renderBackpack(data) {
@@ -14243,6 +14542,7 @@
           renderAgents(data);
           renderPara(data);
           renderGrvt(data);
+          renderGrvtEmergencyReduce(data?.grvt_emergency_reduce);
           renderBackpack(data);
           renderParaAdjustments(data?.para_adjustments);
           renderParaTwapScheduler(data?.para_twap_scheduler);
@@ -14365,6 +14665,26 @@
       }
       if (grvtAdjustReduceButton) {
         grvtAdjustReduceButton.addEventListener('click', () => sendGrvtAdjustment('reduce'));
+      }
+      if (grvtEmergencySaveButton) {
+        grvtEmergencySaveButton.addEventListener('click', () => saveGrvtEmergencyReduceConfig());
+      }
+      if (grvtEmergencyRefreshButton) {
+        grvtEmergencyRefreshButton.addEventListener('click', () => loadGrvtEmergencyReduce({ silent: false }));
+      }
+      if (grvtEmergencyPauseButton) {
+        grvtEmergencyPauseButton.addEventListener('click', () => saveGrvtEmergencyReduceConfig('pause'));
+      }
+      if (grvtEmergencyResumeButton) {
+        grvtEmergencyResumeButton.addEventListener('click', () => saveGrvtEmergencyReduceConfig('resume'));
+      }
+      if (grvtEmergencyEnabledInput) {
+        grvtEmergencyEnabledInput.addEventListener('change', () => {
+          updateGrvtEmergencyInputsState();
+        });
+      }
+      if (grvtEmergencyPanel) {
+        loadGrvtEmergencyReduce({ silent: true });
       }
       if (paraOrderModeSelect) {
         paraOrderModeSelect.addEventListener('change', updateTwapVisibility);
