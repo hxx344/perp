@@ -13199,7 +13199,7 @@
                 })
                 .slice(0, MAX_GRVT_POSITIONS)
             : [];
-          if (!useAccountMaint && positions.length) {
+          if (positions.length) {
             const table = document.createElement('table');
             table.className = 'grvt-positions-table';
             table.innerHTML = `
@@ -13229,7 +13229,9 @@
               const pnlClass = percentClass(pnlValue);
               const marginInfo = row.marginInfo;
               if (marginInfo && Number.isFinite(marginInfo.maintenanceMargin)) {
-                maintenanceRequirementTotal += marginInfo.maintenanceMargin;
+                if (!useAccountMaint) {
+                  maintenanceRequirementTotal += marginInfo.maintenanceMargin;
+                }
                 const sourceKey = marginInfo.source || 'unknown';
                 if (sourceKey === 'api') {
                   sourceCounts.api += 1;
@@ -13259,7 +13261,7 @@
               body.appendChild(rowEl);
             }
             card.appendChild(table);
-          } else if (!useAccountMaint) {
+          } else {
             const empty = document.createElement('p');
             empty.className = 'grvt-positions-empty';
             empty.textContent = account ? 'No open positions' : 'Awaiting account snapshot';
