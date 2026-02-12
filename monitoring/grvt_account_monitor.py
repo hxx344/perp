@@ -685,6 +685,14 @@ class GrvtAccountMonitor:
         except Exception as exc:  # pragma: no cover - network path
             LOGGER.warning("Failed to fetch account summary for %s: %s", self._session.label, exc)
             account_summary = {}
+        if isinstance(account_summary, dict):
+            if account_summary.get("maintenance_margin") is None or account_summary.get("initial_margin") is None:
+                LOGGER.warning(
+                    "GRVT account summary missing margin fields for %s (initial_margin=%s maintenance_margin=%s)",
+                    self._session.label,
+                    account_summary.get("initial_margin"),
+                    account_summary.get("maintenance_margin"),
+                )
 
         if isinstance(balance_payload, dict):
             total_raw = extract_from_paths(balance_payload, *BALANCE_TOTAL_PATHS)
