@@ -341,6 +341,26 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
         ("info", "unrealized_pnl"),
         ("info", "pnl"),
     ]
+    isolated_im_candidates = [
+        ("isolated_im",),
+        ("isolatedIM",),
+        ("initial_margin",),
+        ("initialMargin",),
+        ("info", "isolated_im"),
+        ("info", "isolatedIM"),
+        ("info", "initial_margin"),
+        ("info", "initialMargin"),
+    ]
+    isolated_mm_candidates = [
+        ("isolated_mm",),
+        ("isolatedMM",),
+        ("maintenance_margin",),
+        ("maintenanceMargin",),
+        ("info", "isolated_mm"),
+        ("info", "isolatedMM"),
+        ("info", "maintenance_margin"),
+        ("info", "maintenanceMargin"),
+    ]
 
     raw_size = extract_from_paths(entry, *size_candidates)
     size_value = decimal_from(raw_size)
@@ -353,6 +373,10 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
     mark_price = decimal_from(raw_mark)
     raw_pnl = extract_from_paths(entry, *pnl_candidates)
     pnl_value = decimal_from(raw_pnl)
+    raw_isolated_im = extract_from_paths(entry, *isolated_im_candidates)
+    isolated_im = decimal_from(raw_isolated_im)
+    raw_isolated_mm = extract_from_paths(entry, *isolated_mm_candidates)
+    isolated_mm = decimal_from(raw_isolated_mm)
 
     if pnl_value is None and None not in (signed_size, entry_price, mark_price):
         try:
@@ -370,6 +394,8 @@ def compute_position_pnl(entry: Dict[str, Any]) -> Tuple[Decimal, Dict[str, Any]
         "entry_price": decimal_to_str(entry_price),
         "mark_price": decimal_to_str(mark_price),
         "pnl": decimal_to_str(pnl_value),
+        "isolated_im": decimal_to_str(isolated_im),
+        "isolated_mm": decimal_to_str(isolated_mm),
     }
     return pnl_value, payload, signed_size
 
