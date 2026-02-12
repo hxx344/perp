@@ -1271,6 +1271,14 @@
         font-weight: 600;
       }
 
+      .grvt-account-metrics .maintenance-source {
+        display: block;
+        font-size: 0.72rem;
+        font-weight: 500;
+        color: #8a94a6;
+        margin-top: 0.15rem;
+      }
+
       .grvt-positions-table {
         width: 100%;
         border-collapse: collapse;
@@ -13128,7 +13136,7 @@
             <div><dt>Wallet</dt><dd>${escapeHtml(Number.isFinite(walletValue) ? numberFormatter.format(walletValue) : '--')}</dd></div>
             <div><dt>Total</dt><dd>${escapeHtml(Number.isFinite(entry.totalValue) ? numberFormatter.format(entry.totalValue) : '--')}</dd></div>
             <div data-metric="transfer"><dt>可转</dt><dd><span class="transfer-amount">—</span></dd></div>
-            <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span></dd></div>
+            <div data-metric="maintenance"><dt>Maint.</dt><dd><span class="maintenance-ratio">—</span><span class="maintenance-source"></span></dd></div>
             <div data-metric="risk"><dt>Risk</dt><dd><span class="risk-pill risk-pill-inline">—</span></dd></div>
           `;
           card.appendChild(metrics);
@@ -13145,6 +13153,7 @@
           }
 
           const maintenanceBadge = metrics.querySelector('[data-metric="maintenance"] .maintenance-ratio');
+          const maintenanceSource = metrics.querySelector('[data-metric="maintenance"] .maintenance-source');
           let maintenanceRequirementTotal = 0;
           const sourceCounts = { api: 0, schedule: 0, unknown: 0 };
           const initialMarginRequirementTotal = Number.isFinite(entry.initialMarginTotal)
@@ -13259,11 +13268,10 @@
               const ratio = maintenanceRequirementTotal / ratioBaseValue;
               maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
               const summary = formatMaintSourceSummary(sourceCounts);
-              if (summary) {
-                maintenanceBadge.title = summary;
-              } else {
-                maintenanceBadge.removeAttribute('title');
+              if (maintenanceSource) {
+                maintenanceSource.textContent = summary || '';
               }
+              maintenanceBadge.title = summary || '';
               aggregateMaintRequirement += maintenanceRequirementTotal;
               aggregateMaintBase += ratioBaseValue;
               emergencyMaintEntries.push({
@@ -13275,11 +13283,10 @@
             } else if (ratioBaseValue) {
               maintenanceBadge.textContent = formatPercent(0, 2);
               const summary = formatMaintSourceSummary(sourceCounts);
-              if (summary) {
-                maintenanceBadge.title = summary;
-              } else {
-                maintenanceBadge.removeAttribute('title');
+              if (maintenanceSource) {
+                maintenanceSource.textContent = summary || '';
               }
+              maintenanceBadge.title = summary || '';
               emergencyMaintEntries.push({
                 label: displayName,
                 ratio: formatPercent(0, 2),
@@ -13288,7 +13295,10 @@
               });
             } else {
               maintenanceBadge.textContent = '—';
-              maintenanceBadge.removeAttribute('title');
+              if (maintenanceSource) {
+                maintenanceSource.textContent = '';
+              }
+              maintenanceBadge.title = '';
               emergencyMaintEntries.push({
                 label: displayName,
                 ratio: '—',
