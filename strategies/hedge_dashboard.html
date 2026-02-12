@@ -2517,6 +2517,10 @@
               <input type="number" id="grvt-emergency-threshold" min="1" max="100" step="0.5" value="50" />
             </label>
             <label>
+              停止阈值 (%)
+              <input type="number" id="grvt-emergency-stop-threshold" min="0" max="100" step="0.5" value="30" />
+            </label>
+            <label>
               拆分次数
               <input type="number" id="grvt-emergency-split-count" min="1" max="50" step="1" value="10" />
             </label>
@@ -4393,6 +4397,7 @@
   const grvtEmergencyMessage = document.getElementById('grvt-emergency-message');
   const grvtEmergencyEnabledInput = document.getElementById('grvt-emergency-enabled');
   const grvtEmergencyThresholdInput = document.getElementById('grvt-emergency-threshold');
+  const grvtEmergencyStopThresholdInput = document.getElementById('grvt-emergency-stop-threshold');
   const grvtEmergencySplitCountInput = document.getElementById('grvt-emergency-split-count');
   const grvtEmergencyIntervalInput = document.getElementById('grvt-emergency-interval');
   const grvtEmergencySaveButton = document.getElementById('grvt-emergency-save');
@@ -13336,6 +13341,9 @@
         if (grvtEmergencyThresholdInput && Number.isFinite(Number(config.threshold_percent))) {
           grvtEmergencyThresholdInput.value = Number(config.threshold_percent).toFixed(1);
         }
+        if (grvtEmergencyStopThresholdInput && Number.isFinite(Number(config.stop_threshold_percent))) {
+          grvtEmergencyStopThresholdInput.value = Number(config.stop_threshold_percent).toFixed(1);
+        }
         if (grvtEmergencySplitCountInput && Number.isFinite(Number(config.split_count))) {
           grvtEmergencySplitCountInput.value = String(Math.max(1, Math.round(Number(config.split_count))));
         }
@@ -13458,6 +13466,7 @@
           const payload = {
             enabled: Boolean(grvtEmergencyEnabledInput?.checked),
             threshold_percent: Number(grvtEmergencyThresholdInput?.value || 0),
+            stop_threshold_percent: Number(grvtEmergencyStopThresholdInput?.value || 0),
             split_count: Number(grvtEmergencySplitCountInput?.value || 0),
             interval_seconds: Number(grvtEmergencyIntervalInput?.value || 0),
           };
@@ -13492,7 +13501,12 @@
       function updateGrvtEmergencyInputsState() {
         const enabled = Boolean(grvtEmergencyEnabledInput?.checked);
         const busy = grvtEmergencyBusy;
-        [grvtEmergencyThresholdInput, grvtEmergencySplitCountInput, grvtEmergencyIntervalInput].forEach((input) => {
+        [
+          grvtEmergencyThresholdInput,
+          grvtEmergencyStopThresholdInput,
+          grvtEmergencySplitCountInput,
+          grvtEmergencyIntervalInput,
+        ].forEach((input) => {
           if (input) {
             input.disabled = busy || !enabled;
           }

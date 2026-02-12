@@ -3879,6 +3879,7 @@ class CoordinatorApp:
         self._grvt_emergency_reduce_cfg: Dict[str, Any] = {
             "enabled": False,
             "threshold_percent": 50.0,
+            "stop_threshold_percent": 30.0,
             "split_count": 10,
             "interval_seconds": 20.0,
         }
@@ -4676,6 +4677,13 @@ class CoordinatorApp:
                     cfg["threshold_percent"] = float(threshold_raw)
             except (TypeError, ValueError):
                 pass
+        if "stop_threshold_percent" in payload:
+            try:
+                threshold_raw = payload.get("stop_threshold_percent")
+                if threshold_raw is not None:
+                    cfg["stop_threshold_percent"] = float(threshold_raw)
+            except (TypeError, ValueError):
+                pass
         if "split_count" in payload:
             try:
                 split_raw = payload.get("split_count")
@@ -4700,6 +4708,7 @@ class CoordinatorApp:
             payload = {
                 "enabled": bool(self._grvt_emergency_reduce_cfg.get("enabled")),
                 "threshold_percent": self._grvt_emergency_reduce_cfg.get("threshold_percent"),
+                "stop_threshold_percent": self._grvt_emergency_reduce_cfg.get("stop_threshold_percent"),
                 "split_count": self._grvt_emergency_reduce_cfg.get("split_count"),
                 "interval_seconds": self._grvt_emergency_reduce_cfg.get("interval_seconds"),
                 "updated_at": time.time(),
@@ -4715,6 +4724,10 @@ class CoordinatorApp:
         except (TypeError, ValueError):
             threshold = 0.0
         try:
+            stop_threshold = float(cfg.get("stop_threshold_percent") or 0)
+        except (TypeError, ValueError):
+            stop_threshold = 0.0
+        try:
             split_count = int(cfg.get("split_count") or 0)
         except (TypeError, ValueError):
             split_count = 0
@@ -4723,8 +4736,35 @@ class CoordinatorApp:
         except (TypeError, ValueError):
             interval = 0.0
         cfg["threshold_percent"] = max(threshold, 0.0)
+        cfg["stop_threshold_percent"] = max(stop_threshold, 0.0)
         cfg["split_count"] = max(1, split_count)
         cfg["interval_seconds"] = max(interval, 1.0)
+
+    @staticmethod
+    def _resolve_grvt_trigger_ratio(
+        ratios: Sequence[Dict[str, Any]],
+        trigger_agent_id: Optional[str],
+        trigger_account_label: Optional[str],
+    ) -> Optional[float]:
+        if not ratios:
+            return None
+        if trigger_agent_id:
+            for row in ratios:
+                if row.get("agent_id") != trigger_agent_id:
+                    continue
+                if trigger_account_label and row.get("account_label") != trigger_account_label:
+                    continue
+                ratio = row.get("ratio")
+                return ratio if isinstance(ratio, (int, float)) else None
+        if trigger_account_label:
+            for row in ratios:
+                if row.get("account_label") != trigger_account_label:
+                    continue
+                ratio = row.get("ratio")
+                return ratio if isinstance(ratio, (int, float)) else None
+        best = max(ratios, key=lambda row: row.get("ratio") or -1)
+        ratio = best.get("ratio")
+        return ratio if isinstance(ratio, (int, float)) else None
 
     def _grvt_emergency_reduce_snapshot(self) -> Dict[str, Any]:
         cfg = dict(self._grvt_emergency_reduce_cfg)
@@ -4950,6 +4990,9 @@ class CoordinatorApp:
             return
         split_size = size / Decimal(str(split_count))
         for idx in range(split_count):
+            trigger_agent_id = None
+            trigger_account_label = None
+            stop_threshold = 0.0
             async with self._grvt_emergency_reduce_lock:
                 status = self._grvt_emergency_reduce_status
                 if status.get("paused"):
@@ -4964,6 +5007,43 @@ class CoordinatorApp:
                         "remaining": split_count - idx,
                     })
                     return
+                cfg = dict(self._grvt_emergency_reduce_cfg)
+                trigger_agent_id = status.get("trigger_agent_id")
+                trigger_account_label = status.get("trigger_account_label")
+                try:
+                    stop_threshold = float(cfg.get("stop_threshold_percent") or 0)
+                except (TypeError, ValueError):
+                    stop_threshold = 0.0
+            if stop_threshold > 0:
+                ratio_percent = None
+                try:
+                    snapshot = await self._coordinator.snapshot()
+                    ratios = self._compute_grvt_maintenance_ratios(snapshot)
+                    ratio = self._resolve_grvt_trigger_ratio(ratios, trigger_agent_id, trigger_account_label)
+                    if ratio is not None:
+                        ratio_percent = ratio * 100
+                except Exception:
+                    ratio_percent = None
+                if ratio_percent is not None and ratio_percent < stop_threshold:
+                    async with self._grvt_emergency_reduce_lock:
+                        status = self._grvt_emergency_reduce_status
+                        status["latest_ratio_percent"] = ratio_percent
+                        status["active"] = False
+                        status["remaining_splits"] = 0
+                        status["reason"] = f"维护率低于停止阈值({stop_threshold:.2f}%)"
+                        self._record_grvt_emergency_reduce_history({
+                            "timestamp": time.time(),
+                            "event": "completed",
+                            "symbol": symbol,
+                            "size": str(size),
+                            "total_steps": split_count,
+                            "reason": "maint_below_stop_threshold",
+                        })
+                    return
+                if ratio_percent is not None:
+                    async with self._grvt_emergency_reduce_lock:
+                        status = self._grvt_emergency_reduce_status
+                        status["latest_ratio_percent"] = ratio_percent
             payload = await self._adjustments.create_request(
                 action="reduce",
                 magnitude=float(split_size),
@@ -7634,6 +7714,14 @@ class CoordinatorApp:
                 threshold = self._extract_numeric_field(body, ["threshold_percent"], field_name="threshold_percent")
                 if threshold is not None:
                     cfg["threshold_percent"] = threshold
+            if "stop_threshold_percent" in body:
+                stop_threshold = self._extract_numeric_field(
+                    body,
+                    ["stop_threshold_percent"],
+                    field_name="stop_threshold_percent",
+                )
+                if stop_threshold is not None:
+                    cfg["stop_threshold_percent"] = stop_threshold
             if "split_count" in body:
                 split_raw = body.get("split_count")
                 if split_raw is not None:
