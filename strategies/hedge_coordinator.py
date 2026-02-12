@@ -2913,6 +2913,15 @@ class HedgeCoordinator:
 
     @staticmethod
     def _compute_position_initial_margin(position: Dict[str, Any]) -> Optional[Decimal]:
+        for field in (
+            "initial_margin",
+            "initialMargin",
+            "isolated_im",
+            "isolatedIM",
+        ):
+            value = HedgeCoordinator._decimal_from(position.get(field))
+            if value is not None:
+                return value
         size = None
         for field in ("net_size", "size", "contracts", "amount"):
             size = HedgeCoordinator._decimal_from(position.get(field))
@@ -2942,6 +2951,8 @@ class HedgeCoordinator:
             "maintenanceMargin",
             "maint_margin",
             "maintMargin",
+            "isolated_mm",
+            "isolatedMM",
         ):
             value = HedgeCoordinator._decimal_from(position.get(field))
             if value is not None:

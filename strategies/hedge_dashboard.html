@@ -8345,8 +8345,18 @@
         }
 
         // Prefer API-provided margins if present
-        const apiInitial = parseDecimal(position.initial_margin ?? position.initialMargin);
-        const apiMaint = parseDecimal(position.maintenance_margin ?? position.maintenanceMargin);
+        const apiInitial = parseDecimal(
+          position.initial_margin ??
+          position.initialMargin ??
+          position.isolated_im ??
+          position.isolatedIM
+        );
+        const apiMaint = parseDecimal(
+          position.maintenance_margin ??
+          position.maintenanceMargin ??
+          position.isolated_mm ??
+          position.isolatedMM
+        );
         let notional = parseDecimal(position.notional_value ?? position.notional);
 
         const size = parseDecimal(position.net_size ?? position.size ?? position.quantity);
