@@ -13289,7 +13289,11 @@
             if (ratioBaseValue && Number.isFinite(maintenanceRequirementTotal) && maintenanceRequirementTotal >= 0) {
               const ratio = maintenanceRequirementTotal / ratioBaseValue;
               maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
-              const summary = accountMaintSourceSummary || formatMaintSourceSummary(sourceCounts);
+              let summary = accountMaintSourceSummary || formatMaintSourceSummary(sourceCounts);
+              if (!accountMaintSourceSummary && !sourceCounts.api && (sourceCounts.schedule || sourceCounts.unknown)) {
+                const reason = '原因：账户汇总未返回 maintenance_margin，仓位未返回 isolated_mm';
+                summary = summary ? `${summary} · ${reason}` : reason;
+              }
               if (maintenanceSource) {
                 maintenanceSource.textContent = summary || '';
               }
@@ -13304,7 +13308,11 @@
               });
             } else if (ratioBaseValue) {
               maintenanceBadge.textContent = formatPercent(0, 2);
-              const summary = accountMaintSourceSummary || formatMaintSourceSummary(sourceCounts);
+              let summary = accountMaintSourceSummary || formatMaintSourceSummary(sourceCounts);
+              if (!accountMaintSourceSummary && !sourceCounts.api && (sourceCounts.schedule || sourceCounts.unknown)) {
+                const reason = '原因：账户汇总未返回 maintenance_margin，仓位未返回 isolated_mm';
+                summary = summary ? `${summary} · ${reason}` : reason;
+              }
               if (maintenanceSource) {
                 maintenanceSource.textContent = summary || '';
               }
