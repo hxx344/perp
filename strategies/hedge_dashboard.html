@@ -8366,6 +8366,7 @@
             maintenanceRate: Number.isFinite(apiMaint) && Number.isFinite(effectiveNotional) && effectiveNotional > 0
               ? apiMaint / effectiveNotional
               : null,
+            source: 'api',
           };
         }
 
@@ -8375,7 +8376,7 @@
 
         const tier = resolveMarginTier(baseAsset, notional);
         if (!tier) {
-          return { baseAsset, notional };
+          return { baseAsset, notional, source: 'unknown' };
         }
         return {
           baseAsset,
@@ -8384,7 +8385,23 @@
           maintenanceMargin: notional * tier.maintenance,
           initialRate: tier.initial,
           maintenanceRate: tier.maintenance,
+          source: 'schedule',
         };
+      }
+
+      function formatMaintSourceSummary(counts) {
+        if (!counts) return '';
+        const api = counts.api || 0;
+        const schedule = counts.schedule || 0;
+        const unknown = counts.unknown || 0;
+        if (!(api || schedule || unknown)) {
+          return '';
+        }
+        const parts = [];
+        if (api) parts.push(`API ${api}`);
+        if (schedule) parts.push(`估算 ${schedule}`);
+        if (unknown) parts.push(`未知 ${unknown}`);
+        return `来源：${parts.join(' / ')}`;
       }
 
       function estimateTransferableFunds(input) {
@@ -13022,6 +13039,7 @@
   let aggregateMaintRequirement = 0;
   let aggregateMaintBase = 0;
   const emergencyMaintEntries = [];
+  const maintSourceTotals = { api: 0, schedule: 0, unknown: 0 };
         const accountStats = [];
         for (const entry of flattenedAccounts) {
           const account = entry.account;
@@ -13128,6 +13146,7 @@
 
           const maintenanceBadge = metrics.querySelector('[data-metric="maintenance"] .maintenance-ratio');
           let maintenanceRequirementTotal = 0;
+          const sourceCounts = { api: 0, schedule: 0, unknown: 0 };
           const initialMarginRequirementTotal = Number.isFinite(entry.initialMarginTotal)
             ? entry.initialMarginTotal
             : 0;
@@ -13180,6 +13199,14 @@
               const marginInfo = row.marginInfo;
               if (marginInfo && Number.isFinite(marginInfo.maintenanceMargin)) {
                 maintenanceRequirementTotal += marginInfo.maintenanceMargin;
+                const sourceKey = marginInfo.source || 'unknown';
+                if (sourceKey === 'api') {
+                  sourceCounts.api += 1;
+                } else if (sourceKey === 'schedule') {
+                  sourceCounts.schedule += 1;
+                } else {
+                  sourceCounts.unknown += 1;
+                }
               }
               const notionalText = Number.isFinite(row.notional)
                 ? numberFormatter.format(row.notional)
@@ -13231,29 +13258,49 @@
             if (ratioBaseValue && Number.isFinite(maintenanceRequirementTotal) && maintenanceRequirementTotal >= 0) {
               const ratio = maintenanceRequirementTotal / ratioBaseValue;
               maintenanceBadge.textContent = formatPercent(ratio * 100, 2);
+              const summary = formatMaintSourceSummary(sourceCounts);
+              if (summary) {
+                maintenanceBadge.title = summary;
+              } else {
+                maintenanceBadge.removeAttribute('title');
+              }
               aggregateMaintRequirement += maintenanceRequirementTotal;
               aggregateMaintBase += ratioBaseValue;
               emergencyMaintEntries.push({
                 label: displayName,
                 ratio: formatPercent(ratio * 100, 2),
                 value: ratio,
+                sourceSummary: summary,
               });
             } else if (ratioBaseValue) {
               maintenanceBadge.textContent = formatPercent(0, 2);
+              const summary = formatMaintSourceSummary(sourceCounts);
+              if (summary) {
+                maintenanceBadge.title = summary;
+              } else {
+                maintenanceBadge.removeAttribute('title');
+              }
               emergencyMaintEntries.push({
                 label: displayName,
                 ratio: formatPercent(0, 2),
                 value: 0,
+                sourceSummary: summary,
               });
             } else {
               maintenanceBadge.textContent = '—';
+              maintenanceBadge.removeAttribute('title');
               emergencyMaintEntries.push({
                 label: displayName,
                 ratio: '—',
                 value: null,
+                sourceSummary: '',
               });
             }
           }
+
+          maintSourceTotals.api += sourceCounts.api;
+          maintSourceTotals.schedule += sourceCounts.schedule;
+          maintSourceTotals.unknown += sourceCounts.unknown;
 
           grvtAccountGrid.appendChild(card);
         }
@@ -13280,7 +13327,9 @@
           const avgMaintPercent = computePercent(aggregateMaintRequirement, aggregateMaintBase);
           if (Number.isFinite(avgMaintPercent)) {
             grvtAvgMaint.textContent = formatPercent(avgMaintPercent, 2);
-            grvtAvgMaint.title = `Maint req ${numberFormatter.format(aggregateMaintRequirement)} / Base ${numberFormatter.format(aggregateMaintBase)}`;
+            const sourceSummary = formatMaintSourceSummary(maintSourceTotals);
+            const baseTitle = `Maint req ${numberFormatter.format(aggregateMaintRequirement)} / Base ${numberFormatter.format(aggregateMaintBase)}`;
+            grvtAvgMaint.title = sourceSummary ? `${baseTitle}\n${sourceSummary}` : baseTitle;
           } else {
             grvtAvgMaint.textContent = '--';
             grvtAvgMaint.removeAttribute('title');
@@ -13385,11 +13434,15 @@
         const maintEntries = Array.isArray(grvtEmergencyMaintStats) ? grvtEmergencyMaintStats : [];
         if (grvtEmergencyMaintA) {
           const first = maintEntries[0];
-          grvtEmergencyMaintA.value = first ? `${first.label}: ${first.ratio}` : '--';
+          grvtEmergencyMaintA.value = first
+            ? `${first.label}: ${first.ratio}${first.sourceSummary ? ` · ${first.sourceSummary}` : ''}`
+            : '--';
         }
         if (grvtEmergencyMaintB) {
           const second = maintEntries[1];
-          grvtEmergencyMaintB.value = second ? `${second.label}: ${second.ratio}` : '--';
+          grvtEmergencyMaintB.value = second
+            ? `${second.label}: ${second.ratio}${second.sourceSummary ? ` · ${second.sourceSummary}` : ''}`
+            : '--';
         }
 
         if (grvtEmergencyHistoryBody && grvtEmergencyHistoryEmpty && grvtEmergencyHistoryStatus) {
