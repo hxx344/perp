@@ -1255,6 +1255,7 @@ class HedgeCoordinator:
         self._bp_risk_alert_cooldown: float = 0.0
 
         self._para_stale_critical_seconds: float = 30.0
+        self._grvt_stale_critical_seconds: float = 30.0
         self._apply_alert_settings()
         self._apply_para_alert_settings()
         self._apply_bp_alert_settings()
@@ -2270,6 +2271,8 @@ class HedgeCoordinator:
         payload["active"] = bool(self._risk_alert_active.get(GLOBAL_RISK_ALERT_KEY))
         last_alert = self._risk_alert_last_ts.get(GLOBAL_RISK_ALERT_KEY)
         payload["last_alert_at"] = last_alert
+        payload["stale_critical_seconds"] = self._grvt_stale_critical_seconds
+        payload["stale_enabled"] = bool(self._grvt_stale_critical_seconds and self._grvt_stale_critical_seconds > 0)
         cooldown = self._risk_alert_cooldown or 0.0
         if last_alert is not None and cooldown > 0:
             ready_at = last_alert + cooldown
@@ -2347,6 +2350,17 @@ class HedgeCoordinator:
             self._risk_alert_active.pop(BP_RISK_ALERT_KEY, None)
             self._risk_alert_last_ts.pop(BP_RISK_ALERT_KEY, None)
             return self._bp_alert_settings_payload()
+
+    async def apply_grvt_stale_settings(self, critical_seconds: Optional[float]) -> Dict[str, Any]:
+        async with self._lock:
+            if critical_seconds is not None:
+                try:
+                    value = float(critical_seconds)
+                except (TypeError, ValueError):
+                    value = 0.0
+                self._grvt_stale_critical_seconds = max(value, 0.0)
+                self._alert_settings_updated_at = time.time()
+            return self._alert_settings_payload()
 
     @staticmethod
     def _normalize_agent_id(raw: Any) -> str:
@@ -3030,6 +3044,8 @@ class HedgeCoordinator:
 
         if isinstance(alert.key, str) and alert.key.startswith("para_stale::"):
             kind = "para_stale"
+        elif isinstance(alert.key, str) and alert.key.startswith("grvt_stale::"):
+            kind = "grvt_stale"
         elif alert.key == PARA_RISK_ALERT_KEY:
             kind = "para_risk"
         elif alert.key == BP_RISK_ALERT_KEY:
@@ -3176,6 +3192,7 @@ class HedgeCoordinator:
             alerts = self._prepare_risk_alerts(agent_id, state.grvt_accounts)
             alerts = list(alerts) + list(self._prepare_para_risk_alerts(agent_id))
             alerts = list(alerts) + list(self._prepare_bp_risk_alerts(agent_id))
+            alerts = list(alerts) + list(self._prepare_grvt_stale_alerts(now))
             alerts = list(alerts) + list(self._prepare_para_stale_alerts(now))
             self._prune_stale(now)
             self._last_agent_id = agent_id
@@ -3388,6 +3405,65 @@ class HedgeCoordinator:
 
         return alerts
 
+    def _prepare_grvt_stale_alerts(self, now: float) -> Sequence[RiskAlertInfo]:
+        # GRVT stale alerts are scoped to global notifier.
+        if self._bark_notifier is None:
+            return []
+        critical = max(float(self._grvt_stale_critical_seconds or 0), 0.0)
+        if critical <= 0:
+            return []
+        alerts: List[RiskAlertInfo] = []
+        for agent_id, state in self._states.items():
+            grvt_block = state.grvt_accounts
+            if not isinstance(grvt_block, dict):
+                continue
+            summary = grvt_block.get("summary") if isinstance(grvt_block.get("summary"), dict) else None
+            ts_raw = None
+            if summary:
+                ts_raw = summary.get("updated_at") or summary.get("last_update_ts") or summary.get("updated_ts")
+            if ts_raw is None:
+                ts_raw = grvt_block.get("updated_at") or grvt_block.get("last_update_ts") or grvt_block.get("updated_ts")
+            if ts_raw is None:
+                ts_raw = state.last_update_ts
+            ts = None
+            try:
+                ts = float(ts_raw)
+                if ts > 1e12:
+                    ts = ts / 1000.0
+            except Exception:
+                ts = None
+            if ts is None:
+                continue
+            age = now - ts
+            if age < critical:
+                continue
+            key = f"grvt_stale::{agent_id}"
+            last_ts = self._risk_alert_last_ts.get(key, 0.0)
+            if (now - last_ts) < self._risk_alert_cooldown:
+                continue
+            account_label = None
+            if summary:
+                account_label = summary.get("label") or summary.get("account_label") or summary.get("name")
+            ratio = age / critical if critical > 0 else 1.0
+            try:
+                loss_value = Decimal(str(round(age, 2)))
+                base_value = Decimal(str(round(critical, 2)))
+            except Exception:
+                loss_value = Decimal("0")
+                base_value = Decimal(str(critical)) if critical else Decimal("0")
+            alerts.append(
+                RiskAlertInfo(
+                    key=key,
+                    agent_id=agent_id,
+                    account_label=account_label or "GRVT",
+                    ratio=ratio,
+                    loss_value=loss_value,
+                    base_value=base_value,
+                    base_label="stale_seconds",
+                )
+            )
+        return alerts
+
     def _prepare_para_stale_alerts(self, now: float) -> Sequence[RiskAlertInfo]:
         # PARA stale alerts are also scoped to PARA notifier.
         if self._para_bark_notifier is None:
@@ -3586,7 +3662,9 @@ class HedgeCoordinator:
             notifier = self._bark_notifier
         if notifier is None:
             # Avoid permanently suppressing alerts when the notifier is misconfigured.
-            if isinstance(alert.key, str) and alert.key.startswith("para_stale::"):
+            if isinstance(alert.key, str) and (
+                alert.key.startswith("para_stale::") or alert.key.startswith("grvt_stale::")
+            ):
                 # keep stale evaluation active so it can recover once notifier is configured
                 self._risk_alert_last_ts.pop(alert.key, None)
             if _env_debug(PARA_RISK_DEBUG_ENV, False) and alert.key == PARA_RISK_ALERT_KEY:
@@ -3594,7 +3672,9 @@ class HedgeCoordinator:
             return
 
         # Stale alerts use per-agent keys; record cooldown timestamp only when we will actually attempt delivery.
-        if isinstance(alert.key, str) and alert.key.startswith("para_stale::"):
+        if isinstance(alert.key, str) and (
+            alert.key.startswith("para_stale::") or alert.key.startswith("grvt_stale::")
+        ):
             self._risk_alert_last_ts[alert.key] = time.time()
         # Bark 只需 URL，不传标题/正文
         title = ""
@@ -6953,6 +7033,21 @@ class CoordinatorApp:
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc))
         payload = await self._coordinator.apply_alert_settings(settings)
+        stale_enabled = None
+        if "stale_enabled" in body:
+            stale_enabled = self._interpret_bool(body.get("stale_enabled"))
+        try:
+            stale_critical = self._extract_numeric_field(
+                body,
+                ["stale_critical_seconds", "stale_critical", "stale_seconds"],
+                field_name="stale_critical_seconds",
+            )
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc))
+        if stale_critical is None and stale_enabled is False:
+            stale_critical = 0.0
+        if stale_critical is not None:
+            payload = await self._coordinator.apply_grvt_stale_settings(stale_critical)
         LOGGER.info("Risk alert settings updated via dashboard")
         return web.json_response({"settings": payload})
 

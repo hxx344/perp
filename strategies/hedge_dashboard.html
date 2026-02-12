@@ -2370,6 +2370,19 @@
               <p class="risk-meta" id="risk-ratio-meta">等待风险数据…</p>
             </section>
             <section class="risk-settings-card">
+              <div class="risk-toggle">
+                <input type="checkbox" id="risk-stale-enabled" />
+                <span>启用数据不新鲜告警</span>
+              </div>
+              <div class="risk-inline-inputs">
+                <label>
+                  判定阈值 (秒)
+                  <input type="number" id="risk-stale-critical-input" min="1" max="86400" step="1" />
+                </label>
+              </div>
+              <p class="risk-meta">超过阈值将推送“数据不新鲜”告警（使用 Bark 风险告警的 URL）。</p>
+            </section>
+            <section class="risk-settings-card">
               <div class="risk-bark-grid">
                 <label>
                   Bark URL
@@ -4274,10 +4287,12 @@
   const riskSettingsStatus = document.getElementById('risk-settings-status');
   const riskSettingsMessage = document.getElementById('risk-settings-message');
   const riskAlertEnabledInput = document.getElementById('risk-alert-enabled');
+  const riskStaleEnabledInput = document.getElementById('risk-stale-enabled');
   const riskThresholdSlider = document.getElementById('risk-threshold-slider');
   const riskThresholdInput = document.getElementById('risk-threshold-input');
   const riskResetInput = document.getElementById('risk-reset-input');
   const riskCooldownInput = document.getElementById('risk-cooldown-input');
+  const riskStaleCriticalInput = document.getElementById('risk-stale-critical-input');
   const riskThresholdLabel = document.getElementById('risk-threshold-label');
   const riskMeta = document.getElementById('risk-ratio-meta');
   const riskBarkUrlInput = document.getElementById('risk-bark-url');
@@ -5712,6 +5727,7 @@
             message: riskSettingsMessage,
             testMessage: document.getElementById('risk-test-message'),
             enabledInput: riskAlertEnabledInput,
+            staleEnabledInput: riskStaleEnabledInput,
             thresholdSlider: riskThresholdSlider,
             thresholdInput: riskThresholdInput,
             resetInput: riskResetInput,
@@ -5723,6 +5739,7 @@
             barkTimeoutInput: riskBarkTimeoutInput,
             titleTemplateInput: riskTitleTemplateInput,
             bodyTemplateInput: riskBodyTemplateInput,
+            staleCriticalInput: riskStaleCriticalInput,
             saveButton: riskSaveButton,
             disableButton: riskDisableButton,
             refreshButton: riskRefreshButton,
@@ -7207,6 +7224,8 @@
         const kind = String(entry.kind || '').toLowerCase();
         if (kind === 'para_stale') {
           label += ' · 数据不新鲜';
+        } else if (kind === 'grvt_stale') {
+          label += ' · 数据不新鲜';
         }
         return label;
       }
@@ -7507,6 +7526,13 @@
               input.disabled = viewBusy;
             }
           });
+          if (view.staleEnabledInput) {
+            view.staleEnabledInput.disabled = viewBusy;
+          }
+          if (view.staleCriticalInput) {
+            const staleEnabled = Boolean(view.staleEnabledInput?.checked);
+            view.staleCriticalInput.disabled = viewBusy || !staleEnabled;
+          }
         });
       }
 
@@ -7605,6 +7631,8 @@
         const cooldownMinutes = Number.isFinite(activeSnapshot?.cooldown_minutes)
           ? Number(activeSnapshot.cooldown_minutes)
           : (Number.isFinite(activeSnapshot?.cooldown) ? Number(activeSnapshot.cooldown) / 60 : 0);
+        const staleCriticalSeconds = Number(activeSnapshot?.stale_critical_seconds ?? 0);
+        const staleEnabled = Number.isFinite(staleCriticalSeconds) && staleCriticalSeconds > 0;
 
         views.forEach((view) => {
           if (view.enabledInput) {
@@ -7622,6 +7650,12 @@
           }
           if (view.cooldownInput) {
             view.cooldownInput.value = Number.isFinite(cooldownMinutes) ? Math.max(0, cooldownMinutes).toFixed(1) : '';
+          }
+          if (view.staleEnabledInput) {
+            view.staleEnabledInput.checked = staleEnabled;
+          }
+          if (view.staleCriticalInput) {
+            view.staleCriticalInput.value = staleEnabled ? String(Math.max(1, Math.round(staleCriticalSeconds))) : '';
           }
           if (view.barkUrlInput) {
             view.barkUrlInput.value = activeSnapshot?.bark_url ?? '';
@@ -7823,6 +7857,17 @@
   const bodyTemplate = pickValue(...views.map((v) => v.bodyTemplateInput));
         if (bodyTemplate) {
           payload.body_template = bodyTemplate;
+        }
+
+  const staleEnabledValue = pickCheckbox(...views.map((v) => v.staleEnabledInput));
+  const staleCriticalValue = pickNumber(...views.map((v) => v.staleCriticalInput));
+        if (staleEnabledValue !== null) {
+          payload.stale_enabled = staleEnabledValue;
+        }
+        if (Number.isFinite(staleCriticalValue)) {
+          payload.stale_critical_seconds = staleCriticalValue;
+        } else if (staleEnabledValue === false) {
+          payload.stale_critical_seconds = 0;
         }
 
         return payload;
@@ -14436,6 +14481,12 @@
           markRiskSettingsDirty();
         });
       }
+      if (riskStaleEnabledInput) {
+        riskStaleEnabledInput.addEventListener('change', () => {
+          updateRiskInputsState();
+          markRiskSettingsDirty();
+        });
+      }
       if (paraRiskAlertEnabledInput) {
         paraRiskAlertEnabledInput.addEventListener('change', () => {
           updateRiskInputsState();
@@ -14487,6 +14538,11 @@
             riskThresholdSlider.value = value;
           }
           updateRiskThresholdLabel(value);
+          markRiskSettingsDirty();
+        });
+      }
+      if (riskStaleCriticalInput) {
+        riskStaleCriticalInput.addEventListener('input', () => {
           markRiskSettingsDirty();
         });
       }
