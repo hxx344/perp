@@ -19,11 +19,12 @@ import re
 import sys
 import time
 import threading
+from collections import deque
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
+from typing import Any, Callable, Deque, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
 from logging.handlers import RotatingFileHandler
 
 import requests
@@ -73,6 +74,13 @@ DEFAULT_POLL_SECONDS = 15.0
 DEFAULT_TIMEOUT_SECONDS = 10.0
 # 每个账号上报的持仓条数上限。默认 0 表示不截断（全量上报）。
 MAX_ACCOUNT_POSITIONS = 0
+VOLATILITY_SAMPLE_INTERVAL = 10.0
+VOLATILITY_WINDOWS: Dict[str, float] = {
+    "10m": 10 * 60.0,
+    "60m": 60 * 60.0,
+    "300m": 300 * 60.0,
+}
+VOLATILITY_TOPN = 3
 BALANCE_TOTAL_PATHS: Tuple[Tuple[str, ...], ...] = (
     ("total", "USDT"),
     ("total", "usdt"),
@@ -508,6 +516,8 @@ class GrvtAccountMonitor:
         self._symbol_aliases: Dict[str, str] = {}
         self._processed_adjustments: Dict[str, Dict[str, Any]] = {}
         self._latest_positions: Dict[str, Decimal] = {}
+        self._volatility_history: Dict[str, Deque[Tuple[float, Decimal]]] = {}
+        self._volatility_last_sample: Dict[str, float] = {}
         self._currency_catalog: Dict[str, int] = {}
         self._control_endpoint = f"{self._coordinator_url}/control"
         self._update_endpoint = f"{self._coordinator_url}/update"
@@ -667,6 +677,8 @@ class GrvtAccountMonitor:
                 account_btc += pnl_value
             position_rows.append(position_payload)
             self._record_position(position_payload.get("symbol"), signed_size)
+            mark_value = decimal_from(position_payload.get("mark_price"))
+            self._record_volatility_sample(position_payload.get("symbol"), mark_value, timestamp)
 
         if self._max_positions is not None:
             position_rows = position_rows[: self._max_positions]
@@ -726,6 +738,8 @@ class GrvtAccountMonitor:
         if balance_available is not None:
             equity_available = balance_available + account_total
 
+        volatility_rankings = self._compute_volatility_rankings(timestamp)
+
         summary = {
             "account_count": 1,
             "total_pnl": decimal_to_str(account_total),
@@ -746,6 +760,12 @@ class GrvtAccountMonitor:
             "grvt_accounts": {
                 "updated_at": timestamp,
                 "summary": summary,
+                "volatility_rankings": volatility_rankings,
+                "volatility_meta": {
+                    "sample_interval": VOLATILITY_SAMPLE_INTERVAL,
+                    "windows": VOLATILITY_WINDOWS,
+                    "topn": VOLATILITY_TOPN,
+                },
                 "accounts": [
                     {
                         "name": self._session.label,
@@ -789,6 +809,65 @@ class GrvtAccountMonitor:
             return
         self._register_symbol_hint(symbol)
         self._latest_positions[normalized] = signed_size
+
+    def _record_volatility_sample(
+        self,
+        symbol: Optional[str],
+        price: Optional[Decimal],
+        timestamp: float,
+    ) -> None:
+        if symbol is None or price is None or price <= 0:
+            return
+        normalized = self._normalize_symbol_label(symbol)
+        if not normalized:
+            return
+        last_ts = self._volatility_last_sample.get(normalized)
+        if last_ts is not None and timestamp - last_ts < VOLATILITY_SAMPLE_INTERVAL:
+            return
+        self._volatility_last_sample[normalized] = timestamp
+        history = self._volatility_history.setdefault(normalized, deque())
+        history.append((timestamp, price))
+        max_window = max(VOLATILITY_WINDOWS.values()) if VOLATILITY_WINDOWS else 0
+        if max_window > 0:
+            cutoff = timestamp - max_window
+            while history and history[0][0] < cutoff:
+                history.popleft()
+
+    def _compute_volatility_rankings(self, now_ts: float) -> Dict[str, List[Dict[str, Any]]]:
+        rankings: Dict[str, List[Dict[str, Any]]] = {key: [] for key in VOLATILITY_WINDOWS}
+        for symbol, history in self._volatility_history.items():
+            if not history:
+                continue
+            latest_ts, latest_price = history[-1]
+            if latest_price <= 0:
+                continue
+            display_symbol = self._symbol_aliases.get(symbol, symbol)
+            for key, window_sec in VOLATILITY_WINDOWS.items():
+                target = now_ts - window_sec
+                anchor_price: Optional[Decimal] = None
+                for ts, price in history:
+                    if ts <= target:
+                        anchor_price = price
+                    else:
+                        break
+                if anchor_price is None or anchor_price <= 0:
+                    continue
+                try:
+                    change = (latest_price - anchor_price) / anchor_price
+                except Exception:
+                    continue
+                change_pct = float(change * Decimal("100"))
+                rankings[key].append({
+                    "symbol": display_symbol,
+                    "change_pct": change_pct,
+                    "last_price": float(latest_price),
+                    "abs_change": abs(change_pct),
+                })
+
+        for key, rows in rankings.items():
+            rows.sort(key=lambda row: row.get("abs_change", 0), reverse=True)
+            rankings[key] = rows[:VOLATILITY_TOPN]
+        return rankings
 
     def _update_cached_position(self, symbol: Optional[str], signed_size: Decimal) -> None:
         if symbol is None:

@@ -1279,6 +1279,33 @@
         display: block;
       }
 
+      .grvt-volatility-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 0.6rem;
+        margin-top: 0.35rem;
+      }
+
+      .grvt-volatility-list {
+        list-style: decimal;
+        margin: 0.2rem 0 0;
+        padding-left: 1.15rem;
+        font-size: 0.85rem;
+        color: #c7d2e8;
+      }
+
+      .grvt-volatility-list li {
+        display: flex;
+        justify-content: space-between;
+        gap: 0.35rem;
+        margin: 0.15rem 0;
+      }
+
+      .grvt-volatility-list .vol-symbol {
+        font-weight: 600;
+        color: #f5f7fb;
+      }
+
       .grvt-account-metrics .maintenance-source {
         display: block;
         font-size: 0.72rem;
@@ -2335,6 +2362,23 @@
             <h3>减仓建议</h3>
             <div class="value" id="grvt-reduce-suggestion-main">--</div>
             <p class="summary-sub" id="grvt-reduce-suggestion-detail">等待账户与持仓数据…</p>
+          </article>
+          <article class="card grvt-summary-card" id="grvt-volatility-card">
+            <h3>剧烈波动排行</h3>
+            <div class="grvt-volatility-grid">
+              <div>
+                <p class="summary-sub">10m</p>
+                <ol class="grvt-volatility-list" id="grvt-volatility-10m"></ol>
+              </div>
+              <div>
+                <p class="summary-sub">60m</p>
+                <ol class="grvt-volatility-list" id="grvt-volatility-60m"></ol>
+              </div>
+              <div>
+                <p class="summary-sub">300m</p>
+                <ol class="grvt-volatility-list" id="grvt-volatility-300m"></ol>
+              </div>
+            </div>
           </article>
           <article class="card grvt-summary-card">
             <h3>Last Update</h3>
@@ -4256,6 +4300,9 @@
   const grvtReduceSuggestionCard = document.getElementById('grvt-reduce-suggestion-card');
   const grvtReduceSuggestionMain = document.getElementById('grvt-reduce-suggestion-main');
   const grvtReduceSuggestionDetail = document.getElementById('grvt-reduce-suggestion-detail');
+  const grvtVolatility10m = document.getElementById('grvt-volatility-10m');
+  const grvtVolatility60m = document.getElementById('grvt-volatility-60m');
+  const grvtVolatility300m = document.getElementById('grvt-volatility-300m');
   const grvtAccountGrid = document.getElementById('grvt-account-grid');
   const grvtAccountsEmpty = document.getElementById('grvt-accounts-empty');
 
@@ -13019,6 +13066,73 @@
             }
           }
         }
+
+        const volatilityBuckets = { "10m": [], "60m": [], "300m": [] };
+        for (const [agentId, snapshot] of entries) {
+          const rankings = snapshot?.volatility_rankings;
+          if (!rankings || typeof rankings !== 'object') continue;
+          for (const [windowKey, rows] of Object.entries(rankings)) {
+            if (!Array.isArray(rows) || !(windowKey in volatilityBuckets)) continue;
+            rows.forEach((row) => {
+              const symbol = normalizeSymbolLabel(row?.symbol ?? row?.base ?? row?.s ?? row?.instrument);
+              const change = Number(row?.change_pct ?? row?.changePct ?? row?.change);
+              if (!symbol || !Number.isFinite(change)) return;
+              volatilityBuckets[windowKey].push({
+                symbol,
+                change,
+                absChange: Math.abs(change),
+                source: agentId,
+              });
+            });
+          }
+        }
+
+        const renderVolatilityList = (listEl, rows) => {
+          if (!listEl) return;
+          listEl.innerHTML = '';
+          if (!rows.length) {
+            const item = document.createElement('li');
+            item.textContent = '--';
+            listEl.appendChild(item);
+            return;
+          }
+          rows.forEach((row) => {
+            const item = document.createElement('li');
+            const symbolSpan = document.createElement('span');
+            symbolSpan.className = 'vol-symbol';
+            symbolSpan.textContent = row.symbol;
+            const pctSpan = document.createElement('span');
+            pctSpan.textContent = `${formatSignedNumber(row.change, 2)}%`;
+            item.appendChild(symbolSpan);
+            item.appendChild(pctSpan);
+            listEl.appendChild(item);
+          });
+        };
+
+        const dedupeVolatility = (rows) => {
+          const bySymbol = new Map();
+          rows.forEach((row) => {
+            if (!row?.symbol) return;
+            const existing = bySymbol.get(row.symbol);
+            if (!existing || row.absChange > existing.absChange) {
+              bySymbol.set(row.symbol, row);
+            }
+          });
+          return Array.from(bySymbol.values());
+        };
+
+        const top10m = dedupeVolatility(volatilityBuckets["10m"])
+          .sort((a, b) => b.absChange - a.absChange)
+          .slice(0, 3);
+        const top60m = dedupeVolatility(volatilityBuckets["60m"])
+          .sort((a, b) => b.absChange - a.absChange)
+          .slice(0, 3);
+        const top300m = dedupeVolatility(volatilityBuckets["300m"])
+          .sort((a, b) => b.absChange - a.absChange)
+          .slice(0, 3);
+        renderVolatilityList(grvtVolatility10m, top10m);
+        renderVolatilityList(grvtVolatility60m, top60m);
+        renderVolatilityList(grvtVolatility300m, top300m);
 
         updateGrvtTransferAgents(transferOptions);
 
