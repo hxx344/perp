@@ -14809,6 +14809,17 @@
           updateGrvtEmergencyInputsState();
         });
       }
+      [
+        grvtEmergencyThresholdInput,
+        grvtEmergencyStopThresholdInput,
+        grvtEmergencySplitCountInput,
+        grvtEmergencyIntervalInput,
+      ].forEach((input) => {
+        if (!input) return;
+        input.addEventListener('input', () => {
+          grvtEmergencyDirty = true;
+        });
+      });
       if (grvtEmergencyPanel) {
         loadGrvtEmergencyReduce({ silent: true });
       }
