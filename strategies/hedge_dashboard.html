@@ -3421,6 +3421,7 @@
       topN = 1,
       allocationMode = 'proportional',
       requireFullCoverage = false,
+      capMode = 'qty',
     } = {}) {
       const baseRes = { ok: false, message: '' };
       if (!Array.isArray(accounts) || accounts.length !== 2) {
@@ -3473,8 +3474,14 @@
           const qty = coerceNumber(qtyRaw);
           if (!Number.isFinite(qty) || qty === 0) continue;
           const absQty = Math.abs(qty);
-          // If multiple instruments map to same base, sum abs to get a conservative cap.
-          derivedSymbolCap[base] = (derivedSymbolCap[base] || 0) + absQty;
+          const capPrice = Number.isFinite(mark)
+            ? Math.abs(mark)
+            : (Number.isFinite(entry) ? Math.abs(entry) : 0);
+          const capValue = capMode === 'notional'
+            ? ((capPrice > 0) ? (absQty * capPrice) : absQty)
+            : absQty;
+          // If multiple instruments map to same base, sum to get a conservative cap.
+          derivedSymbolCap[base] = (derivedSymbolCap[base] || 0) + capValue;
 
           // PnL: best-effort derive from position fields.
           // Backpack provides pnlUnrealized; also sometimes we can compute size*(mark-entry).
@@ -3653,6 +3660,7 @@
         topN: 3,
         allocationMode: 'single',
         requireFullCoverage: true,
+        capMode: 'notional',
       });
     }
 
