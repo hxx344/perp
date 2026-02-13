@@ -3474,14 +3474,6 @@
           const qty = coerceNumber(qtyRaw);
           if (!Number.isFinite(qty) || qty === 0) continue;
           const absQty = Math.abs(qty);
-          const capPrice = Number.isFinite(mark)
-            ? Math.abs(mark)
-            : (Number.isFinite(entry) ? Math.abs(entry) : 0);
-          const capValue = capMode === 'notional'
-            ? ((capPrice > 0) ? (absQty * capPrice) : absQty)
-            : absQty;
-          // If multiple instruments map to same base, sum to get a conservative cap.
-          derivedSymbolCap[base] = (derivedSymbolCap[base] || 0) + capValue;
 
           // PnL: best-effort derive from position fields.
           // Backpack provides pnlUnrealized; also sometimes we can compute size*(mark-entry).
@@ -3510,6 +3502,14 @@
             pos?.price ??
             pos?.M,
           );
+          const capPrice = Number.isFinite(mark)
+            ? Math.abs(mark)
+            : (Number.isFinite(entry) ? Math.abs(entry) : 0);
+          const capValue = capMode === 'notional'
+            ? ((capPrice > 0) ? (absQty * capPrice) : absQty)
+            : absQty;
+          // If multiple instruments map to same base, sum to get a conservative cap.
+          derivedSymbolCap[base] = (derivedSymbolCap[base] || 0) + capValue;
           const computedPnl = (Number.isFinite(entry) && Number.isFinite(mark)) ? (qty * (mark - entry)) : null;
           const pnl = (computedPnl !== null && Number.isFinite(computedPnl)) ? computedPnl : pnlFallback;
           if (Number.isFinite(pnl) && pnl !== 0) {
