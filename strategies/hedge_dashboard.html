@@ -4603,6 +4603,7 @@
   let grvtAdjustLocked = false;
   let grvtPendingRequestId = null;
   let grvtEmergencyBusy = false;
+  let grvtEmergencyDirty = false;
   let paraAdjustLocked = false;
   let paraPendingRequestId = null;
   let bpAdjustLocked = false;
@@ -13437,20 +13438,22 @@
         const status = payload?.status || {};
         const history = Array.isArray(payload?.history) ? payload.history : [];
 
-        if (grvtEmergencyEnabledInput) {
-          grvtEmergencyEnabledInput.checked = Boolean(config.enabled);
-        }
-        if (grvtEmergencyThresholdInput && Number.isFinite(Number(config.threshold_percent))) {
-          grvtEmergencyThresholdInput.value = Number(config.threshold_percent).toFixed(1);
-        }
-        if (grvtEmergencyStopThresholdInput && Number.isFinite(Number(config.stop_threshold_percent))) {
-          grvtEmergencyStopThresholdInput.value = Number(config.stop_threshold_percent).toFixed(1);
-        }
-        if (grvtEmergencySplitCountInput && Number.isFinite(Number(config.split_count))) {
-          grvtEmergencySplitCountInput.value = String(Math.max(1, Math.round(Number(config.split_count))));
-        }
-        if (grvtEmergencyIntervalInput && Number.isFinite(Number(config.interval_seconds))) {
-          grvtEmergencyIntervalInput.value = String(Math.max(1, Math.round(Number(config.interval_seconds))));
+        if (!grvtEmergencyDirty) {
+          if (grvtEmergencyEnabledInput) {
+            grvtEmergencyEnabledInput.checked = Boolean(config.enabled);
+          }
+          if (grvtEmergencyThresholdInput && Number.isFinite(Number(config.threshold_percent))) {
+            grvtEmergencyThresholdInput.value = Number(config.threshold_percent).toFixed(1);
+          }
+          if (grvtEmergencyStopThresholdInput && Number.isFinite(Number(config.stop_threshold_percent))) {
+            grvtEmergencyStopThresholdInput.value = Number(config.stop_threshold_percent).toFixed(1);
+          }
+          if (grvtEmergencySplitCountInput && Number.isFinite(Number(config.split_count))) {
+            grvtEmergencySplitCountInput.value = String(Math.max(1, Math.round(Number(config.split_count))));
+          }
+          if (grvtEmergencyIntervalInput && Number.isFinite(Number(config.interval_seconds))) {
+            grvtEmergencyIntervalInput.value = String(Math.max(1, Math.round(Number(config.interval_seconds))));
+          }
         }
 
         const paused = Boolean(status.paused);
@@ -13535,6 +13538,7 @@
           return;
         }
         grvtEmergencyBusy = true;
+        grvtEmergencyDirty = false;
         if (!silent && grvtEmergencyMessage) {
           grvtEmergencyMessage.textContent = '读取配置中…';
         }
@@ -13591,6 +13595,7 @@
           }
           const result = await response.json();
           renderGrvtEmergencyReduce(result);
+          grvtEmergencyDirty = false;
           if (grvtEmergencyMessage) {
             grvtEmergencyMessage.textContent = '配置已保存';
           }
@@ -14800,6 +14805,7 @@
       }
       if (grvtEmergencyEnabledInput) {
         grvtEmergencyEnabledInput.addEventListener('change', () => {
+          grvtEmergencyDirty = true;
           updateGrvtEmergencyInputsState();
         });
       }
