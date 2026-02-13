@@ -3465,7 +3465,8 @@
           return token;
         };
 
-        const derivedSymbolCap = {};
+  const derivedSymbolCapQty = {};
+  const derivedSymbolCapNotional = {};
         const derivedSymbolPnl = {};
         for (const pos of positions) {
           const base = normalizeBaseAsset(pos?.symbol ?? pos?.s ?? pos?.instrument ?? pos?.market);
@@ -3505,11 +3506,10 @@
           const capPrice = Number.isFinite(mark)
             ? Math.abs(mark)
             : (Number.isFinite(entry) ? Math.abs(entry) : 0);
-          const capValue = capMode === 'notional'
-            ? ((capPrice > 0) ? (absQty * capPrice) : absQty)
-            : absQty;
+          const notionalCapValue = (capPrice > 0) ? (absQty * capPrice) : absQty;
           // If multiple instruments map to same base, sum to get a conservative cap.
-          derivedSymbolCap[base] = (derivedSymbolCap[base] || 0) + capValue;
+          derivedSymbolCapQty[base] = (derivedSymbolCapQty[base] || 0) + absQty;
+          derivedSymbolCapNotional[base] = (derivedSymbolCapNotional[base] || 0) + notionalCapValue;
           const computedPnl = (Number.isFinite(entry) && Number.isFinite(mark)) ? (qty * (mark - entry)) : null;
           const pnl = (computedPnl !== null && Number.isFinite(computedPnl)) ? computedPnl : pnlFallback;
           if (Number.isFinite(pnl) && pnl !== 0) {
@@ -3524,7 +3524,8 @@
           nonFfTotal,
           // Prefer explicit maps if provided; otherwise fall back to positions aggregation.
           symbolPnl: { ...derivedSymbolPnl, ...symbolPnl },
-          symbolCap: { ...derivedSymbolCap, ...symbolCap },
+          symbolCapQty: { ...derivedSymbolCapQty, ...symbolCap },
+          symbolCapNotional: { ...derivedSymbolCapNotional },
         };
       };
 
@@ -3580,9 +3581,12 @@
 
         const pnl = coerceNumber(pnlRaw);
         if (pnl >= 0) continue;
-        const cap = resolveCapForSymbol(worst.symbolCap, sym, symRaw);
-        if (cap <= 0) continue;
-        rows.push({ symbol: sym, negAbs: Math.abs(pnl), cap });
+        const capQty = resolveCapForSymbol(worst.symbolCapQty, sym, symRaw);
+        if (capQty <= 0) continue;
+        const capNotional = resolveCapForSymbol(worst.symbolCapNotional, sym, symRaw);
+        const capForEfficiency = (capMode === 'notional' && capNotional > 0) ? capNotional : capQty;
+        if (capForEfficiency <= 0) continue;
+        rows.push({ symbol: sym, negAbs: Math.abs(pnl), capQty, capEfficiency: capForEfficiency });
       }
 
       if (!rows.length) {
@@ -3606,8 +3610,8 @@
         const ratio = r.negAbs > 0
           ? ((allocationMode === 'proportional') ? (allocation / r.negAbs) : (L / r.negAbs))
           : 0;
-        const size = Math.min(Math.max(r.cap * ratio, 0), r.cap);
-        const efficiency = r.cap > 0 ? (r.negAbs / r.cap) : 0;
+        const size = Math.min(Math.max(r.capQty * ratio, 0), r.capQty);
+        const efficiency = r.capEfficiency > 0 ? (r.negAbs / r.capEfficiency) : 0;
         const coversLoss = r.negAbs >= L;
         return { ...r, allocation, size, efficiency, coversLoss };
       });
