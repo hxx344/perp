@@ -4846,7 +4846,12 @@ class CoordinatorApp:
             })
         return results
 
-    def _compute_grvt_reduce_suggestion(self, snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _compute_grvt_reduce_suggestion(
+        self,
+        snapshot: Dict[str, Any],
+        *,
+        require_full_coverage: bool = True,
+    ) -> Optional[Dict[str, Any]]:
         accounts = self._extract_grvt_accounts_from_snapshot(snapshot)
         if len(accounts) < 2:
             return None
@@ -4914,10 +4919,11 @@ class CoordinatorApp:
         if not candidates:
             return None
 
-        # require full coverage: candidate must cover full loss
-        candidates = [row for row in candidates if row["neg_abs"] >= loss]
-        if not candidates:
-            return None
+        if require_full_coverage:
+            # require full coverage: candidate must cover full loss
+            candidates = [row for row in candidates if row["neg_abs"] >= loss]
+            if not candidates:
+                return None
         candidates.sort(key=lambda row: (-(row["neg_abs"] / row["cap"]), row["symbol"]))
         best = candidates[0]
         ratio = min(Decimal("1"), loss / best["neg_abs"])
@@ -4947,7 +4953,9 @@ class CoordinatorApp:
             if ratio_percent < threshold:
                 return
 
-            suggestion = self._compute_grvt_reduce_suggestion(snapshot)
+            suggestion = self._compute_grvt_reduce_suggestion(snapshot, require_full_coverage=True)
+            if not suggestion:
+                suggestion = self._compute_grvt_reduce_suggestion(snapshot, require_full_coverage=False)
             if not suggestion:
                 status["reason"] = "无法计算减仓建议"
                 return
