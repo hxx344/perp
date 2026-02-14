@@ -829,7 +829,7 @@ class GrvtAccountMonitor:
         history.append((timestamp, price))
         max_window = max(VOLATILITY_WINDOWS.values()) if VOLATILITY_WINDOWS else 0
         if max_window > 0:
-            cutoff = timestamp - max_window
+            cutoff = timestamp - (max_window + VOLATILITY_SAMPLE_INTERVAL)
             while history and history[0][0] < cutoff:
                 history.popleft()
 
@@ -851,7 +851,11 @@ class GrvtAccountMonitor:
                     else:
                         break
                 if anchor_price is None or anchor_price <= 0:
-                    continue
+                    oldest_ts, oldest_price = history[0]
+                    if oldest_price > 0 and oldest_ts < latest_ts:
+                        anchor_price = oldest_price
+                    else:
+                        continue
                 try:
                     change = (latest_price - anchor_price) / anchor_price
                 except Exception:
