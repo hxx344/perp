@@ -104,6 +104,7 @@ class SimpleMakerSettings:
     binance_reference_timeout_seconds: float = 1.0
     binance_depth_levels: int = 10
     binance_imbalance_max_bps: Decimal = Decimal("3")
+    bbo_max_distance_ticks: int = 1
     max_cycles: int = 0
     log_to_console: bool = True
     metrics_interval_seconds: float = 30.0
@@ -278,18 +279,26 @@ def clamp_maker_targets(
     best_bid: Decimal,
     best_ask: Decimal,
     tick_size: Decimal,
+    *,
+    max_bbo_distance_ticks: int = 1,
 ) -> Dict[str, Decimal]:
-    """Prevent a reference-price quote from crossing the local Lighter book."""
+    """Keep post-only targets at or immediately inside Lighter depth 1."""
 
     if tick_size <= 0:
         return {"buy": best_bid, "sell": best_ask}
 
-    # Improving the local BBO is the main source of volume when Lighter's
-    # spread is wider than Binance. Keep the quote inside the local spread and
-    # never farther from the market than the same-side BBO. The opposite-side
-    # cap preserves post-only behavior even if the reference is stale.
-    max_post_only_bid = best_ask - tick_size
-    min_post_only_ask = best_bid + tick_size
+    distance_ticks = max(0, int(max_bbo_distance_ticks))
+    # The reference signal may improve depth 1 by at most the configured
+    # distance. This keeps Binance pressure and inventory skew useful without
+    # allowing either signal to move a quote deep into the spread.
+    max_post_only_bid = min(
+        best_ask - tick_size,
+        best_bid + (tick_size * distance_ticks),
+    )
+    min_post_only_ask = max(
+        best_bid + tick_size,
+        best_ask - (tick_size * distance_ticks),
+    )
     bid = max(best_bid, min(targets["buy"], max_post_only_bid))
     ask = min(best_ask, max(targets["sell"], min_post_only_ask))
     if bid >= ask:
@@ -1452,6 +1461,7 @@ class SimpleMarketMaker:
             best_bid,
             best_ask,
             self._lighter_config.tick_size,
+            max_bbo_distance_ticks=self.settings.bbo_max_distance_ticks,
         )
 
         max_quote_quantity = self._max_quote_quantity()
@@ -2954,6 +2964,12 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         type=_decimal,
         help="Maximum relative quote-center shift from Binance depth (default: 3 bps)",
     )
+    parser.add_argument(
+        "--bbo-max-distance-ticks",
+        default=1,
+        type=int,
+        help="Maximum distance from local Lighter depth 1 in ticks (default: 1)",
+    )
     parser.add_argument("--order-quantity", default="0.00020", type=_decimal, help="Per-order base quantity (default: 0.00020)")
     parser.add_argument("--spread-bps", default="2", type=_decimal, help="Half-spread in basis points (default: 2)")
     parser.add_argument("--hedge-threshold", default="0.001", type=_decimal, help="Inventory threshold for optional hedging (default: 0.001)")
@@ -3080,6 +3096,8 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         parser.error("--order-quantity must be positive")
     if args.spread_bps <= 0:
         parser.error("--spread-bps must be positive")
+    if args.bbo_max_distance_ticks < 0:
+        parser.error("--bbo-max-distance-ticks must not be negative")
     if args.hedge_threshold <= 0:
         parser.error("--hedge-threshold must be positive")
     if args.hedge_buffer < 0:
@@ -3154,6 +3172,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         binance_reference_timeout_seconds=args.binance_reference_timeout_seconds,
         binance_depth_levels=args.binance_depth_levels,
         binance_imbalance_max_bps=args.binance_imbalance_max_bps,
+        bbo_max_distance_ticks=args.bbo_max_distance_ticks,
         fill_cooldown_seconds=args.fill_cooldown_seconds,
         log_to_console=not args.no_console_log,
         metrics_interval_seconds=max(5.0, args.metrics_interval),
