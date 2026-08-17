@@ -41,6 +41,15 @@ python strategies/aster_lighter_cycle.py --help
 
 首个真实 canary 使用有限循环、BTC 最小有效数量和保守杠杆：
 
+Linux 上可直接复用原策略参数，不复制代码：
+
+```bash
+python -m strategies.robinhood_lighter_cycle --quantity 0.00020 --randomize-direction --slippage 0.3 --max-wait 3 --cycles 1
+```
+
+`robinhood_lighter_cycle` 只是参数档，核心执行仍是下方的
+`aster_lighter_cycle`：
+
 ```powershell
 python strategies/aster_lighter_cycle.py `
   --env-file .env.robinhood `
@@ -52,6 +61,7 @@ python strategies/aster_lighter_cycle.py `
   --direction buy `
   --virtual-aster-maker `
   --virtual-maker-price-source bn `
+  --preserve-initial-position `
   --aster-maker-depth 10 `
   --slippage 0.02 `
   --lighter-max-wait 10 `

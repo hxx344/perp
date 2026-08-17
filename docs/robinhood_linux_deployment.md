@@ -5,39 +5,30 @@
 - Robinhood Chain Lighter 永续合约是真实成交腿；
 - Aster 两条 maker 腿是虚拟触发，不向 Aster 提交订单；
 - 虚拟成交价格来自 Binance U 本位合约公共行情；
-- 默认执行一个循环后退出，不默认开启无限循环。
+- 默认与原策略一致持续循环；首次真实验证应显式使用 `--cycles 1`。
 
-`deploy/robinhood` 中的安装和预检不会发送订单。只有执行
-`run.sh --confirm-live` 或显式启动 systemd 服务时才可能向 Lighter
+`deploy/robinhood` 中的安装和预检不会发送订单。执行 `run.sh --confirm-live`、
+显式启动 systemd 服务，或使用下方 Python 原地运行命令，都会向 Lighter
 发送真实 IOC 订单。
 
-## 快速入口
+## 最简原地运行
 
-如果代码已经在 `/opt/perp`，可以用一个入口完成系统依赖、Python 环境、
-systemd 配置和只读预检：
-
-```bash
-sudo bash /opt/perp/deploy/robinhood/quickstart.sh \
-  --project-root /opt/perp \
-  --ticker BTC \
-  --quantity 0.00020
-```
-
-第一次运行会创建 `/etc/perp/robinhood.env` 模板并退出；填入账户索引和
-API key 后重复同一命令即可。确认预检、保证金和初始仓位无误后，才显式运行
-单轮真实 canary：
+手动运行不需要复制代码到 `/opt/perp`，也不需要创建 `perp` 用户或安装
+systemd。只需在当前仓库和现有虚拟环境中准备一次 `.env.robinhood`，然后执行：
 
 ```bash
-sudo bash /opt/perp/deploy/robinhood/quickstart.sh \
-  --project-root /opt/perp \
-  --ticker BTC \
-  --quantity 0.00020 \
-  --run-canary \
-  --confirm-live
+python -m strategies.robinhood_lighter_cycle --quantity 0.00020 --randomize-direction --slippage 0.3 --max-wait 3
 ```
 
-快速入口不会自动 `git pull`、启用 systemd 或进入连续交易；连续模式仍按本文
-第 7 节的人工闸门执行。
+这就是实盘运行命令，不含额外确认步骤；Aster 腿是虚拟的，Lighter 腿是真实的。
+这个薄入口直接复用 `aster_lighter_cycle`，只自动补齐 BTC、Robinhood 端点、
+`.env.robinhood`、Binance 虚拟 Aster 行情、2 倍杠杆、10 档深度和 10 秒 Lighter
+等待时间。命令行中继续传入同名参数即可覆盖数值；`--quantity` 保留为必填，避免
+误用默认实盘数量。没有指定 `--cycles` 时与原程序相同，会持续运行直到停止；首次
+真实验证应增加 `--cycles 1`。
+
+后续 `/opt/perp`、专用用户和 systemd 内容只用于无人值守的长期守护部署，不是
+运行策略的前置条件。
 
 ## 1. 主机和网络要求
 
