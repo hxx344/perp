@@ -723,6 +723,39 @@ def test_cancel_all_orders_raises_when_cancellation_never_succeeds():
     assert client.cancel_attempts == 2
 
 
+def test_stop_has_hard_timeout_and_releases_instance_lock(tmp_path):
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        ownership_state_path=str(tmp_path / "maker-state.json"),
+        shutdown_timeout_seconds=0.05,
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(contract_id="7")  # type: ignore[assignment]
+    maker._own_client_order_indices.add("own-client")
+    maker._initialize_runtime_state(7)
+    maker._acquire_instance_lock()
+
+    class HangingLighter:
+        async def get_active_orders(self, contract_id):
+            await asyncio.sleep(60)
+
+        async def disconnect(self):
+            return None
+
+    maker._lighter_client = HangingLighter()  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="Timed out confirming quote cancellation"):
+        asyncio.run(maker.stop())
+
+    assert maker._instance_lock_path is not None
+    assert not maker._instance_lock_path.exists()
+
+
 def test_owned_client_indexes_are_persisted_for_crash_recovery(tmp_path):
     state_path = tmp_path / "maker-state.json"
     settings = SimpleMakerSettings(

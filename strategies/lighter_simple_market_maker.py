@@ -101,6 +101,7 @@ class SimpleMakerSettings:
     order_refresh_bps: Decimal = Decimal("1")
     min_quote_lifetime_seconds: float = 5.0
     order_ack_timeout_seconds: float = 5.0
+    shutdown_timeout_seconds: float = 10.0
     binance_reference_timeout_seconds: float = 1.0
     binance_depth_levels: int = 10
     binance_imbalance_max_bps: Decimal = Decimal("3")
@@ -1282,13 +1283,38 @@ class SimpleMarketMaker:
             and getattr(self._lighter_config, "contract_id", "")
         ):
             try:
-                await self._cancel_all_orders(reconciliation_attempts=12)
+                shutdown_timeout = max(0.1, float(self.settings.shutdown_timeout_seconds))
+                await asyncio.wait_for(
+                    self._cancel_all_orders(reconciliation_attempts=3),
+                    timeout=shutdown_timeout,
+                )
+            except asyncio.TimeoutError as exc:
+                shutdown_errors.append(
+                    RuntimeError(
+                        "Timed out confirming quote cancellation during shutdown; "
+                        "the next startup will reconcile persisted order IDs"
+                    )
+                )
+                self.logger.log(
+                    "Timed out confirming quote cancellation during shutdown; "
+                    "continuing to close connections and release the instance lock",
+                    "ERROR",
+                )
             except Exception as exc:
                 shutdown_errors.append(exc)
 
         if self._lighter_client is not None:
             try:
-                await self._lighter_client.disconnect()
+                disconnect_timeout = max(
+                    0.1,
+                    min(float(self.settings.shutdown_timeout_seconds), 5.0),
+                )
+                await asyncio.wait_for(
+                    self._lighter_client.disconnect(),
+                    timeout=disconnect_timeout,
+                )
+            except asyncio.TimeoutError:
+                shutdown_errors.append(RuntimeError("Timed out closing the Lighter connection"))
             except Exception as exc:
                 shutdown_errors.append(exc)
 

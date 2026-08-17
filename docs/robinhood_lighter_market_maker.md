@@ -18,6 +18,9 @@ The default policy is deliberately small and conservative:
   leverage transaction is sent.
 - On shutdown, only this process's own quotes are cancelled. Manual or other
   strategy orders are left untouched.
+- `SIGINT`/`SIGTERM` starts graceful quote cancellation. Shutdown waits at most
+  10 seconds for confirmation, then closes connections and releases the lock;
+  the next start reconciles persisted own-order IDs before quoting again.
 - Client order IDs are persisted before submission. A restart reconciles and
   cancels old process-owned quotes before making a new quote.
 - A per-account lock prevents two copies of this maker from running at once.
