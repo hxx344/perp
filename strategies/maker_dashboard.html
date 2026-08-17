@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Robinhood Lighter | 做市监控</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0d11;
+      --surface: #11161d;
+      --surface-2: #151c24;
+      --surface-3: #1b242e;
+      --line: #28323d;
+      --line-soft: rgba(255, 255, 255, .07);
+      --text: #e8edf2;
+      --muted: #8996a4;
+      --faint: #5c6875;
+      --cyan: #55c7d6;
+      --cyan-soft: rgba(85, 199, 214, .14);
+      --green: #4dc88b;
+      --green-soft: rgba(77, 200, 139, .13);
+      --red: #ec7880;
+      --red-soft: rgba(236, 120, 128, .13);
+      --amber: #e8b867;
+      --amber-soft: rgba(232, 184, 103, .13);
+      --purple: #a59cf2;
+      --shadow: 0 14px 32px rgba(0, 0, 0, .24);
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { min-width: 300px; background: var(--bg); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    button { font: inherit; }
+    .app-shell { width: min(1500px, 100%); margin: 0 auto; padding: 20px 24px 36px; }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 3px 0 19px;
+      border-bottom: 1px solid var(--line);
+    }
+    .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      flex: 0 0 34px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(85, 199, 214, .55);
+      color: var(--cyan);
+      font-weight: 700;
+      letter-spacing: .04em;
+      background: var(--cyan-soft);
+    }
+    .brand h1 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: .01em; }
+    .brand p { margin: 1px 0 0; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .topbar-right { display: flex; align-items: center; gap: 16px; min-width: 0; }
+    .pair {
+      padding: 5px 9px;
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: var(--surface);
+      font-size: 12px;
+      letter-spacing: .04em;
+      white-space: nowrap;
+    }
+    .connection { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); box-shadow: 0 0 0 3px rgba(92, 104, 117, .14); }
+    .dot.live { background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+    .dot.warn { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
+    .dot.down { background: var(--red); box-shadow: 0 0 0 3px var(--red-soft); }
+    .last-update { color: var(--faint); font-size: 11px; white-space: nowrap; }
+    .icon-button {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      padding: 0;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .icon-button:hover, .icon-button:focus-visible { color: var(--text); border-color: var(--cyan); outline: none; }
+    .icon-button.busy { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .notice {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      margin-top: 14px;
+      padding: 9px 12px;
+      border: 1px solid rgba(232, 184, 103, .35);
+      background: var(--amber-soft);
+      color: #f2d29a;
+      font-size: 12px;
+    }
+    .notice.visible { display: flex; }
+
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 18px;
+    }
+    .kpi {
+      min-width: 0;
+      padding: 14px 15px 13px;
+      border: 1px solid var(--line-soft);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .kpi-label { color: var(--muted); font-size: 11px; letter-spacing: .04em; }
+    .kpi-value {
+      overflow: hidden;
+      margin-top: 4px;
+      color: var(--text);
+      font-size: clamp(17px, 1.75vw, 23px);
+      font-variant-numeric: tabular-nums;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .kpi-value.positive { color: var(--green); }
+    .kpi-value.negative { color: var(--red); }
+    .kpi-value.accent { color: var(--cyan); }
+    .kpi-sub { margin-top: 3px; color: var(--faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .section-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0;
+      padding: 0 0 11px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+    .section-heading h2 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: .04em; }
+    .section-heading span { color: var(--faint); font-size: 11px; }
+    .panel {
+      min-width: 0;
+      padding: 16px;
+      border: 1px solid var(--line-soft);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .main-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.38fr) minmax(320px, .82fr);
+      gap: 12px;
+      margin-top: 12px;
+      align-items: start;
+    }
+
+    .orders-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    .orders-table th {
+      padding: 11px 8px 9px;
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: .07em;
+      text-align: right;
+      text-transform: uppercase;
+    }
+    .orders-table th:first-child, .orders-table td:first-child { text-align: left; }
+    .orders-table td {
+      overflow: hidden;
+      padding: 12px 8px;
+      border-top: 1px solid var(--line-soft);
+      color: var(--muted);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .orders-table td.price { color: var(--text); font-weight: 600; }
+    .orders-table tr.buy td:first-child { color: var(--green); }
+    .orders-table tr.sell td:first-child { color: var(--red); }
+    .side-tag { display: inline-flex; align-items: center; gap: 5px; font-weight: 650; }
+    .side-tag i { width: 6px; height: 6px; display: inline-block; border-radius: 50%; background: currentColor; }
+    .empty-row td { padding: 23px 8px; color: var(--faint); text-align: center !important; }
+    .status-tag {
+      display: inline-block;
+      padding: 3px 7px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.2;
+    }
+    .status-tag.working { color: var(--cyan); border-color: rgba(85, 199, 214, .35); background: var(--cyan-soft); }
+    .status-tag.pending { color: var(--amber); border-color: rgba(232, 184, 103, .35); background: var(--amber-soft); }
+    .status-tag.filled { color: var(--green); border-color: rgba(77, 200, 139, .35); background: var(--green-soft); }
+    .status-tag.cancelled, .status-tag.error { color: var(--red); border-color: rgba(236, 120, 128, .35); background: var(--red-soft); }
+    .table-foot { display: flex; justify-content: space-between; gap: 8px; padding-top: 11px; color: var(--faint); font-size: 11px; }
+
+    .side-stack { display: grid; gap: 12px; }
+    .metric-rows { margin-top: 9px; }
+    .metric-row {
+      display: grid;
+      grid-template-columns: minmax(100px, 1fr) minmax(80px, auto);
+      align-items: center;
+      gap: 13px;
+      min-height: 31px;
+      border-bottom: 1px solid rgba(255, 255, 255, .045);
+    }
+    .metric-row:last-child { border-bottom: 0; }
+    .metric-row dt { color: var(--muted); font-size: 12px; }
+    .metric-row dd { margin: 0; color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
+    .metric-row dd.positive { color: var(--green); }
+    .metric-row dd.negative { color: var(--red); }
+    .metric-row dd.accent { color: var(--cyan); }
+    .inventory-meter { height: 5px; margin-top: 13px; background: var(--surface-3); overflow: hidden; }
+    .inventory-meter span { display: block; height: 100%; width: 0; background: var(--cyan); transition: width .35s ease, background .35s ease; }
+    .meter-label { display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; color: var(--faint); font-size: 10px; }
+
+    .signal-block { margin-top: 12px; }
+    .signal-line { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+    .signal-name { width: 94px; flex: 0 0 94px; color: var(--muted); font-size: 11px; }
+    .signal-track { position: relative; height: 5px; flex: 1; background: var(--surface-3); }
+    .signal-track::after { content: ""; position: absolute; top: -3px; bottom: -3px; left: 50%; width: 1px; background: var(--line); }
+    .signal-fill { position: absolute; top: 0; bottom: 0; width: 0; transition: width .35s ease, left .35s ease, background .35s ease; }
+    .signal-fill.pos { left: 50%; background: var(--green); }
+    .signal-fill.neg { right: 50%; background: var(--red); }
+    .signal-value { width: 63px; flex: 0 0 63px; color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; }
+    .signal-total { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 17px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+    .signal-total span:first-child { color: var(--muted); font-size: 12px; }
+    .signal-total strong { font-size: 16px; font-variant-numeric: tabular-nums; }
+    .signal-total strong.pos { color: var(--green); }
+    .signal-total strong.neg { color: var(--red); }
+    .signal-total strong.flat { color: var(--cyan); }
+
+    .tendency {
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 12px;
+      align-items: center;
+      min-height: 64px;
+      margin-top: 11px;
+      padding: 10px 12px;
+      border-left: 2px solid var(--cyan);
+      background: var(--cyan-soft);
+    }
+    .tendency-icon { color: var(--cyan); font-size: 25px; line-height: 1; text-align: center; }
+    .tendency-value { color: var(--text); font-size: 15px; font-weight: 650; }
+    .tendency-reason { margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .tendency.buy { border-color: var(--green); background: var(--green-soft); }
+    .tendency.buy .tendency-icon { color: var(--green); }
+    .tendency.sell { border-color: var(--red); background: var(--red-soft); }
+    .tendency.sell .tendency-icon { color: var(--red); }
+    .tendency.pause { border-color: var(--amber); background: var(--amber-soft); }
+    .tendency.pause .tendency-icon { color: var(--amber); }
+
+    .bottom-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .stat-big { margin-top: 10px; color: var(--text); font-size: 21px; font-variant-numeric: tabular-nums; }
+    .stat-big.positive { color: var(--green); }
+    .stat-big.negative { color: var(--red); }
+    .stat-caption { color: var(--faint); font-size: 11px; }
+    .split-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+    .split-stats > div { min-width: 0; }
+    .split-label { color: var(--muted); font-size: 11px; }
+    .split-value { margin-top: 3px; color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+    .mini-bar { height: 4px; margin-top: 10px; background: var(--surface-3); }
+    .mini-bar span { display: block; width: 0; height: 100%; background: var(--cyan); transition: width .35s ease; }
+    .mini-bar span.green { background: var(--green); }
+    .mini-bar span.red { background: var(--red); }
+
+    .footer-line { display: flex; justify-content: space-between; gap: 12px; margin-top: 17px; color: var(--faint); font-size: 10px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .muted { color: var(--muted); }
+    @media (max-width: 1100px) {
+      .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .main-grid { grid-template-columns: 1fr; }
+      .bottom-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 680px) {
+      .app-shell { padding: 14px 12px 27px; }
+      .topbar { align-items: flex-start; }
+      .topbar-right { flex-wrap: wrap; justify-content: flex-end; gap: 8px 11px; }
+      .last-update { width: 100%; text-align: right; }
+      .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 13px; }
+      .kpi { padding: 11px 12px; }
+      .panel { padding: 12px 10px; }
+      .orders-table th, .orders-table td { padding-inline: 5px; }
+      .orders-table th:nth-child(5), .orders-table td:nth-child(5) { display: none; }
+      .bottom-grid { grid-template-columns: 1fr; }
+      .footer-line { display: block; }
+      .footer-line span + span { display: block; margin-top: 4px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">MM</div>
+        <div>
+          <h1>Robinhood Lighter 做市监控</h1>
+          <p id="instrument-label">等待策略数据</p>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <span class="pair" id="pair-label">-- / --</span>
+        <span class="connection"><i class="dot" id="connection-dot"></i><span id="connection-label">连接中</span></span>
+        <span class="last-update" id="last-update">尚未更新</span>
+        <button class="icon-button" id="refresh-button" type="button" aria-label="立即刷新" title="立即刷新">&#8635;</button>
+      </div>
+    </header>
+
+    <div class="notice" id="error-notice" role="status"><span aria-hidden="true">!</span><span id="error-text">API 暂时不可用</span></div>
+
+    <section class="kpi-grid" aria-label="核心指标">
+      <article class="kpi"><div class="kpi-label">合并净收益</div><div class="kpi-value" id="kpi-pnl">--</div><div class="kpi-sub" id="kpi-pnl-sub">Lighter + Binance</div></article>
+      <article class="kpi"><div class="kpi-label">累计成交量</div><div class="kpi-value accent" id="kpi-volume">--</div><div class="kpi-sub" id="kpi-volume-sub">报价货币</div></article>
+      <article class="kpi"><div class="kpi-label">净库存</div><div class="kpi-value" id="kpi-inventory">--</div><div class="kpi-sub" id="kpi-inventory-sub">Lighter + Binance</div></article>
+      <article class="kpi"><div class="kpi-label">库存使用率</div><div class="kpi-value" id="kpi-utilization">--</div><div class="kpi-sub" id="kpi-utilization-sub">相对限额</div></article>
+      <article class="kpi"><div class="kpi-label">当前挂单</div><div class="kpi-value" id="kpi-orders">--</div><div class="kpi-sub" id="kpi-orders-sub">买 / 卖</div></article>
+      <article class="kpi"><div class="kpi-label">下一步倾向</div><div class="kpi-value accent" id="kpi-tendency">--</div><div class="kpi-sub" id="kpi-tendency-sub">等待信号</div></article>
+    </section>
+
+    <div class="main-grid">
+      <section class="panel">
+        <div class="section-heading"><h2>当前挂单</h2><span id="orders-summary">--</span></div>
+        <table class="orders-table">
+          <thead><tr><th>方向</th><th>价格</th><th>数量</th><th>状态</th><th>挂单时长</th><th>目标价</th></tr></thead>
+          <tbody id="orders-body"><tr class="empty-row"><td colspan="6">等待活动订单数据</td></tr></tbody>
+        </table>
+        <div class="table-foot"><span>只显示策略自有订单</span><span id="quote-mode">--</span></div>
+      </section>
+
+      <div class="side-stack">
+        <section class="panel">
+          <div class="section-heading"><h2>库存与风险</h2><span id="inventory-state">--</span></div>
+          <dl class="metric-rows">
+            <div class="metric-row"><dt>Lighter 仓位</dt><dd id="inv-lighter">--</dd></div>
+            <div class="metric-row"><dt>Binance 对冲</dt><dd id="inv-binance">--</dd></div>
+            <div class="metric-row"><dt>合并净仓</dt><dd id="inv-combined" class="accent">--</dd></div>
+            <div class="metric-row"><dt>库存限额</dt><dd id="inv-limit">--</dd></div>
+            <div class="metric-row"><dt>未实现收益</dt><dd id="inv-unrealized">--</dd></div>
+          </dl>
+          <div class="inventory-meter"><span id="inventory-meter-fill"></span></div>
+          <div class="meter-label"><span>空仓</span><span id="inventory-meter-label">--</span><span>满仓</span></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading"><h2>偏移信号</h2><span id="signal-reference">Binance 深度</span></div>
+          <div class="signal-block">
+            <div class="signal-line"><span class="signal-name">订单簿强弱</span><span class="signal-track"><i class="signal-fill" id="signal-imbalance-fill"></i></span><span class="signal-value" id="signal-imbalance">--</span></div>
+            <div class="signal-line"><span class="signal-name">库存偏移</span><span class="signal-track"><i class="signal-fill" id="signal-inventory-fill"></i></span><span class="signal-value" id="signal-inventory">--</span></div>
+            <div class="signal-line"><span class="signal-name">总报价偏移</span><span class="signal-track"><i class="signal-fill" id="signal-total-fill"></i></span><span class="signal-value" id="signal-total-value">--</span></div>
+          </div>
+          <div class="signal-total"><span>信号结论</span><strong id="signal-conclusion" class="flat">等待</strong></div>
+          <div class="tendency" id="tendency-box"><div class="tendency-icon" id="tendency-icon" aria-hidden="true">&#8212;</div><div><div class="tendency-value" id="tendency-value">等待策略信号</div><div class="tendency-reason" id="tendency-reason">--</div></div></div>
+        </section>
+      </div>
+    </div>
+
+    <div class="bottom-grid">
+      <section class="panel">
+        <div class="section-heading"><h2>收益</h2><span>本次运行</span></div>
+        <div class="stat-big" id="pnl-total">--</div><div class="stat-caption">合并净收益</div>
+        <div class="split-stats">
+          <div><div class="split-label">Lighter 已实现</div><div class="split-value" id="pnl-lighter">--</div></div>
+          <div><div class="split-label">Binance 已实现</div><div class="split-value" id="pnl-binance">--</div></div>
+          <div><div class="split-label">未实现</div><div class="split-value" id="pnl-unrealized">--</div></div>
+          <div><div class="split-label">手续费</div><div class="split-value" id="pnl-fees">--</div></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="section-heading"><h2>成交量</h2><span id="volume-period">本次运行</span></div>
+        <div class="stat-big accent" id="volume-quote">--</div><div class="stat-caption">报价货币成交量</div>
+        <div class="split-stats">
+          <div><div class="split-label">基础货币成交量</div><div class="split-value" id="volume-base">--</div></div>
+          <div><div class="split-label">成交笔数</div><div class="split-value" id="volume-trades">--</div></div>
+          <div><div class="split-label">Lighter 成交量</div><div class="split-value" id="volume-lighter">--</div></div>
+          <div><div class="split-label">Binance 对冲量</div><div class="split-value" id="volume-binance">--</div></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="section-heading"><h2>市场与报价</h2><span id="market-time">--</span></div>
+        <dl class="metric-rows">
+          <div class="metric-row"><dt>Lighter 买一</dt><dd id="market-bid">--</dd></div>
+          <div class="metric-row"><dt>Lighter 卖一</dt><dd id="market-ask">--</dd></div>
+          <div class="metric-row"><dt>中间价</dt><dd id="market-mid" class="accent">--</dd></div>
+          <div class="metric-row"><dt>报价价差</dt><dd id="market-spread">--</dd></div>
+          <div class="metric-row"><dt>Tick / 杠杆</dt><dd id="market-config">--</dd></div>
+        </dl>
+      </section>
+    </div>
+    <div class="footer-line"><span>数据源：策略本地 API · 仅供监控，不执行交易操作</span><span class="mono" id="api-endpoint">GET /api/snapshot · 2s</span></div>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+      const POLL_MS = 2000;
+      const $ = (id) => document.getElementById(id);
+      const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+      const pick = (obj, paths, fallback = null) => {
+        for (const path of paths) {
+          const parts = path.split(".");
+          let value = obj;
+          for (const part of parts) value = value && typeof value === "object" ? value[part] : undefined;
+          if (value !== undefined && value !== null && value !== "") return value;
+        }
+        return fallback;
+      };
+      const num = (value) => {
+        if (value === null || value === undefined || value === "") return null;
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      };
+      const text = (value, fallback = "--") => value === null || value === undefined || value === "" ? fallback : String(value);
+      const fmt = (value, digits = 2) => {
+        const n = num(value);
+        return n === null ? "--" : n.toLocaleString("zh-CN", {minimumFractionDigits: digits, maximumFractionDigits: digits});
+      };
+      const fmtQty = (value) => {
+        const n = num(value);
+        if (n === null) return "--";
+        const digits = Math.abs(n) < 1 ? 6 : 4;
+        return n.toLocaleString("zh-CN", {minimumFractionDigits: 0, maximumFractionDigits: digits});
+      };
+      const signed = (value, digits = 2) => {
+        const n = num(value);
+        if (n === null) return "--";
+        return (n > 0 ? "+" : "") + fmt(n, digits);
+      };
+      const bps = (value) => {
+        const n = num(value);
+        return n === null ? "--" : (n > 0 ? "+" : "") + fmt(n, 2) + " bps";
+      };
+      const timestampMs = (value) => {
+        if (value === null || value === undefined || value === "") return null;
+        if (typeof value === "string" && /[^0-9.]/.test(value)) {
+          const parsed = Date.parse(value);
+          return Number.isFinite(parsed) ? parsed : null;
+        }
+        const n = Number(value);
+        if (!Number.isFinite(n)) return null;
+        return n < 100000000000 ? n * 1000 : n;
+      };
+      const age = (value) => {
+        const ms = timestampMs(value);
+        if (ms === null) return "--";
+        const seconds = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+        if (seconds < 60) return seconds + "s";
+        if (seconds < 3600) return Math.floor(seconds / 60) + "m";
+        return Math.floor(seconds / 3600) + "h";
+      };
+      const polarityClass = (value) => {
+        const n = num(value);
+        return n === null || Math.abs(n) < 1e-12 ? "" : n > 0 ? "positive" : "negative";
+      };
+      const state = { lastPayload: null, busy: false, lastOk: null };
+
+      function unwrap(payload) {
+        if (payload && payload.snapshot && typeof payload.snapshot === "object") return payload.snapshot;
+        if (payload && payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)) return payload.data;
+        return payload || {};
+      }
+
+      function normalize(raw) {
+        const s = unwrap(raw);
+        const market = pick(s, ["market"], {}) || {};
+        const inventory = pick(s, ["inventory", "positions"], {}) || {};
+        const performance = pick(s, ["performance", "pnl"], {}) || {};
+        const signals = pick(s, ["signals", "signal"], {}) || {};
+        const status = pick(s, ["status", "state"], {}) || {};
+        const ordersRaw = pick(s, ["orders", "active_orders", "activeOrders", "quote_orders"], []);
+        let orders = [];
+        if (Array.isArray(ordersRaw)) orders = ordersRaw;
+        else if (ordersRaw && typeof ordersRaw === "object") {
+          for (const side of ["buy", "sell", "bids", "asks"]) {
+            const list = ordersRaw[side];
+            if (Array.isArray(list)) orders.push(...list.map((o) => Object.assign({side: side === "bids" ? "buy" : side === "asks" ? "sell" : side}, o)));
+            else if (list && typeof list === "object") orders.push(Object.assign({side}, list));
+          }
+        }
+        return {
+          raw: s,
+          status,
+          market,
+          inventory,
+          performance,
+          signals,
+          orders,
+          ticker: text(pick(s, ["ticker", "lighter_ticker", "symbol", "market.symbol"], "--")),
+          binanceSymbol: text(pick(s, ["binance_symbol", "binanceSymbol", "market.binance_symbol"], "--")),
+          running: pick(status, ["running", "is_running"], pick(s, ["running", "is_running"], null)),
+          paused: Boolean(pick(status, ["paused", "is_paused", "external_pause"], pick(s, ["paused", "external_pause"], false))),
+          flatten: Boolean(pick(status, ["flatten_active", "flatten"], false)),
+          updated: pick(s, ["updated_at", "timestamp", "last_update", "metrics.updated_at"], null),
+          bid: num(pick(market, ["best_bid", "bid", "lighter_best_bid"], pick(s, ["best_bid", "lighter_best_bid"], null))),
+          ask: num(pick(market, ["best_ask", "ask", "lighter_best_ask"], pick(s, ["best_ask", "lighter_best_ask"], null))),
+          mid: num(pick(market, ["mid", "mid_price", "lighter_mid"], null)),
+          tick: num(pick(market, ["tick_size", "tick"], pick(s, ["tick_size"], null))),
+          leverage: pick(market, ["leverage"], pick(s, ["leverage", "target_leverage"], null)),
+          lighterInv: num(pick(inventory, ["lighter", "lighter_position", "lighter_net_position", "net_position"], pick(s, ["lighter_inventory", "lighter_position"], null))),
+          binanceInv: num(pick(inventory, ["binance", "binance_position", "binance_net_position"], pick(s, ["binance_inventory", "binance_position"], null))),
+          combinedInv: num(pick(inventory, ["combined", "net", "combined_position", "net_position_combined"], pick(s, ["combined_position", "combined_net_position"], null))),
+          invLimit: num(pick(inventory, ["limit", "inventory_limit", "max_position"], pick(s, ["inventory_limit", "max_inventory"], null))),
+          unrealized: num(pick(performance, ["unrealized_pnl", "unrealized", "floating_pnl"], pick(s, ["unrealized_pnl"], null))),
+          realized: num(pick(performance, ["realized_pnl", "realized", "net_pnl", "total_pnl"], pick(s, ["realized_pnl", "total_pnl"], null))),
+          lighterPnl: num(pick(performance, ["lighter_realized_pnl", "lighter_pnl"], pick(s, ["lighter_realized_pnl"], null))),
+          binancePnl: num(pick(performance, ["binance_realized_pnl", "binance_pnl"], pick(s, ["binance_realized_pnl"], null))),
+          fees: num(pick(performance, ["fees", "total_fees"], pick(s, ["fees", "total_fees"], null))),
+          volumeQuote: num(pick(performance, ["volume_quote", "quote_volume", "total_volume_quote"], pick(s, ["volume_quote", "total_volume_quote"], null))),
+          volumeBase: num(pick(performance, ["volume_base", "base_volume", "total_volume_base"], pick(s, ["volume_base", "total_volume_base"], null))),
+          trades: num(pick(performance, ["trades", "trade_count", "fills"], pick(s, ["trade_count", "fills"], null))),
+          lighterVolume: num(pick(performance, ["lighter_volume_quote", "lighter_volume"], pick(s, ["lighter_volume_quote"], null))),
+          binanceVolume: num(pick(performance, ["binance_volume_quote", "binance_volume"], pick(s, ["binance_volume_quote"], null))),
+          imbalance: num(pick(signals, ["binance_imbalance_bps", "imbalance_bps", "orderbook_imbalance_bps", "imbalance"], pick(s, ["binance_imbalance_bps", "imbalance_bps"], null))),
+          inventorySkew: num(pick(signals, ["inventory_skew_bps", "inventory_skew"], pick(s, ["inventory_skew_bps"], null))),
+          totalOffset: num(pick(signals, ["total_offset_bps", "offset_bps", "quote_offset_bps", "total_offset"], pick(s, ["total_offset_bps", "offset_bps"], null))),
+          reference: text(pick(signals, ["reference", "source", "binance_reference"], "Binance 深度")),
+          tendency: pick(s, ["next_action", "next_tendency", "tendency", "next_step"], pick(status, ["next_action"], null)),
+          targetBuy: num(pick(s, ["quotes.buy.target_price", "quotes.buy.target", "target_buy_price", "target_prices.buy"], null)),
+          targetSell: num(pick(s, ["quotes.sell.target_price", "quotes.sell.target", "target_sell_price", "target_prices.sell"], null))
+        };
+      }
+
+      function setText(id, value) { const node = $(id); if (node) node.textContent = value; }
+      function setPolarity(id, value) {
+        const node = $(id); if (!node) return;
+        node.classList.remove("positive", "negative");
+        const cls = polarityClass(value); if (cls) node.classList.add(cls);
+      }
+      function renderSignal(id, value, limit) {
+        const fill = $(id); if (!fill) return;
+        const n = num(value); const max = Math.max(Math.abs(num(limit) || 1), 1e-9);
+        fill.classList.remove("pos", "neg");
+        if (n === null || Math.abs(n) < 1e-12) { fill.style.width = "0"; return; }
+        const width = Math.min(Math.abs(n) / max, 1) * 50;
+        if (n > 0) { fill.classList.add("pos"); fill.style.width = width + "%"; fill.style.left = "50%"; fill.style.right = "auto"; }
+        else { fill.classList.add("neg"); fill.style.width = width + "%"; fill.style.right = "50%"; fill.style.left = "auto"; }
+      }
+
+      function renderOrders(data) {
+        const body = $("orders-body");
+        const orders = data.orders.slice().sort((a, b) => (String(a.side || "").toLowerCase() === "buy" ? -1 : 1) - (String(b.side || "").toLowerCase() === "buy" ? -1 : 1));
+        setText("kpi-orders", String(orders.length));
+        const buyCount = orders.filter((o) => String(pick(o, ["side", "direction"], "")).toLowerCase().startsWith("b")).length;
+        const sellCount = orders.length - buyCount;
+        setText("kpi-orders-sub", buyCount + " 买 / " + sellCount + " 卖");
+        setText("orders-summary", orders.length ? orders.length + " 个策略订单" : "无活动订单");
+        if (!orders.length) { body.innerHTML = '<tr class="empty-row"><td colspan="6">当前没有活动订单</td></tr>'; return; }
+        body.innerHTML = orders.map((order) => {
+          const sideRaw = String(pick(order, ["side", "direction", "order_side"], "")).toLowerCase();
+          const side = sideRaw.startsWith("b") ? "buy" : "sell";
+          const sideText = side === "buy" ? "买入" : "卖出";
+          const statusRaw = String(pick(order, ["status", "state"], "working")).toLowerCase();
+          const statusClass = statusRaw.includes("fill") ? "filled" : statusRaw.includes("pend") || statusRaw.includes("ack") ? "pending" : statusRaw.includes("cancel") ? "cancelled" : statusRaw.includes("error") ? "error" : "working";
+          const statusText = statusClass === "working" ? "活动" : statusClass === "pending" ? "待确认" : statusClass === "filled" ? "已成交" : statusClass === "cancelled" ? "已撤" : "异常";
+          const price = pick(order, ["price", "limit_price", "px"], null);
+          const quantity = pick(order, ["remaining_quantity", "remaining", "quantity", "qty", "size"], null);
+          const target = pick(order, ["target_price", "target", "desired_price"], side === "buy" ? data.targetBuy : data.targetSell);
+          const created = pick(order, ["created_at", "created", "timestamp", "submitted_at"], null);
+          const orderAge = pick(order, ["age_seconds", "age"], null);
+          const ageText = orderAge === null ? age(created) : fmt(orderAge, 1) + "s";
+          return '<tr class="' + side + '"><td><span class="side-tag"><i></i>' + sideText + '</span></td><td class="price mono">' + esc(fmt(price, 2)) + '</td><td class="mono">' + esc(fmtQty(quantity)) + '</td><td><span class="status-tag ' + statusClass + '">' + statusText + '</span></td><td>' + esc(ageText) + '</td><td class="mono">' + esc(fmt(target, 2)) + '</td></tr>';
+        }).join("");
+      }
+
+      function render(data) {
+        const mid = data.mid !== null ? data.mid : data.bid !== null && data.ask !== null ? (data.bid + data.ask) / 2 : null;
+        const spread = data.bid !== null && data.ask !== null ? data.ask - data.bid : null;
+        const combined = data.combinedInv !== null ? data.combinedInv : data.lighterInv !== null || data.binanceInv !== null ? (data.lighterInv || 0) + (data.binanceInv || 0) : null;
+        const pnl = data.realized !== null || data.unrealized !== null ? (data.realized || 0) + (data.unrealized || 0) : null;
+        const utilization = data.invLimit && combined !== null ? Math.min(Math.abs(combined) / Math.abs(data.invLimit) * 100, 999) : null;
+        const action = data.tendency;
+        const actionText = typeof action === "object" ? text(pick(action, ["label", "action", "name"], null)) : text(action, "--");
+        const actionReason = typeof action === "object" ? text(pick(action, ["reason", "detail", "message"], null)) : text(pick(data.raw, ["next_action_reason", "tendency_reason"], null));
+
+        setText("instrument-label", data.ticker !== "--" ? data.ticker + (data.binanceSymbol !== "--" ? " · 参考 " + data.binanceSymbol : "") : "等待策略数据");
+        setText("pair-label", data.ticker + " / " + data.binanceSymbol);
+        setText("kpi-pnl", signed(pnl)); setPolarity("kpi-pnl", pnl); setText("kpi-pnl-sub", data.realized !== null ? "已实现 " + signed(data.realized) : "Lighter + Binance");
+        setText("kpi-volume", fmt(data.volumeQuote)); setText("kpi-volume-sub", "报价货币 · " + (data.trades === null ? "--" : fmt(data.trades, 0) + " 笔"));
+        setText("kpi-inventory", signed(combined, 6)); setPolarity("kpi-inventory", combined); setText("kpi-inventory-sub", "Lighter " + fmtQty(data.lighterInv) + " · Binance " + fmtQty(data.binanceInv));
+        setText("kpi-utilization", utilization === null ? "--" : fmt(utilization, 1) + "%"); setText("kpi-utilization-sub", data.invLimit === null ? "相对限额" : "限额 " + fmtQty(data.invLimit));
+        setText("kpi-tendency", actionText); setText("kpi-tendency-sub", actionReason);
+        renderOrders(data);
+
+        setText("inventory-state", data.paused ? "已暂停" : data.flatten ? "正在归零" : data.running === false ? "已停止" : "运行中");
+        setText("inv-lighter", signed(data.lighterInv, 6)); setPolarity("inv-lighter", data.lighterInv);
+        setText("inv-binance", signed(data.binanceInv, 6)); setPolarity("inv-binance", data.binanceInv);
+        setText("inv-combined", signed(combined, 6)); setPolarity("inv-combined", combined);
+        setText("inv-limit", fmtQty(data.invLimit)); setText("inv-unrealized", signed(data.unrealized)); setPolarity("inv-unrealized", data.unrealized);
+        const meter = $("inventory-meter-fill"); meter.style.width = utilization === null ? "0" : Math.min(utilization, 100) + "%"; meter.style.background = utilization > 80 ? "var(--red)" : utilization > 55 ? "var(--amber)" : "var(--cyan)";
+        setText("inventory-meter-label", utilization === null ? "--" : fmt(utilization, 1) + "% 使用");
+
+        setText("signal-reference", data.reference); setText("signal-imbalance", bps(data.imbalance)); setText("signal-inventory", bps(data.inventorySkew)); setText("signal-total-value", bps(data.totalOffset));
+        renderSignal("signal-imbalance-fill", data.imbalance, pick(data.signals, ["max_bps", "imbalance_max_bps"], 10)); renderSignal("signal-inventory-fill", data.inventorySkew, pick(data.signals, ["max_bps", "inventory_max_bps"], 10)); renderSignal("signal-total-fill", data.totalOffset, pick(data.signals, ["max_bps", "total_max_bps"], 10));
+        const totalNode = $("signal-conclusion"); const total = data.totalOffset; totalNode.classList.remove("pos", "neg", "flat"); totalNode.classList.add(total === null || Math.abs(total) < .01 ? "flat" : total > 0 ? "pos" : "neg"); totalNode.textContent = total === null ? "等待" : Math.abs(total) < .01 ? "中性" : total > 0 ? "偏多" : "偏空";
+        const tendency = $("tendency-box"); tendency.classList.remove("buy", "sell", "pause");
+        const lowerAction = actionText.toLowerCase();
+        const isPause = data.paused || data.flatten || /pause|暂停|归零|flat|halt|stop|停止/.test(lowerAction);
+        const isBuy = /buy|bid|买|多/.test(lowerAction); const isSell = /sell|ask|卖|空/.test(lowerAction);
+        if (isPause) tendency.classList.add("pause"); else if (isBuy) tendency.classList.add("buy"); else if (isSell) tendency.classList.add("sell");
+        setText("tendency-icon", isPause ? "!" : isBuy ? "↑" : isSell ? "↓" : "—"); setText("tendency-value", actionText); setText("tendency-reason", actionReason);
+
+        setText("pnl-total", signed(pnl)); setPolarity("pnl-total", pnl); setText("pnl-lighter", signed(data.lighterPnl)); setPolarity("pnl-lighter", data.lighterPnl); setText("pnl-binance", signed(data.binancePnl)); setPolarity("pnl-binance", data.binancePnl); setText("pnl-unrealized", signed(data.unrealized)); setPolarity("pnl-unrealized", data.unrealized); setText("pnl-fees", data.fees === null ? "--" : signed(-Math.abs(data.fees))); setPolarity("pnl-fees", data.fees === null ? null : -Math.abs(data.fees));
+        setText("volume-quote", fmt(data.volumeQuote)); setText("volume-base", fmtQty(data.volumeBase)); setText("volume-trades", data.trades === null ? "--" : fmt(data.trades, 0)); setText("volume-lighter", fmt(data.lighterVolume)); setText("volume-binance", fmt(data.binanceVolume));
+        setText("market-bid", fmt(data.bid)); setText("market-ask", fmt(data.ask)); setText("market-mid", fmt(mid)); setText("market-spread", spread === null ? "--" : fmt(spread, 2)); setText("market-config", text(data.tick === null ? null : fmt(data.tick, 4)) + (data.leverage === null ? "" : " · " + text(data.leverage) + "x"));
+        setText("quote-mode", text(pick(data.raw, ["quote_mode", "mode", "status.quote_mode"], null))); setText("market-time", data.updated ? "更新 " + age(data.updated) + " 前" : "--");
+      }
+
+      function setConnection(kind, label) { $("connection-dot").className = "dot " + kind; setText("connection-label", label); }
+      async function refresh() {
+        if (state.busy) return;
+        state.busy = true; $("refresh-button").classList.add("busy");
+        const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 5000);
+        try {
+          const response = await fetch("/api/snapshot", {cache: "no-store", signal: controller.signal, headers: {"Accept": "application/json"}});
+          if (!response.ok) throw new Error("HTTP " + response.status);
+          const payload = await response.json(); state.lastPayload = payload; state.lastOk = Date.now(); render(normalize(payload));
+          setConnection("live", "API 正常"); $("error-notice").classList.remove("visible"); setText("last-update", "刚刚更新");
+        } catch (error) {
+          setConnection("down", "API 离线"); $("error-notice").classList.add("visible"); setText("error-text", error.name === "AbortError" ? "API 请求超时，正在重试" : "无法读取 /api/snapshot：" + error.message);
+          if (state.lastOk) setText("last-update", "最后成功 " + Math.max(1, Math.floor((Date.now() - state.lastOk) / 1000)) + "s 前");
+        } finally { clearTimeout(timeout); state.busy = false; $("refresh-button").classList.remove("busy"); }
+      }
+      $("refresh-button").addEventListener("click", refresh);
+      refresh();
+      window.setInterval(refresh, POLL_MS);
+    })();
+  </script>
+</body>
+</html>

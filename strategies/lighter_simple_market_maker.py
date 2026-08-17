@@ -66,6 +66,7 @@ from exchanges import ExchangeFactory
 from exchanges.lighter import LighterClient
 from helpers.logger import TradingLogger
 from trading_bot import TradingConfig
+from strategies.maker_dashboard import MarketMakerDashboard
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -117,6 +118,9 @@ class SimpleMakerSettings:
     inventory_skew_bps: Decimal = Decimal("3")
     ownership_state_path: Optional[str] = None
     allow_existing_binance_position: bool = False
+    dashboard_enabled: bool = True
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = 8788
 
     def effective_inventory_limit(self) -> Decimal:
         return self.inventory_limit if self.inventory_limit is not None else self.hedge_threshold
@@ -130,6 +134,7 @@ class ActiveOrder:
     price: Decimal
     side: str
     client_order_index: Optional[str] = None
+    quantity: Decimal = Decimal("0")
     created_at: float = 0.0
     confirmed: bool = False
     missing_active_snapshots: int = 0
@@ -602,6 +607,22 @@ class SimpleMarketMaker:
         self._instance_lock_path: Optional[Path] = None
         self._instance_lock_fd: Optional[int] = None
         self._instance_lock_token = ""
+        self._dashboard: Optional[MarketMakerDashboard] = None
+        self._dashboard_started_at = time.time()
+        self._last_dashboard_error = ""
+        self._last_market_data_time = 0.0
+        self._last_quote_update_time = 0.0
+        self._last_best_bid = Decimal("0")
+        self._last_best_ask = Decimal("0")
+        self._last_lighter_mid = Decimal("0")
+        self._last_reference_mid = Decimal("0")
+        self._last_quote_center = Decimal("0")
+        self._last_target_prices: Dict[str, Decimal] = {}
+        self._last_binance_imbalance = Decimal("0")
+        self._last_active_order_total = 0
+        self._last_unmanaged_order_total = 0
+        self._last_next_action = "starting"
+        self._completed_iterations = 0
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         try:
@@ -772,6 +793,28 @@ class SimpleMarketMaker:
         await self._shutdown_state_task()
         await self._update_state_guarded(force=True)
         self._state_task = asyncio.create_task(self._state_maintainer())
+
+        if self.settings.dashboard_enabled:
+            dashboard = MarketMakerDashboard(
+                self.export_dashboard_snapshot,
+                host=self.settings.dashboard_host,
+                port=self.settings.dashboard_port,
+            )
+            try:
+                await dashboard.start()
+            except Exception as exc:  # pragma: no cover - port/network dependent
+                self._last_dashboard_error = str(exc)
+                self.logger.log(
+                    f"Maker dashboard could not start on {self.settings.dashboard_host}:"
+                    f"{self.settings.dashboard_port}: {exc}",
+                    "WARNING",
+                )
+            else:
+                self._dashboard = dashboard
+                self.logger.log(
+                    f"Maker dashboard available at http://{dashboard.host}:{dashboard.bound_port or dashboard.port}/",
+                    "INFO",
+                )
 
         self.logger.log(
             f"Initialized simple market maker: contract={contract_id}, tick_size={tick_size}, "
@@ -1277,6 +1320,14 @@ class SimpleMarketMaker:
         await self._shutdown_state_task()
         shutdown_errors: list[BaseException] = []
 
+        if self._dashboard is not None:
+            try:
+                await self._dashboard.stop()
+            except Exception as exc:
+                shutdown_errors.append(exc)
+            finally:
+                self._dashboard = None
+
         if (
             self._lighter_client is not None
             and self._lighter_config is not None
@@ -1337,11 +1388,13 @@ class SimpleMarketMaker:
             raise RuntimeError("SimpleMarketMaker.start() must be called first")
 
         completed_iterations = 0
+        self._completed_iterations = 0
         try:
             while self._running:
                 try:
                     await self._iteration()
                 except Exception as exc:  # noqa: BLE001
+                    self._last_dashboard_error = str(exc)
                     delay = self._handle_iteration_failure(exc)
                     if delay is None:
                         raise
@@ -1362,6 +1415,7 @@ class SimpleMarketMaker:
 
                 self._reset_rate_limit_backoff()
                 completed_iterations += 1
+                self._completed_iterations = completed_iterations
                 if self.settings.max_cycles > 0 and completed_iterations >= self.settings.max_cycles:
                     self.logger.log(
                         f"Completed requested maker iterations: {completed_iterations}",
@@ -1392,12 +1446,14 @@ class SimpleMarketMaker:
                 timeout=max(0.1, self.settings.binance_reference_timeout_seconds),
             )
             if imbalance.is_finite() and Decimal("-1") <= imbalance <= Decimal("1"):
+                self._last_binance_imbalance = imbalance
                 return imbalance
         except Exception as exc:  # pragma: no cover - network dependent
             self.logger.log(f"Binance orderbook signal unavailable: {exc}", "WARNING")
 
         # A stale directional signal is more dangerous than a neutral signal.
         # Continue using the local Lighter midpoint if Binance is unavailable.
+        self._last_binance_imbalance = Decimal("0")
         return Decimal("0")
 
     async def _resolve_reference_mid(self, fallback_mid: Decimal) -> Decimal:
@@ -1408,6 +1464,7 @@ class SimpleMarketMaker:
         """
 
         imbalance = await self._resolve_binance_imbalance()
+        self._last_binance_imbalance = imbalance
         return apply_orderbook_imbalance(
             fallback_mid,
             imbalance,
@@ -1420,11 +1477,13 @@ class SimpleMarketMaker:
 
         hot_update = await self._load_hot_update()
         if not hot_update.get("cycle_enabled", True):
+            self._last_next_action = "paused"
             self.logger.log("Cycle paused via hot update; sleeping", "WARNING")
             await self._cancel_all_orders()
             return
 
         if self._external_pause:
+            self._last_next_action = "paused"
             if not self._pause_enforced:
                 self.logger.log("External pause active; cancelling outstanding orders", "WARNING")
                 await self._cancel_all_orders()
@@ -1436,8 +1495,12 @@ class SimpleMarketMaker:
 
         contract_id = self._lighter_config.contract_id
         best_bid, best_ask = await self._lighter_client.fetch_bbo_prices(contract_id)
+        self._last_market_data_time = time.time()
+        self._last_best_bid = best_bid
+        self._last_best_ask = best_ask
 
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
+            self._last_next_action = "reconcile_market"
             self.logger.log(
                 "Invalid Lighter depth snapshot; cancelling own quotes until the book recovers",
                 "WARNING",
@@ -1452,6 +1515,7 @@ class SimpleMarketMaker:
 
         net_position = self._latest_net_position
         if not self._inventory_state_known:
+            self._last_next_action = "reconcile_inventory"
             self.logger.log(
                 "Inventory state is unknown; cancelling own quotes and waiting for reconciliation",
                 "WARNING",
@@ -1459,6 +1523,7 @@ class SimpleMarketMaker:
             await self._cancel_all_orders()
             return
         if self.settings.enable_binance_hedge and not self._binance_state_known:
+            self._last_next_action = "reconcile_inventory"
             self.logger.log(
                 "Binance hedge position is unknown; cancelling own quotes until reconciliation",
                 "WARNING",
@@ -1467,6 +1532,7 @@ class SimpleMarketMaker:
             return
 
         lighter_mid = (best_bid + best_ask) / 2
+        self._last_lighter_mid = lighter_mid
         # Lighter supplies the absolute price scale. Binance contributes only
         # a bounded, dimensionless orderbook-pressure shift, so differing
         # quote assets or contract multipliers cannot create a cross-market
@@ -1481,6 +1547,8 @@ class SimpleMarketMaker:
             inventory_cap,
             self.settings.inventory_skew_bps,
         )
+        self._last_reference_mid = mid_price
+        self._last_quote_center = mid_price
         targets = compute_target_prices(mid_price, spread_scale, self._lighter_config.tick_size)
         targets = clamp_maker_targets(
             targets,
@@ -1489,6 +1557,7 @@ class SimpleMarketMaker:
             self._lighter_config.tick_size,
             max_bbo_distance_ticks=self.settings.bbo_max_distance_ticks,
         )
+        self._last_target_prices = dict(targets)
 
         max_quote_quantity = self._max_quote_quantity()
         bid_quote_quantity = self._normalize_order_quantity(
@@ -1512,13 +1581,72 @@ class SimpleMarketMaker:
             ask_quote_quantity,
         )
 
+        self._last_next_action = self._derive_next_action(
+            net_position,
+            bid_enabled=bid_enabled,
+            ask_enabled=ask_enabled,
+            targets=targets,
+        )
+
         # One active-order snapshot per iteration avoids two authenticated REST
         # reads and reduces rate-limit pressure during quote refreshes.
         active_orders = await self._lighter_client.get_active_orders(contract_id)
+        active_orders = list(active_orders)
+        self._last_active_order_total = len(active_orders)
+        self._last_unmanaged_order_total = sum(
+            1
+            for order in active_orders
+            if not self._is_own_order(order, getattr(order, "side", None))
+        )
         await self._sync_side("buy", targets["buy"], bid_enabled, active_orders=active_orders)
         await self._sync_side("sell", targets["sell"], ask_enabled, active_orders=active_orders)
 
         await self._maybe_execute_hedge(net_position)
+        self._last_quote_update_time = time.time()
+
+    def _derive_next_action(
+        self,
+        net_position: Decimal,
+        *,
+        bid_enabled: bool,
+        ask_enabled: bool,
+        targets: Dict[str, Decimal],
+    ) -> str:
+        """Return a compact operator-facing description of the next intent."""
+
+        if self._flatten_active:
+            return "flatten"
+        if self._external_pause:
+            return "paused"
+        if not self._inventory_state_known:
+            return "reconcile_inventory"
+
+        combined = net_position + self._binance_position_estimate
+        if self._hedger is not None and abs(combined) >= self.settings.hedge_threshold:
+            return "hedge_inventory"
+        if not bid_enabled and not ask_enabled:
+            return "inventory_limit"
+        missing = [
+            side
+            for side, enabled in (("buy", bid_enabled), ("sell", ask_enabled))
+            if enabled and side not in self._tracked_orders
+        ]
+        if missing:
+            return "place_" + "_and_".join(missing)
+
+        for side, enabled in (("buy", bid_enabled), ("sell", ask_enabled)):
+            tracked = self._tracked_orders.get(side)
+            target = targets.get(side)
+            if enabled and tracked is not None and target is not None:
+                threshold = max(
+                    self._lighter_config.tick_size * Decimal(self.settings.order_refresh_ticks)
+                    if self._lighter_config is not None
+                    else Decimal("0"),
+                    abs(target) * self.settings.order_refresh_bps / Decimal("10000"),
+                )
+                if abs(tracked.price - target) > threshold:
+                    return "replace_" + side
+        return "hold_quotes"
 
     async def _sync_side(
         self,
@@ -1623,6 +1751,10 @@ class SimpleMarketMaker:
                     price=order.price,
                     side=side,
                     client_order_index=client_index,
+                    quantity=self._to_decimal(
+                        getattr(order, "remaining_size", None)
+                        or getattr(order, "size", None)
+                    ),
                     created_at=created_at,
                     confirmed=True,
                     missing_active_snapshots=0,
@@ -1712,6 +1844,7 @@ class SimpleMarketMaker:
                 price=target_price,
                 side=side,
                 client_order_index=reserved_client_index,
+                quantity=order_quantity,
                 created_at=time.monotonic(),
                 confirmed=False,
                 missing_active_snapshots=0,
@@ -1753,6 +1886,7 @@ class SimpleMarketMaker:
                     price=target_price,
                     side=side,
                     client_order_index=returned_client_index,
+                    quantity=order_quantity,
                     created_at=time.monotonic(),
                     confirmed=False,
                     missing_active_snapshots=0,
@@ -2889,6 +3023,205 @@ class SimpleMarketMaker:
     def current_net_position(self) -> Decimal:
         return self._latest_net_position
 
+    def export_dashboard_snapshot(self) -> Dict[str, Any]:
+        """Return a JSON-safe, read-only view of the maker's live state.
+
+        The dashboard deliberately receives derived values only.  Credentials,
+        signer objects, raw API responses, and private account identifiers are
+        never included in this payload.
+        """
+
+        now = time.time()
+
+        def number(value: Any, precision: int = 8) -> str:
+            return self._format_decimal(self._to_decimal(value), precision)
+
+        def age(timestamp: float) -> Optional[float]:
+            if not timestamp:
+                return None
+            return round(max(0.0, now - timestamp), 3)
+
+        lighter_mark = self._lighter_last_mark_price
+        if lighter_mark <= 0 and self._last_lighter_mid > 0:
+            lighter_mark = self._last_lighter_mid
+        lighter_unrealized = self._compute_unrealized_pnl(
+            self._lighter_inventory_base,
+            self._lighter_avg_entry_price,
+            lighter_mark,
+        )
+        lighter_total = self._lighter_session_realized_pnl + lighter_unrealized
+
+        binance_mark = self._binance_last_mark_price or lighter_mark
+        binance_unrealized = self._compute_unrealized_pnl(
+            self._binance_inventory_base,
+            self._binance_avg_entry_price,
+            binance_mark,
+        )
+        binance_total = self._binance_session_realized_pnl + binance_unrealized
+        combined_position = self._latest_net_position + self._binance_position_estimate
+        combined_pnl = lighter_total + binance_total
+        combined_volume_base = self._lighter_session_volume_base + self._binance_session_volume_base
+        combined_volume_quote = self._lighter_session_volume_quote + self._binance_session_volume_quote
+        inventory_limit = self.settings.effective_inventory_limit()
+        utilization = (
+            abs(combined_position) / inventory_limit * Decimal("100")
+            if inventory_limit > 0
+            else Decimal("0")
+        )
+        tick_size = (
+            self._lighter_config.tick_size
+            if self._lighter_config is not None
+            else Decimal("0")
+        )
+
+        tracked_orders = []
+        for side in ("buy", "sell"):
+            tracked = self._tracked_orders.get(side)
+            if tracked is None:
+                continue
+            tracked_orders.append(
+                {
+                    "side": side,
+                    "order_id": str(tracked.order_id),
+                    "client_order_index": tracked.client_order_index,
+                    "price": number(tracked.price, 6),
+                    "quantity": number(tracked.quantity, 8),
+                    "status": "working" if tracked.confirmed else "pending_ack",
+                    "confirmed": bool(tracked.confirmed),
+                    "age_seconds": age(tracked.created_at if tracked.created_at > 0 else 0.0),
+                    "missing_active_snapshots": tracked.missing_active_snapshots,
+                }
+            )
+
+        order_payload: Dict[str, Any] = {
+            "own_active": tracked_orders,
+            "buy": [order for order in tracked_orders if order["side"] == "buy"],
+            "sell": [order for order in tracked_orders if order["side"] == "sell"],
+            "own_count": len(tracked_orders),
+            "account_active_count": self._last_active_order_total,
+            "unmanaged_count": self._last_unmanaged_order_total,
+            "post_only": True,
+        }
+
+        inventory_ratio = (
+            self._latest_net_position / inventory_limit
+            if inventory_limit > 0
+            else Decimal("0")
+        )
+        inventory_skew = -inventory_ratio * self.settings.inventory_skew_bps
+        imbalance_offset = self._last_binance_imbalance * self.settings.binance_imbalance_max_bps
+        total_offset = imbalance_offset + inventory_skew
+        status = "running" if self._running else "stopped"
+        hot_paused = isinstance(self._last_hot_update, dict) and not self._last_hot_update.get(
+            "cycle_enabled", True
+        )
+        if self._flatten_active:
+            status = "flattening"
+        elif self._external_pause or hot_paused:
+            status = "paused"
+        elif not self._inventory_state_known or (self._hedger is not None and not self._binance_state_known):
+            status = "reconciling"
+
+        return {
+            "ok": True,
+            "updated_at": now,
+            "status": status,
+            "running": self._running,
+            "paused": self._external_pause,
+            "flatten_active": self._flatten_active,
+            "ticker": self.settings.lighter_ticker,
+            "binance_symbol": self.settings.binance_symbol,
+            "next_action": self._last_next_action,
+            "target_prices": {
+                "buy": number(self._last_target_prices.get("buy", 0), 6),
+                "sell": number(self._last_target_prices.get("sell", 0), 6),
+            },
+            "quote_mode": "post_only",
+            "strategy": {
+                "name": "robinhood_lighter_market_maker",
+                "market": self.settings.lighter_ticker,
+                "endpoint": "robinhood",
+                "running": self._running,
+                "cycles": self._completed_iterations,
+                "next_action": self._last_next_action,
+                "last_error": self._last_dashboard_error,
+            },
+            "market": {
+                "best_bid": number(self._last_best_bid, 6),
+                "best_ask": number(self._last_best_ask, 6),
+                "mid": number(self._last_lighter_mid, 6),
+                "quote_center": number(self._last_quote_center, 6),
+                "reference_mid": number(self._last_reference_mid, 6),
+                "target_buy": number(self._last_target_prices.get("buy", 0), 6),
+                "target_sell": number(self._last_target_prices.get("sell", 0), 6),
+                "tick_size": number(tick_size, 8),
+                "leverage": self.settings.lighter_leverage,
+                "spread_bps": number(self.settings.base_spread_bps, 4),
+                "bbo_distance_ticks": self.settings.bbo_max_distance_ticks,
+                "last_market_data_age": age(self._last_market_data_time),
+                "last_quote_update_age": age(self._last_quote_update_time),
+            },
+            "signals": {
+                "binance_symbol": self.settings.binance_symbol,
+                "binance_imbalance": number(self._last_binance_imbalance, 5),
+                "imbalance": number(self._last_binance_imbalance, 5),
+                "binance_imbalance_bps": number(imbalance_offset, 4),
+                "imbalance_bps": number(imbalance_offset, 4),
+                "binance_imbalance_offset_bps": number(imbalance_offset, 4),
+                "inventory_skew_bps": number(inventory_skew, 4),
+                "total_offset_bps": number(total_offset, 4),
+                "max_imbalance_bps": number(self.settings.binance_imbalance_max_bps, 4),
+                "source": "binance_depth" if self.settings.use_binance_reference else "local_lighter_only",
+            },
+            "orders": order_payload,
+            "active_orders": tracked_orders,
+            "inventory": {
+                "lighter": number(self._latest_net_position, 8),
+                "binance": number(self._binance_position_estimate, 8),
+                "combined": number(combined_position, 8),
+                "limit": number(inventory_limit, 8),
+                "utilization_percent": number(utilization, 3),
+                "state_known": self._inventory_state_known and self._binance_state_known,
+                "hedge_enabled": self._hedger is not None,
+                "last_refresh_age": age(self._latest_net_position_time),
+            },
+            "performance": {
+                "lighter_realized_pnl": number(self._lighter_session_realized_pnl, 4),
+                "lighter_unrealized_pnl": number(lighter_unrealized, 4),
+                "lighter_total_pnl": number(lighter_total, 4),
+                "binance_realized_pnl": number(self._binance_session_realized_pnl, 4),
+                "binance_unrealized_pnl": number(binance_unrealized, 4),
+                "binance_total_pnl": number(binance_total, 4),
+                "combined_pnl": number(combined_pnl, 4),
+                "realized_pnl": number(
+                    self._lighter_session_realized_pnl + self._binance_session_realized_pnl,
+                    4,
+                ),
+                "unrealized_pnl": number(lighter_unrealized + binance_unrealized, 4),
+                "total_pnl": number(combined_pnl, 4),
+                "lighter_volume_base": number(self._lighter_session_volume_base, 8),
+                "lighter_volume_quote": number(self._lighter_session_volume_quote, 4),
+                "binance_volume_base": number(self._binance_session_volume_base, 8),
+                "binance_volume_quote": number(self._binance_session_volume_quote, 4),
+                "total_volume_base": number(combined_volume_base, 8),
+                "total_volume_quote": number(combined_volume_quote, 4),
+                "volume_base": number(combined_volume_base, 8),
+                "volume_quote": number(combined_volume_quote, 4),
+                "last_fill_age": age(max(self._last_fill_timestamp.values() or [0.0])),
+            },
+            "account": self.export_account_metrics(),
+            "health": {
+                "dashboard": self._dashboard is not None,
+                "dashboard_url": (
+                    f"http://{self._dashboard.host}:{self._dashboard.bound_port or self._dashboard.port}/"
+                    if self._dashboard is not None
+                    else ""
+                ),
+                "uptime_seconds": round(max(0.0, now - self._dashboard_started_at), 3),
+                "last_metrics_age": age(self._last_metrics_time),
+            },
+        }
+
     def _max_quote_quantity(self) -> Decimal:
         """Return the largest size that the next quote may submit."""
 
@@ -3076,6 +3409,22 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
     parser.add_argument("--metrics-interval", default=30.0, type=float, help="Seconds between account metrics logs")
     parser.add_argument("--no-console-log", action="store_true", help="Disable console logging output")
     parser.add_argument(
+        "--dashboard-host",
+        default="127.0.0.1",
+        help="Local dashboard bind address (default: 127.0.0.1; keep private unless protected)",
+    )
+    parser.add_argument(
+        "--dashboard-port",
+        default=8788,
+        type=int,
+        help="Local dashboard TCP port (default: 8788; 0 selects an ephemeral port)",
+    )
+    parser.add_argument(
+        "--no-dashboard",
+        action="store_true",
+        help="Disable the local read-only maker dashboard",
+    )
+    parser.add_argument(
         "--allowed-side",
         action="append",
         choices=["buy", "sell"],
@@ -3158,6 +3507,10 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         parser.error("--binance-reference-timeout-seconds must be positive")
     if args.fill_cooldown_seconds < 0:
         parser.error("--fill-cooldown-seconds must not be negative")
+    if not str(args.dashboard_host).strip():
+        parser.error("--dashboard-host must not be empty")
+    if args.dashboard_port < 0 or args.dashboard_port > 65535:
+        parser.error("--dashboard-port must be between 0 and 65535")
     if args.order_quantity_min is not None and args.order_quantity_min <= 0:
         parser.error("--order-quantity-min must be positive")
     if args.order_quantity_max is not None and args.order_quantity_max <= 0:
@@ -3209,6 +3562,9 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         inventory_skew_bps=args.inventory_skew_bps,
         ownership_state_path=args.ownership_state_file,
         allow_existing_binance_position=args.allow_existing_binance_position,
+        dashboard_enabled=not args.no_dashboard,
+        dashboard_host=str(args.dashboard_host).strip(),
+        dashboard_port=args.dashboard_port,
     )
 
 

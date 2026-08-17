@@ -29,7 +29,14 @@ import tracemalloc
 import math
 import socket
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
+from decimal import (
+    Decimal,
+    InvalidOperation,
+    ROUND_CEILING,
+    ROUND_FLOOR,
+    ROUND_HALF_UP,
+    ROUND_UP,
+)
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -1198,6 +1205,7 @@ class CycleConfig:
     virtual_aster_maker: bool
     randomize_direction: bool = False
     direction_seed: Optional[int] = None
+    quantity_seed: Optional[int] = None
     lighter_quantity_min: Optional[Decimal] = None
     lighter_quantity_max: Optional[Decimal] = None
     preserve_initial_position: bool = False
@@ -2276,6 +2284,9 @@ class HedgingCycleExecutor:
         if self._randomize_direction:
             self._direction_rng = random.Random(seed_value)
         self._current_cycle_entry_direction: str = config.direction
+        # Keep quantity sampling independent from direction selection and from
+        # credential auto-provisioning's global random calls.
+        self._quantity_rng = random.Random(getattr(config, "quantity_seed", None))
 
         base_lighter_quantity = config.lighter_quantity
         if self._lighter_quantity_min is not None and self._lighter_quantity_max is not None:
@@ -3327,13 +3338,34 @@ class HedgingCycleExecutor:
             self.config.lighter_quantity = quantized_lighter_qty
 
         if self._lighter_quantity_min is not None:
-            quantized_min = self._quantize_quantity(self._lighter_quantity_min, lighter_step)
+            # Preserve the requested interval after applying live exchange
+            # precision: the lower bound may only move upward and the upper
+            # bound may only move downward.
+            quantized_min = self._quantize_quantity_bound(
+                self._lighter_quantity_min,
+                lighter_step,
+                round_up=True,
+            )
             if quantized_min is not None:
                 self._lighter_quantity_min = quantized_min
         if self._lighter_quantity_max is not None:
-            quantized_max = self._quantize_quantity(self._lighter_quantity_max, lighter_step)
+            quantized_max = self._quantize_quantity_bound(
+                self._lighter_quantity_max,
+                lighter_step,
+                round_up=False,
+            )
             if quantized_max is not None:
                 self._lighter_quantity_max = quantized_max
+        if (
+            self._lighter_quantity_min is not None
+            and self._lighter_quantity_max is not None
+            and self._lighter_quantity_min > self._lighter_quantity_max
+        ):
+            raise ValueError(
+                "Lighter quantity range has no value aligned to the live market step "
+                f"{lighter_step}: min={self._lighter_quantity_min}, "
+                f"max={self._lighter_quantity_max}"
+            )
 
         runtime_min_base = getattr(self.lighter_client, "min_base_amount", None)
         if isinstance(runtime_min_base, Decimal) and runtime_min_base > 0:
@@ -3655,6 +3687,22 @@ class HedgingCycleExecutor:
                 min_required = max(min_candidates)
                 if quantity < min_required:
                     quantity = self._apply_cycle_quantity_steps(min_required)
+
+        # Both exchange constraints must remain inside the operator-requested
+        # Lighter randomization interval.  Aster's minimum/step can otherwise
+        # lift a sampled value above the configured maximum after rounding.
+        if (
+            self._lighter_quantity_min is not None
+            and quantity < self._lighter_quantity_min
+        ) or (
+            self._lighter_quantity_max is not None
+            and quantity > self._lighter_quantity_max
+        ):
+            raise ValueError(
+                "No executable cycle quantity satisfies the configured Lighter "
+                f"range [{self._lighter_quantity_min}, {self._lighter_quantity_max}] "
+                f"and the other venue constraints; resolved quantity={quantity}"
+            )
 
         self._current_cycle_lighter_quantity = quantity
         self.logger.log(
@@ -4740,23 +4788,31 @@ class HedgingCycleExecutor:
         if self._lighter_quantity_min is None or self._lighter_quantity_max is None:
             return self.config.lighter_quantity
 
+        step = self._lighter_quantity_step
+        if not isinstance(step, Decimal) or step <= 0:
+            raise ValueError("Lighter quantity randomization requires a positive market size step")
+
         min_units = int(
-            (self._lighter_quantity_min / self._lighter_quantity_step).to_integral_value(
-                rounding=ROUND_HALF_UP
-            )
+            (self._lighter_quantity_min / step).to_integral_value(rounding=ROUND_CEILING)
         )
         max_units = int(
-            (self._lighter_quantity_max / self._lighter_quantity_step).to_integral_value(
-                rounding=ROUND_HALF_UP
-            )
+            (self._lighter_quantity_max / step).to_integral_value(rounding=ROUND_FLOOR)
         )
 
         if max_units < min_units:
-            raise ValueError("Configured Lighter quantity range is invalid")
+            raise ValueError(
+                "Configured Lighter quantity range has no value aligned to "
+                f"the market step {step}"
+            )
 
-        selected_units = random.randint(min_units, max_units)
-        quantity = Decimal(selected_units) * self._lighter_quantity_step
-        return quantity.quantize(self._lighter_quantity_step)
+        selected_units = self._quantity_rng.randint(min_units, max_units)
+        quantity = (Decimal(selected_units) * step).quantize(step)
+        if quantity < self._lighter_quantity_min or quantity > self._lighter_quantity_max:
+            raise RuntimeError(
+                "Random Lighter quantity escaped its configured range: "
+                f"{quantity} not in [{self._lighter_quantity_min}, {self._lighter_quantity_max}]"
+            )
+        return quantity
 
     @staticmethod
     def _quantize_quantity(quantity: Optional[Decimal], step: Decimal) -> Optional[Decimal]:
@@ -4773,6 +4829,28 @@ class HedgingCycleExecutor:
             return quantized.quantize(step)
         except (InvalidOperation, ValueError):
             return quantized
+
+    @staticmethod
+    def _quantize_quantity_bound(
+        quantity: Optional[Decimal],
+        step: Decimal,
+        *,
+        round_up: bool,
+    ) -> Optional[Decimal]:
+        """Align a random-quantity bound without widening its requested range."""
+        if quantity is None or step <= 0:
+            return quantity
+        try:
+            units = (quantity / step).to_integral_value(
+                rounding=ROUND_CEILING if round_up else ROUND_FLOOR
+            )
+        except (InvalidOperation, ZeroDivisionError):
+            return quantity
+        quantized = units * step
+        try:
+            return quantized.quantize(step) if quantized > 0 else quantity
+        except (InvalidOperation, ValueError):
+            return quantized if quantized > 0 else quantity
 
     @staticmethod
     def _ceil_quantity_to_step(quantity: Decimal, step: Optional[Decimal]) -> Decimal:
@@ -5182,12 +5260,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lighter-quantity-min",
         type=_decimal_type,
-        help="Optional minimum quantity for Lighter taker legs when randomizing",
+        help=(
+            "Minimum Lighter taker quantity for per-cycle randomization; "
+            "both Lighter legs share the sampled value"
+        ),
     )
     parser.add_argument(
         "--lighter-quantity-max",
         type=_decimal_type,
-        help="Optional maximum quantity for Lighter taker legs when randomizing",
+        help=(
+            "Maximum Lighter taker quantity for per-cycle randomization; "
+            "both Lighter legs share the sampled value"
+        ),
     )
     parser.add_argument(
         "--direction",
@@ -5204,6 +5288,11 @@ def _parse_args() -> argparse.Namespace:
         "--direction-seed",
         type=int,
         help="Optional seed for random direction selection to make runs reproducible",
+    )
+    parser.add_argument(
+        "--lighter-quantity-seed",
+        type=int,
+        help="Optional seed for random Lighter quantity selection",
     )
     parser.add_argument(
         "--take-profit",
@@ -5876,6 +5965,7 @@ async def _async_main(args: argparse.Namespace) -> int:
         direction=args.direction,
         randomize_direction=bool(getattr(args, "randomize_direction", False)),
         direction_seed=getattr(args, "direction_seed", None),
+        quantity_seed=getattr(args, "lighter_quantity_seed", None),
         take_profit_pct=args.take_profit,
         slippage_pct=args.slippage,
         max_wait_seconds=args.max_wait,
