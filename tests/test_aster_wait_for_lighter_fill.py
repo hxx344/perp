@@ -3,6 +3,7 @@ import sys
 import types
 from decimal import Decimal
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -26,6 +27,7 @@ from strategies.aster_lighter_cycle import (
     HedgingCycleExecutor,
     SkipCycleError,
 )
+from exchanges.base import OrderInfo, OrderResult
 
 
 class _DummyOrder:
@@ -39,9 +41,21 @@ class _DummyLighterClient:
         self.position_after = position_after
         self.current_order = _DummyOrder(price=Decimal("100"), side="buy")
         self.current_order_client_id = 123
+        self.order_calls = []
 
     async def get_account_positions(self) -> Decimal:
         return self.position_after
+
+    async def place_limit_order(
+        self,
+        contract_id: str,
+        quantity: Decimal,
+        price: Decimal,
+        side: str,
+        **kwargs: Any,
+    ) -> OrderResult:
+        self.order_calls.append((contract_id, quantity, price, side, kwargs))
+        return OrderResult(success=True, order_id="321", status="PLACED")
 
 
 def _make_executor(position_after: Decimal) -> HedgingCycleExecutor:
@@ -132,3 +146,56 @@ def test_wait_for_lighter_fill_sell_delta_with_position_before():
 
     assert result.status == "FILLED"
     assert result.filled_size == Decimal("0.1")
+
+
+def test_lighter_taker_leg_uses_ioc_time_in_force():
+    executor = _make_executor(position_after=Decimal("0"))
+    client = cast(Any, executor.lighter_client)
+    executor._current_cycle_lighter_quantity = Decimal("1")
+    executor._wait_for_lighter_fill = AsyncMock(
+        return_value=OrderInfo(
+            order_id="321",
+            side="buy",
+            size=Decimal("1"),
+            price=Decimal("100.1"),
+            status="FILLED",
+            filled_size=Decimal("1"),
+        )
+    )
+
+    result = asyncio.run(
+        executor._execute_lighter_taker("LEG2", "buy", Decimal("100"))
+    )
+
+    assert result.status == "FILLED"
+    assert len(client.order_calls) == 1
+    assert client.order_calls[0][3] == "buy"
+    assert client.order_calls[0][4] == {"time_in_force": "ioc"}
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["CANCELED_BY_USER", "CANCELLED_PARTIAL", "REJECTED_BAD_PRICE", "EXPIRED_GTT"],
+)
+def test_lighter_terminal_status_details_are_not_treated_as_pending(status):
+    executor = _make_executor(position_after=Decimal("0"))
+    executor.config.lighter_max_wait_seconds = 1.0
+    order = executor.lighter_client.current_order
+    order.status = status
+    order.filled_size = Decimal("0")
+    executor.lighter_client.current_order_client_id = 123
+
+    with pytest.raises(SkipCycleError, match=f"ended with status {status}"):
+        asyncio.run(executor._wait_for_lighter_fill("123", "LEG2"))
+
+
+def test_lighter_terminal_status_with_partial_fill_skips_cycle():
+    executor = _make_executor(position_after=Decimal("0"))
+    executor.config.lighter_max_wait_seconds = 1.0
+    order = executor.lighter_client.current_order
+    order.status = "CANCELLED_PARTIAL"
+    order.filled_size = Decimal("0.4")
+    executor.lighter_client.current_order_client_id = 123
+
+    with pytest.raises(SkipCycleError, match="filled=0.4"):
+        asyncio.run(executor._wait_for_lighter_fill("123", "LEG2"))

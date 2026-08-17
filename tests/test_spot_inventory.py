@@ -45,6 +45,7 @@ class _StubLighterClient:
     def __init__(self) -> None:
         self.position = Decimal("0")
         self.order_calls = []
+        self.order_options = []
         self.config = SimpleNamespace(contract_id="123", tick_size=Decimal("0.01"))
 
     async def get_account_positions(self) -> Decimal:
@@ -53,8 +54,16 @@ class _StubLighterClient:
     async def fetch_bbo_prices(self, contract_id: str):
         return Decimal("100"), Decimal("101")
 
-    async def place_limit_order(self, contract_id: str, quantity: Decimal, price: Decimal, side: str) -> OrderResult:
+    async def place_limit_order(
+        self,
+        contract_id: str,
+        quantity: Decimal,
+        price: Decimal,
+        side: str,
+        **kwargs,
+    ) -> OrderResult:
         self.order_calls.append((contract_id, quantity, price, side))
+        self.order_options.append(kwargs)
         return OrderResult(success=True, order_id="99", status="PLACED")
 
 
@@ -110,4 +119,62 @@ def test_ensure_lighter_flat_quantizes_quantity() -> None:
     assert client.order_calls, "Expected emergency order to be placed"
     _, quantity, _, _ = client.order_calls[-1]
     assert quantity == Decimal("0.3")
+    assert client.order_options[-1] == {"time_in_force": "ioc", "reduce_only": True}
     executor._wait_for_lighter_fill.assert_awaited_once()
+
+
+def test_ensure_lighter_flat_retries_ioc_partial_fill() -> None:
+    config = _spot_config()
+    executor = HedgingCycleExecutor(config)
+    client = _StubLighterClient()
+    executor.lighter_client = cast(Any, client)
+    executor.lighter_config.contract_id = "123"
+    executor.lighter_config.tick_size = Decimal("0.01")
+    executor._lighter_quantity_step = Decimal("0.1")
+    executor._baseline_lighter_position = Decimal("5")
+
+    client.get_account_positions = AsyncMock(
+        side_effect=[Decimal("5.3"), Decimal("5.2"), Decimal("5.2")]
+    )
+    completed_fill = OrderInfo(
+        order_id="43",
+        side="sell",
+        size=Decimal("0.2"),
+        price=Decimal("100"),
+        status="FILLED",
+        filled_size=Decimal("0.2"),
+    )
+    executor._wait_for_lighter_fill = AsyncMock(
+        side_effect=[RuntimeError("CANCELED_PARTIAL"), completed_fill]
+    )  # type: ignore[assignment]
+
+    asyncio.run(executor.ensure_lighter_flat())
+
+    assert len(client.order_calls) == 2
+    assert client.order_calls[0][1] == Decimal("0.3")
+    assert client.order_calls[1][1] == Decimal("0.2")
+    assert executor._wait_for_lighter_fill.await_count == 2
+    assert executor._lighter_recovery_blocked is False
+
+
+def test_ensure_lighter_flat_reports_residual_below_market_minimum() -> None:
+    config = _spot_config()
+    executor = HedgingCycleExecutor(config)
+    client = _StubLighterClient()
+    client.min_base_amount = Decimal("0.2")
+    client.min_quote_amount = Decimal("10")
+    executor.lighter_client = cast(Any, client)
+    executor.lighter_config.contract_id = "123"
+    executor.lighter_config.tick_size = Decimal("0.01")
+    executor._lighter_quantity_step = Decimal("0.01")
+    executor._baseline_lighter_position = Decimal("5")
+
+    client.position = Decimal("5.1")
+    executor._wait_for_lighter_fill = AsyncMock(
+        side_effect=RuntimeError("CANCELED_PARTIAL")
+    )  # type: ignore[assignment]
+
+    asyncio.run(executor.ensure_lighter_flat())
+
+    assert len(client.order_calls) == 0
+    assert executor._lighter_recovery_blocked is True

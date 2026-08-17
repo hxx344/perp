@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
 from typing import Dict, Any, List, Optional, Tuple, Iterable
 
 from .base import BaseExchangeClient, OrderResult, OrderInfo, query_retry
+from .lighter_endpoints import resolve_lighter_endpoint_profile
 from helpers.logger import TradingLogger
 
 # Import official Lighter SDK for API client
@@ -37,8 +38,8 @@ if root_logger.level == logging.DEBUG:
     root_logger.setLevel(logging.INFO)
 
 
-DEFAULT_LIGHTER_BASE_URL = "https://mainnet.zklighter.elliot.ai"
 DEFAULT_SPOT_MARKET_ID = "2048"
+MAX_CLIENT_ORDER_INDEX = (1 << 48) - 1
 
 ASSET_SYMBOL_ALIASES = {
     "WETH": "ETH",
@@ -69,8 +70,27 @@ class LighterClient(BaseExchangeClient):
             ) from exc
 
         self.api_private_keys = self._load_api_private_keys()
-        base_url_env = (os.getenv('LIGHTER_BASE_URL') or DEFAULT_LIGHTER_BASE_URL).strip()
-        self.base_url = base_url_env or DEFAULT_LIGHTER_BASE_URL
+        environment = (
+            getattr(self.config, "lighter_environment", None)
+            or os.getenv("LIGHTER_ENVIRONMENT")
+            or os.getenv("LIGHTER_ENDPOINT_PROFILE")
+        )
+        rest_url = getattr(self.config, "lighter_base_url", None) or os.getenv("LIGHTER_BASE_URL")
+        ws_url = getattr(self.config, "lighter_ws_url", None) or os.getenv("LIGHTER_WS_URL")
+        chain_id_raw = getattr(self.config, "lighter_chain_id", None) or os.getenv("LIGHTER_CHAIN_ID")
+        self.endpoint_profile = resolve_lighter_endpoint_profile(
+            environment,
+            rest_url=rest_url,
+            ws_url=ws_url,
+            chain_id=chain_id_raw,
+        )
+        self.base_url = self.endpoint_profile.rest_url
+        self.ws_url = self.endpoint_profile.ws_url
+        self.chain_id = self.endpoint_profile.chain_id
+        setattr(self.config, "lighter_environment", self.endpoint_profile.name)
+        setattr(self.config, "lighter_base_url", self.base_url)
+        setattr(self.config, "lighter_ws_url", self.ws_url)
+        setattr(self.config, "lighter_chain_id", self.chain_id)
 
         debug_flag = os.getenv("LIGHTER_DEBUG_ORDERS") or ""
         self._debug_orders: bool = debug_flag.strip().lower() in {"1", "true", "yes", "on"}
@@ -117,6 +137,9 @@ class LighterClient(BaseExchangeClient):
         self._last_confirmed_tier_name: Optional[str] = None
         self.spot_min_base_amount: Optional[Decimal] = None
         self.spot_min_quote_amount: Optional[Decimal] = None
+        self.min_base_amount: Optional[Decimal] = None
+        self.min_quote_amount: Optional[Decimal] = None
+        self._last_client_order_index = 0
 
     def _log_debug(self, message: str) -> None:
         if self._debug_orders:
@@ -467,10 +490,7 @@ class LighterClient(BaseExchangeClient):
         rhs = cls._normalize_client_order_index(reference)
         return lhs is not None and rhs is not None and lhs == rhs
 
-    def _apply_spot_trade_constraints(self, quantity: Decimal, price: Decimal) -> Decimal:
-        if not self._is_spot_market():
-            return quantity
-
+    def _apply_trade_constraints(self, quantity: Decimal, price: Decimal) -> Decimal:
         detail = self.market_detail
         if detail is None or quantity <= 0:
             return quantity
@@ -480,8 +500,25 @@ class LighterClient(BaseExchangeClient):
         if size_step is not None and size_step > 0:
             result = self._round_to_step(result, size_step)
 
-        min_base = self.spot_min_base_amount
-        min_quote = self.spot_min_quote_amount
+        min_base = self.min_base_amount
+        min_quote = self.min_quote_amount
+
+        if not self._is_spot_market():
+            if result != quantity:
+                raise ValueError(
+                    f"Lighter quantity {quantity} is not aligned to market size step {size_step}"
+                )
+            required = min_base if min_base is not None and min_base > 0 else Decimal("0")
+            if min_quote is not None and min_quote > 0 and price > 0:
+                quote_required = min_quote / price
+                if size_step is not None and size_step > 0:
+                    quote_required = self._round_to_step(quote_required, size_step, rounding=ROUND_UP)
+                required = max(required, quote_required)
+            if result < required:
+                raise ValueError(
+                    f"Lighter order quantity {result} is below the runtime market minimum {required}"
+                )
+            return result
 
         if min_base is not None and min_base > 0 and result < min_base:
             result = min_base
@@ -501,6 +538,10 @@ class LighterClient(BaseExchangeClient):
                     result = self._round_to_step(result, size_step, rounding=ROUND_UP)
 
         return result
+
+    def _apply_spot_trade_constraints(self, quantity: Decimal, price: Decimal) -> Decimal:
+        """Backward-compatible alias for callers outside this repository."""
+        return self._apply_trade_constraints(quantity, price)
 
     def _resolve_order_price(self, order_data: Dict[str, Any], filled_size: Decimal) -> Decimal:
         average_price = self._first_available_decimal(
@@ -632,7 +673,8 @@ class LighterClient(BaseExchangeClient):
 
         if not key_map:
             raise ValueError(
-                "Missing Lighter API credentials. Set LIGHTER_API_PRIVATE_KEYS (JSON or 'index:key' pairs) "
+                "Missing Lighter API credentials. Set LIGHTER_API_PRIVATE_KEYS or API_KEY_PRIVATE_KEYS "
+                "(JSON or 'index:key' pairs) "
                 "or API_KEY_PRIVATE_KEY + LIGHTER_API_KEY_INDEX."
             )
 
@@ -648,8 +690,8 @@ class LighterClient(BaseExchangeClient):
 
         if not (has_multi or has_legacy):
             raise ValueError(
-                "Missing Lighter API credentials. Provide LIGHTER_API_PRIVATE_KEYS or API_KEY_PRIVATE_KEY + "
-                "LIGHTER_API_KEY_INDEX."
+                "Missing Lighter API credentials. Provide LIGHTER_API_PRIVATE_KEYS/API_KEY_PRIVATE_KEYS or "
+                "API_KEY_PRIVATE_KEY + LIGHTER_API_KEY_INDEX."
             )
 
     async def _get_market_config(self, ticker: str) -> Tuple[int, int, int]:
@@ -697,6 +739,7 @@ class LighterClient(BaseExchangeClient):
                     url=self.base_url,
                     account_index=self.account_index,
                     api_private_keys=self.api_private_keys,
+                    chain_id=self.chain_id,
                 )
 
                 # Check client
@@ -970,6 +1013,7 @@ class LighterClient(BaseExchangeClient):
                 setattr(self.config, "market_index", getattr(self.config, "contract_id", None))
             setattr(self.config, "account_index", self.account_index)
             setattr(self.config, "lighter_client", self.lighter_client)
+            setattr(self.config, "lighter_ws_url", self.ws_url)
 
             self.ws_manager = LighterCustomWebSocketManager(
                 config=self.config,
@@ -983,6 +1027,7 @@ class LighterClient(BaseExchangeClient):
                 self.ws_manager.market_index = market_index
             self.ws_manager.account_index = self.account_index
             self.ws_manager.lighter_client = self.lighter_client
+            self.ws_manager.ws_url = self.ws_url
 
         if created:
             if not await self.wait_for_market_data(timeout=10):
@@ -1160,12 +1205,29 @@ class LighterClient(BaseExchangeClient):
                 success=False, order_id=str(order_params['client_order_index']),
                 error_message=f"Order creation error: {error}")
 
-        else:
-            return OrderResult(success=True, order_id=str(order_params['client_order_index']))
+        response_code = getattr(tx_hash, "code", None)
+        if response_code is None and isinstance(tx_hash, dict):
+            response_code = tx_hash.get("code")
+        if response_code != 200:
+            return OrderResult(
+                success=False,
+                order_id=str(order_params['client_order_index']),
+                error_message=f"Lighter API rejected order with code {response_code}",
+            )
 
-    async def place_limit_order(self, contract_id: str, quantity: Decimal, price: Decimal,
-                                side: str) -> OrderResult:
-        """Place a post only order with Lighter using official SDK."""
+        return OrderResult(success=True, order_id=str(order_params['client_order_index']))
+
+    async def place_limit_order(
+        self,
+        contract_id: str,
+        quantity: Decimal,
+        price: Decimal,
+        side: str,
+        *,
+        time_in_force: str = "gtt",
+        reduce_only: bool = False,
+    ) -> OrderResult:
+        """Place a validated limit order with an explicit time-in-force policy."""
         # Ensure client is initialized
         if self.lighter_client is None:
             await self._initialize_lighter_client()
@@ -1184,12 +1246,16 @@ class LighterClient(BaseExchangeClient):
         else:
             raise Exception(f"Invalid side: {side}")
 
-        # Generate unique client order index
-        client_order_index = int(time.time() * 1000) % 1000000  # Simple unique ID
+        # client_order_index is uint48 and must be unique across all markets.
+        now_ms = int(time.time_ns() // 1_000_000)
+        client_order_index = max(now_ms, self._last_client_order_index + 1)
+        if client_order_index > MAX_CLIENT_ORDER_INDEX:
+            raise RuntimeError("Generated Lighter client_order_index exceeds uint48")
+        self._last_client_order_index = client_order_index
         self.current_order_client_id = client_order_index
         self.current_order = None
 
-        adjusted_quantity = self._apply_spot_trade_constraints(quantity, price)
+        adjusted_quantity = self._apply_trade_constraints(quantity, price)
         if adjusted_quantity != quantity:
             self.logger.log(
                 (
@@ -1200,17 +1266,54 @@ class LighterClient(BaseExchangeClient):
             )
             quantity = adjusted_quantity
 
+        scaled_price = price * self.price_multiplier
+        integer_price_decimal = scaled_price.to_integral_value(rounding=ROUND_HALF_UP)
+        if scaled_price != integer_price_decimal:
+            raise ValueError(
+                f"Lighter price {price} is not aligned to market tick size {self.config.tick_size}"
+            )
+
+        base_amount = int(quantity * self.base_amount_multiplier)
+        integer_price = int(integer_price_decimal)
+        if base_amount <= 0 or integer_price <= 0:
+            raise ValueError("Lighter order rounds to a non-positive integer amount or price")
+
+        normalized_tif = str(time_in_force or "gtt").strip().casefold()
+        tif_values = {
+            "gtt": lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
+            "ioc": lighter_client.ORDER_TIME_IN_FORCE_IMMEDIATE_OR_CANCEL,
+            "post_only": lighter_client.ORDER_TIME_IN_FORCE_POST_ONLY,
+        }
+        if normalized_tif not in tif_values:
+            raise ValueError(f"Unsupported Lighter time in force: {time_in_force!r}")
+        order_expiry = (
+            lighter_client.DEFAULT_IOC_EXPIRY
+            if normalized_tif == "ioc"
+            else lighter_client.DEFAULT_28_DAY_ORDER_EXPIRY
+        )
+
         # Create order parameters
         order_params = {
             'market_index': market_index,
             'client_order_index': client_order_index,
-            'base_amount': int(quantity * self.base_amount_multiplier),
-            'price': int(price * self.price_multiplier),
+            'base_amount': base_amount,
+            'price': integer_price,
             'is_ask': is_ask,
             'order_type': lighter_client.ORDER_TYPE_LIMIT,
-            'time_in_force': lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
-            'reduce_only': False,
+            'time_in_force': tif_values[normalized_tif],
+            'reduce_only': bool(reduce_only),
             'trigger_price': 0,
+            'order_expiry': order_expiry,
+            'self_trade_behavior_mode': getattr(
+                lighter_client,
+                "SELF_TRADE_BEHAVIOR_EXPIRE_BOTH",
+                2,
+            ),
+            'self_trade_equality_mode': getattr(
+                lighter_client,
+                "SELF_TRADE_EQUALITY_MASTER_ACCOUNT_INDEX",
+                1,
+            ),
         }
 
         self._log_debug(
@@ -1713,22 +1816,21 @@ class LighterClient(BaseExchangeClient):
         setattr(self.config, "tick_size", tick_size_value)
 
         self.market_detail = order_book_details
-        if self._is_spot_market():
-            self.spot_min_base_amount = self._parse_decimal(getattr(order_book_details, "min_base_amount", None))
-            self.spot_min_quote_amount = self._parse_decimal(getattr(order_book_details, "min_quote_amount", None))
+        self.min_base_amount = self._parse_decimal(getattr(order_book_details, "min_base_amount", None))
+        self.min_quote_amount = self._parse_decimal(getattr(order_book_details, "min_quote_amount", None))
+        self.spot_min_base_amount = self.min_base_amount if self._is_spot_market() else None
+        self.spot_min_quote_amount = self.min_quote_amount if self._is_spot_market() else None
+        if self.min_base_amount is not None or self.min_quote_amount is not None:
             size_step = self._spot_size_step()
             self.logger.log(
                 (
-                    "Spot constraints -> min_base="
-                    f"{self.spot_min_base_amount or 'n/a'}, min_quote="
-                    f"{self.spot_min_quote_amount or 'n/a'}, step="
+                    "Market constraints -> min_base="
+                    f"{self.min_base_amount or 'n/a'}, min_quote="
+                    f"{self.min_quote_amount or 'n/a'}, step="
                     f"{size_step or 'n/a'}"
                 ),
                 "INFO",
             )
-        else:
-            self.spot_min_base_amount = None
-            self.spot_min_quote_amount = None
 
         self.default_initial_margin_fraction = getattr(order_book_details, "default_initial_margin_fraction", None)
         self.min_initial_margin_fraction = getattr(order_book_details, "min_initial_margin_fraction", None)

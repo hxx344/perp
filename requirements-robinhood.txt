@@ -1,0 +1,13 @@
+# Robinhood Lighter + Aster virtual-maker runtime (Python 3.11).
+# Keep optional exchange SDKs out of this deployment path.
+python-dotenv==1.1.1
+pytz==2025.2
+aiohttp==3.13.3
+web3==7.14.0
+requests==2.32.5
+tenacity==9.1.2
+websockets==15.0.1
+
+# Official Lighter SDK v1.1.2 commit with Robinhood endpoint support.
+# Use the commit archive so installation does not depend on a full Git clone.
+lighter-sdk @ https://codeload.github.com/elliottech/lighter-python/zip/6957dd8a1b36894ca9580be0d51de30aeea3bd4a

@@ -1,0 +1,4 @@
+[Service]
+# Exit 75 is emitted only for a classified temporary network failure.
+# Install this drop-in only after switching to reviewed continuous mode.
+RestartForceExitStatus=75

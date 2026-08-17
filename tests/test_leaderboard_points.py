@@ -39,7 +39,7 @@ def test_extract_leaderboard_points_handles_invalid_payload():
     assert result is None
 
 
-def _make_executor() -> HedgingCycleExecutor:
+def _make_executor(*, lighter_environment: str = "core") -> HedgingCycleExecutor:
     config = CycleConfig(
         aster_ticker="ETH",
         lighter_ticker="ETH-PERP",
@@ -57,6 +57,7 @@ def _make_executor() -> HedgingCycleExecutor:
         max_cycles=1,
         delay_between_cycles=0.0,
         virtual_aster_maker=False,
+        lighter_environment=lighter_environment,
     )
     config.log_to_console = False
     return HedgingCycleExecutor(config)
@@ -123,3 +124,19 @@ def test_log_leaderboard_points_refreshes_every_100_cycles(monkeypatch):
     # Cycle 101 uses refreshed values
     assert print_calls[2][0] == 101
     assert print_calls[2][1:] == (Decimal("2"), Decimal("20"))
+
+
+def test_robinhood_leaderboard_path_is_a_no_op(monkeypatch):
+    executor = _make_executor(lighter_environment="robinhood")
+    resolve_address = AsyncMock(side_effect=AssertionError("must not query Core identity"))
+    fetch_points = AsyncMock(side_effect=AssertionError("must not query Core leaderboard"))
+    executor._resolve_lighter_l1_address = resolve_address
+    monkeypatch.setattr(
+        "strategies.aster_lighter_cycle._fetch_lighter_leaderboard_points",
+        fetch_points,
+    )
+
+    asyncio.run(executor._log_leaderboard_points(1))
+
+    resolve_address.assert_not_awaited()
+    fetch_points.assert_not_awaited()

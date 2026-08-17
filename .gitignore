@@ -51,6 +51,8 @@ parts/
 sdist/
 var/
 wheels/
+.wheelhouse/
+wheelhouse/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -80,13 +82,11 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.pytest-*/
 cover/
 
 # Local one-off tests (not part of upstream suite)
 tests/test_backpack_adjustment_direction.py
-
-# Ignore all test files (current + future) in this repo
-tests/
 
 # Translations
 *.mo
@@ -160,6 +160,11 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.example
+!.env.*.example
+!.env.template
+!.env.*.template
 .venv
 env/
 *_env/

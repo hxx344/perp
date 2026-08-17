@@ -1,0 +1,47 @@
+[Unit]
+Description=Perp Robinhood Lighter Aster virtual-maker cycle
+Documentation=file://@@PROJECT_ROOT@@/docs/robinhood_linux_deployment.md
+Wants=network-online.target time-sync.target
+After=network-online.target time-sync.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=exec
+User=@@SERVICE_USER@@
+Group=@@SERVICE_GROUP@@
+WorkingDirectory=@@PROJECT_ROOT@@
+EnvironmentFile=@@SERVICE_ENV_FILE@@
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/flock --no-fork --exclusive --nonblock @@PROJECT_ROOT@@/logs/robinhood-strategy.lock /usr/bin/bash @@PROJECT_ROOT@@/deploy/robinhood/run.sh --confirm-live
+
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=120
+SendSIGKILL=yes
+# Canary mode never restarts automatically. Continuous-mode operators may
+# install the reviewed network-restart drop-in after completing canaries.
+Restart=no
+RestartPreventExitStatus=73 78
+RestartSec=15
+
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=@@PROJECT_ROOT@@/logs
+
+[Install]
+WantedBy=multi-user.target

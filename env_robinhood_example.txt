@@ -1,0 +1,28 @@
+# Robinhood Chain Lighter deployment. Keep this tuple unchanged.
+LIGHTER_ENVIRONMENT=robinhood
+LIGHTER_BASE_URL=https://api.rh.lighter.xyz
+LIGHTER_WS_URL=wss://api.rh.lighter.xyz/stream
+LIGHTER_CHAIN_ID=466324
+
+# Create these credentials on Robinhood Lighter before starting the strategy.
+# Use API key indexes 4..254 until the conflicting reserved-key docs are clarified.
+LIGHTER_ACCOUNT_INDEX=
+LIGHTER_API_PRIVATE_KEYS={"4":"0xREPLACE_WITH_PRIVATE_KEY"}
+
+# Optional diagnostics. Never log private keys.
+LIGHTER_DEBUG_ORDERS=false
+ACCOUNT_NAME=robinhood-btc-canary
+
+# Aster credentials are not needed when --virtual-aster-maker is enabled.
+ASTER_API_KEY=
+ASTER_SECRET_KEY=
+
+# The Core Lighter Arbitrum provisioning variables are intentionally omitted.
+# Robinhood mode never transfers funds from an L1 wallet automatically.
+
+LOG_TO_CONSOLE=true
+LOG_TO_FILE=true
+LOG_DIR=logs
+LOG_MAX_BYTES=10485760
+LOG_BACKUP_COUNT=5
+TIMEZONE=Asia/Shanghai

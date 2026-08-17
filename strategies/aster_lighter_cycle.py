@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import random
+import signal
 import subprocess
 import sys
 import time
@@ -28,18 +29,20 @@ import tracemalloc
 import math
 import socket
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple, cast
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import aiohttp
 from eth_account import Account
 from web3 import Web3
 from web3.exceptions import TimeExhausted
 from web3.types import TxParams, Wei
-
-from edgex_sdk import Client as EdgeXApiClient, GetOrderBookDepthParams
 
 from lighter.api.account_api import AccountApi
 from lighter.exceptions import ApiException
@@ -52,6 +55,10 @@ import dotenv
 from exchanges import ExchangeFactory
 from exchanges.aster import AsterMarketDataWebSocket
 from exchanges.base import OrderInfo
+from exchanges.lighter_endpoints import (
+    LighterEndpointProfile,
+    resolve_lighter_endpoint_profile,
+)
 from helpers.logger import TradingLogger
 from trading_bot import TradingConfig
 try:  # pragma: no cover - package/script compatibility
@@ -61,6 +68,108 @@ except ImportError:  # pragma: no cover - fallback when executed as a script
 
 DEFAULT_ASTER_MAKER_DEPTH_LEVEL = 10
 MIN_CYCLE_INTERVAL_SECONDS = 5.0
+
+# Process exit codes are intentionally stable because the Linux service unit
+# uses them to decide whether an automatic restart is safe.
+EXIT_OK = 0
+EXIT_RUNTIME_ERROR = 1
+EXIT_USAGE_ERROR = 2
+EXIT_INSTANCE_ALREADY_RUNNING = 73
+EXIT_TEMPORARY_NETWORK_FAILURE = 75
+EXIT_INVENTORY_RECOVERY_BLOCKED = 78
+
+
+class SingleInstanceError(RuntimeError):
+    """Raised when another strategy process owns the account lock."""
+
+
+class InventoryRecoveryBlockedError(RuntimeError):
+    """Raised when shutdown cannot restore the intended Lighter position."""
+
+
+class _SingleInstanceLock:
+    """Small cross-platform advisory lock held for the process lifetime."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._handle: Optional[Any] = None
+        self._backend: Optional[str] = None
+
+    def acquire(self) -> None:
+        if self._handle is not None:
+            return
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                backend = "msvcrt"
+            elif os.name == "posix":
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                backend = "fcntl"
+            else:  # pragma: no cover - fail closed on an unsupported platform
+                raise OSError(f"Unsupported platform for instance locking: {os.name}")
+        except (BlockingIOError, OSError) as exc:
+            handle.close()
+            raise SingleInstanceError(
+                f"Unable to acquire strategy instance lock {self.path.resolve()}: {exc}"
+            ) from exc
+
+        self._handle = handle
+        self._backend = backend
+        metadata = {
+            "pid": os.getpid(),
+            "started_at_unix": int(time.time()),
+        }
+        try:
+            handle.seek(0)
+            handle.truncate()
+            handle.write((json.dumps(metadata, sort_keys=True) + "\n").encode("ascii"))
+            handle.flush()
+            os.fsync(handle.fileno())
+            if backend == "msvcrt":
+                handle.seek(0)
+        except OSError:
+            # The lock itself is authoritative; metadata is diagnostic only.
+            pass
+
+    def release(self) -> None:
+        handle = self._handle
+        backend = self._backend
+        self._handle = None
+        self._backend = None
+        if handle is None:
+            return
+
+        try:
+            if backend == "msvcrt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif backend == "fcntl":
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+    def __enter__(self) -> "_SingleInstanceLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.release()
 
 if TYPE_CHECKING:  # pragma: no cover - type checking only
     from exchanges.aster import AsterClient
@@ -603,7 +712,8 @@ class _EdgeXPriceSource:
     def __init__(self, symbol: str, logger: TradingLogger) -> None:
         self.symbol = (symbol or "").strip()
         self.logger = logger
-        self._client: Optional[EdgeXApiClient] = None
+        self._client: Optional[Any] = None
+        self._depth_params_type: Optional[Any] = None
         self._contract_id: Optional[str] = None
         self._tick_size: Decimal = Decimal("0")
         self._mode: str = "auto"
@@ -631,7 +741,18 @@ class _EdgeXPriceSource:
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"Invalid EDGEX_ACCOUNT_ID '{account_id}'") from exc
 
-        self._client = EdgeXApiClient(
+        try:
+            from edgex_sdk import Client as EdgeXApiClientRuntime
+            from edgex_sdk import GetOrderBookDepthParams
+        except ImportError as exc:
+            raise RuntimeError(
+                "Private EdgeX pricing requires the optional 'edgex_sdk' package; "
+                "install the EdgeX SDK or remove EDGEX_ACCOUNT_ID and "
+                "EDGEX_STARK_PRIVATE_KEY to use public market data"
+            ) from exc
+
+        self._depth_params_type = GetOrderBookDepthParams
+        self._client = EdgeXApiClientRuntime(
             base_url=base_url,
             account_id=account_numeric,
             stark_private_key=private_key,
@@ -724,7 +845,7 @@ class _EdgeXPriceSource:
         self._tick_size = tick_size
         return contract_id, tick_size
 
-    def _ensure_ready(self) -> EdgeXApiClient:
+    def _ensure_ready(self) -> Any:
         client = self._client
         contract_id = self._contract_id
         if client is None or contract_id is None:
@@ -760,10 +881,13 @@ class _EdgeXPriceSource:
         assert contract_id is not None
 
         limit = self._normalize_depth_limit(limit)
+        depth_params_type = self._depth_params_type
+        if depth_params_type is None:
+            raise RuntimeError("Private EdgeX price source is missing its SDK request type")
         try:
-            params = GetOrderBookDepthParams(contract_id=int(contract_id), limit=limit)
+            params = depth_params_type(contract_id=int(contract_id), limit=limit)
         except (TypeError, ValueError):
-            params = GetOrderBookDepthParams(contract_id=contract_id, limit=limit)
+            params = depth_params_type(contract_id=contract_id, limit=limit)
 
         order_book = await client.quote.get_order_book_depth(params)
         data = order_book.get("data") if isinstance(order_book, dict) else None
@@ -826,6 +950,7 @@ class _EdgeXPriceSource:
                 pass
             finally:
                 self._client = None
+                self._depth_params_type = None
 
 class _AsterPublicDataClient:
     """Minimal Aster market data helper that avoids authenticated endpoints."""
@@ -1101,6 +1226,11 @@ class CycleConfig:
     lighter_leverage: int = 50
     lighter_market_type: str = "perp"
     lighter_spot_market_id: Optional[str] = None
+    lighter_environment: str = "core"
+    lighter_base_url: Optional[str] = None
+    lighter_ws_url: Optional[str] = None
+    lighter_chain_id: Optional[int] = None
+    lighter_supports_l1_auto_provision: bool = True
 
 
 @dataclass
@@ -1432,6 +1562,8 @@ async def _wait_for_hot_update_enabled(
 ARBITRUM_USDC_CONTRACT = Web3.to_checksum_address("0xaf88d065e77c8cc2239327c5edb3a432268e5831")
 _REQUIRED_LIGHTER_ENV = (
     "API_KEY_PRIVATE_KEY",
+    "LIGHTER_API_PRIVATE_KEYS",
+    "API_KEY_PRIVATE_KEYS",
     "LIGHTER_ACCOUNT_INDEX",
     "LIGHTER_API_KEY_INDEX",
 )
@@ -1439,12 +1571,21 @@ _ENV_KEYS_TO_CLEAR = (
     "L1_WALLET_PRIVATE_KEY",
     "LIGHTER_L1_PRIVATE_KEY",
     "API_KEY_PRIVATE_KEY",
+    "API_KEY_PRIVATE_KEYS",
     "LIGHTER_ACCOUNT_INDEX",
     "LIGHTER_API_KEY_INDEX",
     "L1_WALLET_ADDRESS",
 )
 DEFAULT_LIGHTER_LEVERAGE = 50
 L1_USDC_TOPUP_THRESHOLD = Decimal("1")
+
+
+def _lighter_credentials_present() -> bool:
+    if not os.getenv("LIGHTER_ACCOUNT_INDEX"):
+        return False
+    if os.getenv("LIGHTER_API_PRIVATE_KEYS") or os.getenv("API_KEY_PRIVATE_KEYS"):
+        return True
+    return bool(os.getenv("API_KEY_PRIVATE_KEY") and os.getenv("LIGHTER_API_KEY_INDEX"))
 
 _ERC20_TRANSFER_ABI = [
     {
@@ -1815,16 +1956,28 @@ async def _wait_for_lighter_account_ready(
             await session.close()
 
 
-async def _auto_provision_lighter_credentials(env_path: Path) -> None:
-    if all(os.getenv(key) for key in _REQUIRED_LIGHTER_ENV):
+async def _auto_provision_lighter_credentials(
+    env_path: Path,
+    endpoint_profile: Optional[LighterEndpointProfile] = None,
+) -> None:
+    if _lighter_credentials_present():
         return
+
+    profile = endpoint_profile or resolve_lighter_endpoint_profile(
+        os.getenv("LIGHTER_ENVIRONMENT") or os.getenv("LIGHTER_ENDPOINT_PROFILE"),
+        rest_url=os.getenv("LIGHTER_BASE_URL"),
+        ws_url=os.getenv("LIGHTER_WS_URL"),
+        chain_id=os.getenv("LIGHTER_CHAIN_ID"),
+    )
+    if not profile.supports_l1_auto_provision:
+        raise LighterProvisioningError(
+            "Robinhood Lighter requires pre-created API credentials; Core Lighter Arbitrum auto provisioning is disabled"
+        )
 
     logger = logging.getLogger("lighter.provisioning")
     logger.info("Missing Lighter credentials detected; starting auto provisioning")
 
-    base_url = (os.getenv("LIGHTER_BASE_URL") or LIGHTER_MAINNET_BASE_URL).strip()
-    if not base_url:
-        base_url = LIGHTER_MAINNET_BASE_URL
+    base_url = profile.rest_url
 
     if "mainnet" not in base_url.lower():
         raise LighterProvisioningError("Auto provisioning currently supports only Lighter mainnet")
@@ -1930,13 +2083,15 @@ async def _auto_provision_lighter_credentials(env_path: Path) -> None:
     private_key = _normalize_private_key_hex(private_key)
     public_key = _normalize_private_key_hex(public_key)
 
-    api_key_index = random.randint(2, 253)
+    # RH documentation conflicts on reserved indexes; 4..254 is the conservative range.
+    api_key_index = random.randint(4, 254)
     logger.info("Assigning API key index %s", api_key_index)
 
     signer_client = SignerClient(
         url=base_url,
         account_index=account_index,
         api_private_keys={api_key_index: private_key},
+        chain_id=profile.chain_id,
     )
     try:
         logger.info("Submitting change_api_key transaction to bind API key")
@@ -2023,6 +2178,10 @@ class HedgingCycleExecutor:
         self._lighter_market_type = market_type_normalized
         self._lighter_is_spot = market_type_normalized == "spot"
         self.config.lighter_market_type = market_type_normalized
+        self._lighter_environment = str(getattr(config, "lighter_environment", "core") or "core")
+        self._lighter_supports_l1_auto_provision = bool(
+            getattr(config, "lighter_supports_l1_auto_provision", True)
+        )
         self.logger.log(
             f"Lighter market type resolved to {market_type_normalized.upper()}",
             "INFO",
@@ -2154,6 +2313,10 @@ class HedgingCycleExecutor:
             boost_mode=False,
         )
         setattr(self.lighter_config, "market_type", self._lighter_market_type)
+        setattr(self.lighter_config, "lighter_environment", self._lighter_environment)
+        setattr(self.lighter_config, "lighter_base_url", getattr(config, "lighter_base_url", None))
+        setattr(self.lighter_config, "lighter_ws_url", getattr(config, "lighter_ws_url", None))
+        setattr(self.lighter_config, "lighter_chain_id", getattr(config, "lighter_chain_id", None))
         spot_market_override = None
         if self._lighter_market_type == "spot":
             spot_market_override = getattr(config, "lighter_spot_market_id", None) or os.getenv("LIGHTER_SPOT_MARKET_ID")
@@ -2167,6 +2330,8 @@ class HedgingCycleExecutor:
         self._housekeeping_task: Optional[asyncio.Task] = None
         # Flag to indicate whether current cycle experienced a Lighter timeout
         self._cycle_had_timeout: bool = False
+        self._lighter_recovery_blocked: bool = False
+        self._lighter_recovery_block_reason: Optional[str] = None
         # Tracemalloc state
         self._tracemalloc_started: bool = False
         self._last_tracemalloc_snapshot = None
@@ -2598,6 +2763,14 @@ class HedgingCycleExecutor:
         if not self.lighter_client:
             raise RuntimeError("Lighter client is not initialized")
 
+        get_leverage_limits = getattr(self.lighter_client, "get_leverage_limits", None)
+        leverage_limits = get_leverage_limits() if callable(get_leverage_limits) else {}
+        max_leverage = leverage_limits.get("max") if isinstance(leverage_limits, dict) else None
+        if max_leverage is not None and leverage > max_leverage:
+            raise ValueError(
+                f"Requested Lighter leverage {leverage}x exceeds market maximum {max_leverage}x"
+            )
+
         signer_client = getattr(self.lighter_client, "lighter_client", None)
         if signer_client is None:
             raise RuntimeError("Lighter signer client is not initialized")
@@ -2779,6 +2952,8 @@ class HedgingCycleExecutor:
     async def ensure_l1_top_up_if_needed(self) -> None:
         if not self.lighter_client:
             return
+        if not self._lighter_supports_l1_auto_provision:
+            return
 
         rpc_url = (
             os.getenv("ARBITRUM_RPC_URL")
@@ -2923,6 +3098,8 @@ class HedgingCycleExecutor:
             )
 
     async def _log_leaderboard_points(self, cycle_number: int) -> None:
+        if self._lighter_environment == "robinhood":
+            return
         address = await self._resolve_lighter_l1_address()
         if not address:
             if not self._leaderboard_address_warning_emitted:
@@ -3002,6 +3179,13 @@ class HedgingCycleExecutor:
         lighter_client = ExchangeFactory.create_exchange("lighter", self.lighter_config)  # type: ignore[arg-type]
         self.lighter_client = cast("LighterClient", lighter_client)
         await self.lighter_client.connect()
+        self.logger.log(
+            (
+                f"Lighter environment={self.lighter_client.endpoint_profile.name}, "
+                f"REST={self.lighter_client.base_url}, chain_id={self.lighter_client.chain_id}"
+            ),
+            "INFO",
+        )
 
         if self.config.virtual_aster_maker:
             self.aster_client = None
@@ -3081,6 +3265,17 @@ class HedgingCycleExecutor:
             quantized_max = self._quantize_quantity(self._lighter_quantity_max, lighter_step)
             if quantized_max is not None:
                 self._lighter_quantity_max = quantized_max
+
+        runtime_min_base = getattr(self.lighter_client, "min_base_amount", None)
+        if isinstance(runtime_min_base, Decimal) and runtime_min_base > 0:
+            quantities_to_check = [("configured", self.config.lighter_quantity)]
+            if self._lighter_quantity_min is not None:
+                quantities_to_check.append(("range minimum", self._lighter_quantity_min))
+            for label, configured_quantity in quantities_to_check:
+                if configured_quantity < runtime_min_base:
+                    raise ValueError(
+                        f"Lighter {label} quantity {configured_quantity} is below runtime min_base_amount {runtime_min_base}"
+                    )
 
         self.aster_config.contract_id = aster_contract_id
         self.aster_config.tick_size = aster_tick
@@ -3844,6 +4039,7 @@ class HedgingCycleExecutor:
                 order_quantity,
                 target_price,
                 direction,
+                time_in_force="ioc",
             )
 
             if not order_result.success:
@@ -4016,7 +4212,7 @@ class HedgingCycleExecutor:
             client_identifier = getattr(self.lighter_client, "current_order_client_id", None)
 
             if current_order and client_identifier == target_client_id:
-                status = current_order.status
+                status = str(getattr(current_order, "status", "") or "").upper()
                 remaining = getattr(current_order, "remaining_size", None)
                 if status != last_status_logged or remaining != last_remaining_logged:
                     self.logger.log(
@@ -4031,8 +4227,15 @@ class HedgingCycleExecutor:
                     last_remaining_logged = remaining
                 if status == "FILLED":
                     return current_order
-                if status in {"CANCELED", "REJECTED", "EXPIRED"}:
-                    raise RuntimeError(f"{leg_name} | Lighter order ended with status {status}")
+                terminal_prefixes = ("CANCELED", "CANCELLED", "REJECTED", "EXPIRED")
+                if any(status.startswith(prefix) for prefix in terminal_prefixes):
+                    filled_raw = getattr(current_order, "filled_size", Decimal("0")) or Decimal("0")
+                    try:
+                        filled_size = Decimal(str(filled_raw))
+                    except (InvalidOperation, TypeError, ValueError):
+                        filled_size = Decimal("0")
+                    message = f"{leg_name} | Lighter IOC order ended with status {status}, filled={filled_size}"
+                    raise SkipCycleError(message)
                 tracker_idle_logged = False
                 tracker_mismatch_logged = False
                 tracker_missing_logged = False
@@ -4486,6 +4689,17 @@ class HedgingCycleExecutor:
         except (InvalidOperation, ValueError):
             return quantized
 
+    @staticmethod
+    def _ceil_quantity_to_step(quantity: Decimal, step: Optional[Decimal]) -> Decimal:
+        """Round a minimum executable quantity up to the venue size step."""
+        if step is None or step <= 0:
+            return quantity
+        try:
+            units = (quantity / step).to_integral_value(rounding=ROUND_UP)
+            return (units * step).quantize(step)
+        except (InvalidOperation, ValueError, TypeError, ZeroDivisionError):
+            return quantity
+
     def _calculate_emergency_limit_price(self, base_price: Decimal, side: str) -> Decimal:
         if base_price <= 0:
             raise ValueError("Base price for emergency order must be positive")
@@ -4510,9 +4724,129 @@ class HedgingCycleExecutor:
         return price
 
     async def ensure_lighter_flat(self) -> None:
+        """Restore the Lighter position, retrying IOC residuals a few times.
+
+        An IOC order may fill partially and then report ``CANCELED_PARTIAL``.
+        The first attempt therefore cannot be treated as the end of recovery:
+        re-read the position and submit another bounded IOC while the residual
+        remains executable.  If the residual is below the venue minimum, stop
+        with an explicit alert instead of repeatedly sending invalid orders.
+        """
+
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                completed = await self._ensure_lighter_flat_once()
+            except Exception as exc:
+                completed = False
+                self.logger.log(
+                    f"Lighter recovery attempt {attempt} failed before confirmation: {exc}",
+                    "ERROR",
+                )
+            if completed:
+                return
+            if self._lighter_recovery_blocked:
+                return
+
+            if not self.lighter_client:
+                return
+
+            try:
+                current_raw = await self.lighter_client.get_account_positions()
+                current_position = (
+                    current_raw
+                    if isinstance(current_raw, Decimal)
+                    else Decimal(str(current_raw))
+                )
+            except Exception as exc:
+                self.logger.log(
+                    f"Unable to verify Lighter residual after recovery attempt {attempt}: {exc}",
+                    "ERROR",
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(max(0.1, min(float(self.config.retry_delay_seconds), 1.0)))
+                continue
+
+            target_position = Decimal("0")
+            if self._preserve_initial_lighter_position and self._baseline_lighter_position is not None:
+                target_position = self._baseline_lighter_position
+            residual = current_position - target_position
+            quantity_tolerance = (
+                self._lighter_quantity_step
+                if isinstance(self._lighter_quantity_step, Decimal) and self._lighter_quantity_step > 0
+                else Decimal("0.00000001")
+            )
+            if abs(residual) <= quantity_tolerance:
+                self.logger.log(
+                    f"Lighter recovery reached target after attempt {attempt}: position={_format_decimal(current_position)}",
+                    "INFO",
+                )
+                return
+
+            reference_price = self._last_leg1_price
+            if reference_price is None or reference_price <= 0:
+                try:
+                    best_bid, best_ask = await self.lighter_client.fetch_bbo_prices(
+                        self.lighter_config.contract_id
+                    )
+                    reference_price = best_bid if residual > 0 else best_ask
+                except Exception:
+                    reference_price = None
+
+            min_base = getattr(self.lighter_client, "min_base_amount", None)
+            min_quote = getattr(self.lighter_client, "min_quote_amount", None)
+            required_quantity = Decimal("0")
+            try:
+                if isinstance(min_base, Decimal) and min_base > 0:
+                    required_quantity = min_base
+                if (
+                    isinstance(min_quote, Decimal)
+                    and min_quote > 0
+                    and isinstance(reference_price, Decimal)
+                    and reference_price > 0
+                ):
+                    required_quantity = max(required_quantity, min_quote / reference_price)
+            except (InvalidOperation, ValueError, TypeError):
+                required_quantity = Decimal("0")
+
+            required_quantity = self._ceil_quantity_to_step(
+                required_quantity,
+                self._lighter_quantity_step
+                if isinstance(self._lighter_quantity_step, Decimal)
+                else None,
+            )
+
+            if required_quantity > 0 and abs(residual) < required_quantity:
+                self._lighter_recovery_blocked = True
+                self._lighter_recovery_block_reason = (
+                    "Residual position is below the Robinhood Lighter minimum executable quantity"
+                )
+                self.logger.log(
+                    (
+                        "Lighter residual is below the executable market minimum; "
+                        f"leaving position={_format_decimal(current_position)} target={_format_decimal(target_position)} "
+                        f"residual={_format_decimal(abs(residual))} minimum={_format_decimal(required_quantity)}"
+                    ),
+                    "ERROR",
+                )
+                return
+
+            if attempt < max_attempts:
+                await asyncio.sleep(max(0.1, min(float(self.config.retry_delay_seconds), 1.0)))
+
+        self._lighter_recovery_blocked = True
+        self._lighter_recovery_block_reason = (
+            "Bounded IOC recovery attempts were exhausted before reaching the target position"
+        )
+        self.logger.log(
+            "Lighter emergency recovery exhausted bounded IOC retries; residual position remains subject to reconciliation",
+            "ERROR",
+        )
+
+    async def _ensure_lighter_flat_once(self) -> bool:
         if not self.lighter_client:
             self.logger.log("Lighter client unavailable; skipping emergency flatten", "WARNING")
-            return
+            return True
 
         try:
             current_position_raw = await self.lighter_client.get_account_positions()
@@ -4521,7 +4855,7 @@ class HedgingCycleExecutor:
                 f"Failed to query Lighter position during preservation check: {exc}",
                 "ERROR",
             )
-            return
+            return False
 
         try:
             position = (
@@ -4534,7 +4868,7 @@ class HedgingCycleExecutor:
                 f"Unable to interpret Lighter position value '{current_position_raw}'; assuming 0",
                 "WARNING",
             )
-            position = Decimal("0")
+            return False
 
         target_position = Decimal("0")
         if self._preserve_initial_lighter_position:
@@ -4560,7 +4894,7 @@ class HedgingCycleExecutor:
                 self.logger.log("Lighter position delta within tolerance; no emergency action required", "INFO")
             if bool(getattr(self.config, "log_to_console", False)):
                 print()
-            return
+            return True
 
         # Positive deltas denote excess long exposure relative to the target; negative deltas denote excess short exposure.
         side = "sell" if delta > 0 else "buy"
@@ -4580,7 +4914,7 @@ class HedgingCycleExecutor:
                 ),
                 "INFO",
             )
-            return
+            return True
 
         if self._preserve_initial_lighter_position:
             self.logger.log(
@@ -4602,7 +4936,7 @@ class HedgingCycleExecutor:
                     f"Unable to obtain reference price for emergency flatten: {exc}",
                     "ERROR",
                 )
-                return
+                return False
 
         try:
             limit_price = self._calculate_emergency_limit_price(reference_price, side)
@@ -4611,7 +4945,35 @@ class HedgingCycleExecutor:
                 f"Failed to calculate emergency price using reference {reference_price}: {exc}",
                 "ERROR",
             )
-            return
+            return False
+
+        # Avoid consuming a nonce on an order the venue will reject because a
+        # residual position is smaller than the market's base/quote minimum.
+        min_base = getattr(self.lighter_client, "min_base_amount", None)
+        min_quote = getattr(self.lighter_client, "min_quote_amount", None)
+        minimum_quantity = Decimal("0")
+        if isinstance(min_base, Decimal) and min_base > 0:
+            minimum_quantity = min_base
+        if isinstance(min_quote, Decimal) and min_quote > 0 and limit_price > 0:
+            minimum_quantity = max(minimum_quantity, min_quote / limit_price)
+        minimum_quantity = self._ceil_quantity_to_step(
+            minimum_quantity,
+            quantity_step,
+        )
+        if minimum_quantity > 0 and quantity < minimum_quantity:
+            self._lighter_recovery_blocked = True
+            self._lighter_recovery_block_reason = (
+                "Residual position is below the Robinhood Lighter minimum executable quantity"
+            )
+            self.logger.log(
+                (
+                    "Lighter residual is below the executable market minimum; "
+                    f"leaving position={_format_decimal(position)} target={_format_decimal(target_position)} "
+                    f"residual={_format_decimal(quantity)} minimum={_format_decimal(minimum_quantity)}"
+                ),
+                "ERROR",
+            )
+            return False
 
         contract_id_value = self.lighter_config.contract_id
         if isinstance(contract_id_value, (int, Decimal)):
@@ -4644,7 +5006,7 @@ class HedgingCycleExecutor:
                     f"Unable to recover Lighter contract metadata before emergency flatten: {exc}",
                     "ERROR",
                 )
-                return
+                return False
 
             contract_id_value = str(contract_id_raw)
             self.lighter_config.contract_id = contract_id_value
@@ -4657,7 +5019,7 @@ class HedgingCycleExecutor:
 
         if contract_id_value in (None, ""):
             self.logger.log("Lighter contract ID missing; cannot place emergency order", "ERROR")
-            return
+            return False
 
         self.logger.log(
             f"Emergency flatten on Lighter: position={position}, side={side}, quantity={quantity}, limit={limit_price}",
@@ -4669,6 +5031,12 @@ class HedgingCycleExecutor:
             quantity,
             limit_price,
             side,
+            time_in_force="ioc",
+            reduce_only=(
+                position != 0
+                and position * target_position >= 0
+                and abs(target_position) < abs(position)
+            ),
         )
 
         if not order_result.success or not order_result.order_id:
@@ -4676,7 +5044,7 @@ class HedgingCycleExecutor:
                 f"Emergency flatten order failed: {order_result.error_message}",
                 "ERROR",
             )
-            return
+            return False
 
         try:
             fill_info = await self._wait_for_lighter_fill(
@@ -4691,11 +5059,13 @@ class HedgingCycleExecutor:
                 f"Emergency flatten filled {fill_info.filled_size} @ {fill_info.price}",
                 "INFO",
             )
+            return True
         except Exception as exc:
             self.logger.log(
                 f"Emergency flatten order {order_result.order_id} did not complete: {exc}",
                 "ERROR",
             )
+            return False
 
 
 def _parse_args() -> argparse.Namespace:
@@ -4885,10 +5255,23 @@ def _parse_args() -> argparse.Namespace:
         help="Path to the environment file containing both exchange credentials",
     )
     parser.add_argument(
+        "--lock-file",
+        help=(
+            "Process lock path (default: logs/aster_lighter_cycle_<environment>_account_<index>.lock). "
+            "A held or unavailable lock stops startup before any orders are sent."
+        ),
+    )
+    parser.add_argument(
+        "--lighter-environment",
+        choices=["core", "robinhood"],
+        default=None,
+        help="Lighter deployment profile (default: LIGHTER_ENVIRONMENT or core)",
+    )
+    parser.add_argument(
         "--lighter-leverage",
         type=int,
-        default=DEFAULT_LIGHTER_LEVERAGE,
-        help="Target leverage to enforce on Lighter before each run (1-125)",
+        default=None,
+        help="Target Lighter leverage (default: 50x on Core, 2x on Robinhood)",
     )
     parser.add_argument(
         "--lighter-market-type",
@@ -4903,7 +5286,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--l1-private-key",
         help=(
-            "Optional L1 wallet private key. When provided, existing private key and Lighter API credentials "
+            "Core Lighter only: optional L1 wallet private key. When provided, existing private key and Lighter API credentials "
             "are cleared, the new key is saved, and initialization continues"
         ),
     )
@@ -5172,23 +5555,124 @@ def _print_leaderboard_points(
         logger.log(f"Total Points: {total_text}", "INFO")
 
 
-async def _async_main(args: argparse.Namespace) -> None:
+def _lock_component(value: Any, *, fallback: str) -> str:
+    normalized = str(value or "").strip().casefold()
+    if not normalized:
+        normalized = fallback
+    return "".join(
+        character if character.isalnum() or character in {"-", "_", "."} else "_"
+        for character in normalized
+    )
+
+
+def _resolve_instance_lock_path(
+    args: argparse.Namespace,
+    *,
+    requested_environment: Any,
+    env_preview: Dict[str, Any],
+) -> Path:
+    configured_path = getattr(args, "lock_file", None)
+    if configured_path:
+        lock_path = Path(str(configured_path)).expanduser()
+        if not lock_path.is_absolute():
+            lock_path = PROJECT_ROOT / lock_path
+        return lock_path
+
+    environment = _lock_component(requested_environment, fallback="core")
+    account_index = (
+        env_preview.get("LIGHTER_ACCOUNT_INDEX")
+        or os.getenv("LIGHTER_ACCOUNT_INDEX")
+        or "unknown"
+    )
+    account = _lock_component(account_index, fallback="unknown")
+    return PROJECT_ROOT / "logs" / f"aster_lighter_cycle_{environment}_account_{account}.lock"
+
+
+class _GracefulSignalRelay:
+    """Translate process signals into one cooperative task cancellation."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, strategy_task: "asyncio.Task[int]"):
+        self.loop = loop
+        self.strategy_task = strategy_task
+        self.received_signal: Optional[int] = None
+        self._registrations: List[Tuple[int, str, Any]] = []
+
+    def install(self) -> None:
+        for signal_name in ("SIGINT", "SIGTERM"):
+            signum = getattr(signal, signal_name, None)
+            if signum is None:
+                continue
+
+            previous_handler = signal.getsignal(signum)
+            try:
+                self.loop.add_signal_handler(signum, self._request_shutdown, int(signum))
+            except (NotImplementedError, RuntimeError, ValueError):
+                try:
+                    signal.signal(signum, self._fallback_handler)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                self._registrations.append((int(signum), "signal", previous_handler))
+            else:
+                self._registrations.append((int(signum), "loop", previous_handler))
+
+    def restore(self) -> None:
+        for signum, backend, previous_handler in reversed(self._registrations):
+            try:
+                if backend == "loop":
+                    self.loop.remove_signal_handler(signum)
+                signal.signal(signum, previous_handler)
+            except (OSError, RuntimeError, ValueError):
+                pass
+        self._registrations.clear()
+
+    def _fallback_handler(self, signum: int, _frame: Any) -> None:
+        self.loop.call_soon_threadsafe(self._request_shutdown, signum)
+
+    def _request_shutdown(self, signum: int) -> None:
+        if self.received_signal is not None:
+            logging.warning(
+                "Shutdown already in progress after signal %s; ignoring signal %s during recovery",
+                self.received_signal,
+                signum,
+            )
+            return
+
+        self.received_signal = signum
+        signal_name = signal.Signals(signum).name if signum else str(signum)
+        logging.warning("Received %s; starting graceful inventory recovery", signal_name)
+        if not self.strategy_task.done():
+            self.strategy_task.cancel()
+
+
+async def _async_main(args: argparse.Namespace) -> int:
     env_path = Path(args.env_file)
     if not env_path.exists():
         raise FileNotFoundError(f"Env file not found: {env_path.resolve()}")
 
     dotenv.load_dotenv(env_path)
-    await _auto_provision_lighter_credentials(env_path)
+    endpoint_profile = resolve_lighter_endpoint_profile(
+        getattr(args, "lighter_environment", None)
+        or os.getenv("LIGHTER_ENVIRONMENT")
+        or os.getenv("LIGHTER_ENDPOINT_PROFILE"),
+        rest_url=os.getenv("LIGHTER_BASE_URL"),
+        ws_url=os.getenv("LIGHTER_WS_URL"),
+        chain_id=os.getenv("LIGHTER_CHAIN_ID"),
+    )
+    await _auto_provision_lighter_credentials(env_path, endpoint_profile)
     dotenv.load_dotenv(env_path, override=True)
 
     lighter_market_type = getattr(args, "lighter_market_type", "perp") or "perp"
     lighter_market_type = str(lighter_market_type).strip().lower()
     if lighter_market_type not in {"perp", "spot"}:
         lighter_market_type = "perp"
+    if endpoint_profile.name == "robinhood" and lighter_market_type != "perp":
+        raise ValueError("Robinhood Lighter migration currently supports perpetual markets only")
 
     lighter_quantity_min = args.lighter_quantity_min
     lighter_quantity_max = args.lighter_quantity_max
-    lighter_leverage = getattr(args, "lighter_leverage", DEFAULT_LIGHTER_LEVERAGE)
+    lighter_leverage = getattr(args, "lighter_leverage", None)
+    if lighter_leverage is None:
+        lighter_leverage = 2 if endpoint_profile.name == "robinhood" else DEFAULT_LIGHTER_LEVERAGE
     try:
         lighter_leverage = int(lighter_leverage)
     except (TypeError, ValueError) as exc:
@@ -5208,19 +5692,6 @@ async def _async_main(args: argparse.Namespace) -> None:
         if lighter_quantity_min > lighter_quantity_max:
             raise ValueError("--lighter-quantity-min cannot exceed --lighter-quantity-max")
 
-        step = Decimal("0.001")
-        try:
-            normalized_min = lighter_quantity_min.quantize(step)
-            normalized_max = lighter_quantity_max.quantize(step)
-        except InvalidOperation as exc:
-            raise ValueError("Lighter quantity range must align to 0.001 precision") from exc
-
-        if normalized_min != lighter_quantity_min or normalized_max != lighter_quantity_max:
-            raise ValueError("Lighter quantity range must align to 0.001 precision")
-
-        lighter_quantity_min = normalized_min
-        lighter_quantity_max = normalized_max
-
     if args.lighter_quantity is not None:
         lighter_quantity_base = args.lighter_quantity
     elif lighter_quantity_max is not None:
@@ -5230,7 +5701,16 @@ async def _async_main(args: argparse.Namespace) -> None:
 
     log_to_console_option = getattr(args, "log_to_console", None)
     if log_to_console_option is None:
-        log_to_console_option = True
+        configured_console = os.getenv("LOG_TO_CONSOLE")
+        if configured_console is None:
+            log_to_console_option = True
+        else:
+            log_to_console_option = configured_console.strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
 
     depth_override = getattr(args, "aster_maker_depth", DEFAULT_ASTER_MAKER_DEPTH_LEVEL)
     try:
@@ -5276,8 +5756,8 @@ async def _async_main(args: argparse.Namespace) -> None:
         preserve_initial_position=bool(getattr(args, "preserve_initial_position", False)),
         coordinator_url=getattr(args, "coordinator_url", None),
         coordinator_agent_id=getattr(args, "coordinator_agent", None),
-    coordinator_username=getattr(args, "coordinator_username", None),
-    coordinator_password=getattr(args, "coordinator_password", None),
+        coordinator_username=getattr(args, "coordinator_username", None),
+        coordinator_password=getattr(args, "coordinator_password", None),
         virtual_aster_price_source=args.virtual_maker_price_source,
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
         aster_maker_depth_level=aster_maker_depth,
@@ -5296,30 +5776,59 @@ async def _async_main(args: argparse.Namespace) -> None:
         lighter_leverage=lighter_leverage,
         lighter_market_type=lighter_market_type,
         lighter_spot_market_id=getattr(args, "lighter_spot_market_id", None),
+        lighter_environment=endpoint_profile.name,
+        lighter_base_url=endpoint_profile.rest_url,
+        lighter_ws_url=endpoint_profile.ws_url,
+        lighter_chain_id=endpoint_profile.chain_id,
+        lighter_supports_l1_auto_provision=endpoint_profile.supports_l1_auto_provision,
     )
 
     executor = HedgingCycleExecutor(config)
-    await executor.setup()
+    try:
+        await executor.setup()
+    except BaseException:
+        # setup() does not submit strategy orders, but it can open HTTP/WS
+        # resources before failing or being cancelled.
+        try:
+            await executor.shutdown()
+        except Exception:
+            pass
+        raise
     cycle_index = 0
     cumulative_pnl = Decimal("0")
     cumulative_volume = Decimal("0")
     run_start_time = time.time()
     network_error_count = 0
+    exit_code = EXIT_OK
     network_error_exceptions: Tuple[type[BaseException], ...] = (
         asyncio.TimeoutError,
+        aiohttp.ClientError,
         ConnectionError,
         OSError,
     )
     try:
-        await executor.report_metrics(
-            total_cycles=cycle_index,
-            cumulative_pnl=cumulative_pnl,
-            cumulative_volume=cumulative_volume,
-        )
-    except Exception:
-        pass
-    try:
+        try:
+            await executor.report_metrics(
+                total_cycles=cycle_index,
+                cumulative_pnl=cumulative_pnl,
+                cumulative_volume=cumulative_volume,
+            )
+        except Exception:
+            pass
+
         while True:
+            if getattr(executor, "_lighter_recovery_blocked", False):
+                reason = getattr(executor, "_lighter_recovery_block_reason", None)
+                blocked_suffix = f": {reason}" if reason else ""
+                executor.logger.log(
+                    (
+                        "Stopping before starting another hedging cycle because Lighter "
+                        f"inventory recovery is blocked{blocked_suffix}"
+                    ),
+                    "ERROR",
+                )
+                break
+
             payload: Optional[Dict[str, Any]] = None
             if config.hot_update_url:
                 payload = await _wait_for_hot_update_enabled(config.hot_update_url, executor.logger)
@@ -5378,6 +5887,17 @@ async def _async_main(args: argparse.Namespace) -> None:
                     cumulative_volume=cumulative_volume,
                 )
 
+                if config.max_cycles and cycle_index >= config.max_cycles:
+                    executor.logger.log(
+                        (
+                            f"Reached configured cycle attempt limit ({config.max_cycles}) "
+                            "after an incomplete cycle; stopping execution"
+                        ),
+                        "ERROR",
+                    )
+                    exit_code = EXIT_RUNTIME_ERROR
+                    break
+
                 sleep_seconds = _compute_cycle_pause_seconds(
                     cycle_start_time,
                     config.delay_between_cycles,
@@ -5410,11 +5930,23 @@ async def _async_main(args: argparse.Namespace) -> None:
                     cumulative_volume=cumulative_volume,
                 )
 
+                if config.max_cycles and cycle_index >= config.max_cycles:
+                    executor.logger.log(
+                        (
+                            f"Reached configured cycle attempt limit ({config.max_cycles}) "
+                            "after a network failure; stopping execution"
+                        ),
+                        "ERROR",
+                    )
+                    exit_code = EXIT_TEMPORARY_NETWORK_FAILURE
+                    break
+
                 if network_error_count >= 3:
                     executor.logger.log(
                         "Encountered 3 consecutive network errors; stopping execution.",
                         "ERROR",
                     )
+                    exit_code = EXIT_TEMPORARY_NETWORK_FAILURE
                     break
 
                 pause_seconds = max(
@@ -5517,9 +6049,13 @@ async def _async_main(args: argparse.Namespace) -> None:
                 executor.logger.log(message, "INFO")
                 await asyncio.sleep(sleep_seconds)
     finally:
+        recovery_failure_reason: Optional[str] = None
         try:
             await executor.ensure_lighter_flat()
         except Exception as exc:
+            recovery_failure_reason = (
+                f"Shutdown inventory recovery raised {type(exc).__name__}"
+            )
             executor.logger.log(
                 f"Emergency flatten failed during shutdown: {exc}",
                 "ERROR",
@@ -5532,18 +6068,80 @@ async def _async_main(args: argparse.Namespace) -> None:
             )
         except Exception:
             pass
-        await executor.shutdown()
+        try:
+            await executor.shutdown()
+        finally:
+            if recovery_failure_reason or getattr(executor, "_lighter_recovery_blocked", False):
+                reason = (
+                    getattr(executor, "_lighter_recovery_block_reason", None)
+                    or recovery_failure_reason
+                )
+                raise InventoryRecoveryBlockedError(
+                    reason or "Lighter inventory recovery requires operator intervention"
+                )
+
+    return exit_code
+
+
+async def _run_with_graceful_signals(args: argparse.Namespace) -> int:
+    loop = asyncio.get_running_loop()
+    strategy_task = asyncio.create_task(
+        _async_main(args),
+        name="aster-lighter-cycle",
+    )
+    signal_relay = _GracefulSignalRelay(loop, strategy_task)
+    signal_relay.install()
+    try:
+        try:
+            return await strategy_task
+        except asyncio.CancelledError:
+            if signal_relay.received_signal is None:
+                raise
+            logging.info(
+                "Graceful shutdown completed after signal %s",
+                signal_relay.received_signal,
+            )
+            return EXIT_OK
+    finally:
+        signal_relay.restore()
 
 
 def main() -> None:
     args = _parse_args()
     _configure_logging(args.log_level)
 
+    env_preview: Dict[str, Any] = {}
+    env_preview_path = Path(args.env_file)
+    if env_preview_path.exists():
+        try:
+            env_preview = dict(dotenv.dotenv_values(env_preview_path))
+        except Exception:
+            env_preview = {}
+    requested_environment = (
+        getattr(args, "lighter_environment", None)
+        or os.getenv("LIGHTER_ENVIRONMENT")
+        or os.getenv("LIGHTER_ENDPOINT_PROFILE")
+        or env_preview.get("LIGHTER_ENVIRONMENT")
+        or env_preview.get("LIGHTER_ENDPOINT_PROFILE")
+        or "core"
+    )
+    is_robinhood_environment = str(requested_environment).strip().casefold() in {
+        "rh",
+        "robinhood",
+        "robinhood-mainnet",
+    }
+    requested_base_url = os.getenv("LIGHTER_BASE_URL") or env_preview.get("LIGHTER_BASE_URL") or ""
+    if (urlparse(str(requested_base_url)).hostname or "").casefold() == "api.rh.lighter.xyz":
+        is_robinhood_environment = True
+
     if getattr(args, "reset_credentials", False) and getattr(args, "l1_private_key", None):
         logging.error("--reset-credentials cannot be combined with --l1-private-key")
         sys.exit(2)
 
     new_private_key_arg = getattr(args, "l1_private_key", None)
+    if new_private_key_arg and is_robinhood_environment:
+        logging.error("--l1-private-key is not supported for Robinhood Lighter and no credentials were changed")
+        sys.exit(2)
     if new_private_key_arg:
         env_path = Path(args.env_file)
         env_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5583,14 +6181,43 @@ def main() -> None:
             reset_logger.info("No matching credentials found in %s", env_path)
         sys.exit(0)
 
+    lock_path = _resolve_instance_lock_path(
+        args,
+        requested_environment=(
+            "robinhood" if is_robinhood_environment else requested_environment
+        ),
+        env_preview=env_preview,
+    )
+    instance_lock = _SingleInstanceLock(lock_path)
     try:
-        asyncio.run(_async_main(args))
-    except KeyboardInterrupt:
-        logging.warning("Hedging cycle interrupted by user")
-        sys.exit(130)
-    except Exception as exc:
-        logging.exception("Hedging cycle failed: %s", exc)
-        sys.exit(1)
+        instance_lock.acquire()
+    except SingleInstanceError as exc:
+        logging.error("%s; refusing to start a duplicate account process", exc)
+        sys.exit(EXIT_INSTANCE_ALREADY_RUNNING)
+
+    exit_code = EXIT_OK
+    try:
+        try:
+            exit_code = asyncio.run(_run_with_graceful_signals(args))
+        except InventoryRecoveryBlockedError as exc:
+            logging.critical("Lighter inventory recovery is blocked: %s", exc)
+            exit_code = EXIT_INVENTORY_RECOVERY_BLOCKED
+        except (asyncio.TimeoutError, aiohttp.ClientError, ConnectionError, OSError) as exc:
+            logging.error("Strategy stopped after a temporary network failure: %s", exc)
+            exit_code = EXIT_TEMPORARY_NETWORK_FAILURE
+        except KeyboardInterrupt:
+            # Retained for the narrow interval before asyncio installs the
+            # cooperative signal relay.
+            logging.warning("Hedging cycle interrupted before graceful handlers were ready")
+            exit_code = 130
+        except Exception as exc:
+            logging.exception("Hedging cycle failed: %s", exc)
+            exit_code = EXIT_RUNTIME_ERROR
+    finally:
+        instance_lock.release()
+
+    if exit_code != EXIT_OK:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+@@PROJECT_ROOT@@/logs/*.log @@PROJECT_ROOT@@/logs/*.csv {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0600 @@SERVICE_USER@@ @@SERVICE_GROUP@@
+    su @@SERVICE_USER@@ @@SERVICE_GROUP@@
+}

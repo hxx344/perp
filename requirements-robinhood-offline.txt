@@ -1,0 +1,10 @@
+# Offline counterpart to requirements-robinhood.txt.
+# Use only with a wheelhouse built by deploy/robinhood/build-wheelhouse.sh.
+python-dotenv==1.1.1
+pytz==2025.2
+aiohttp==3.13.3
+web3==7.14.0
+requests==2.32.5
+tenacity==9.1.2
+websockets==15.0.1
+lighter-sdk==1.1.2

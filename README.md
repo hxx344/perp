@@ -310,7 +310,7 @@ python runbot.py --exchange grvt --ticker BTC --quantity 0.05 --take-profit 0.02
 
 ## Aster-Lighter 对冲循环（新功能）
 
-若需执行文档中所述的单轮对冲流程（Aster Maker → Lighter 反向 Taker → Aster 反向 Maker → Lighter 反向 Taker），可以使用 `strategies/aster_lighter_cycle.py` 脚本：
+若需执行文档中所述的单轮对冲流程（Aster Maker → Lighter 反向 Taker → Aster 反向 Maker → Lighter 反向 Taker），可以使用 `strategies/aster_lighter_cycle.py` 脚本。Robinhood Chain Lighter 的端点、签名和小额 canary 配置见 [迁移说明](docs/robinhood_lighter_aster_cycle.md)，生产服务器准备见 [Linux 部署手册](docs/robinhood_linux_deployment.md)：
 
 ```bash
 python strategies/aster_lighter_cycle.py \

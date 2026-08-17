@@ -36,6 +36,12 @@ ASTER_API_KEY=your_aster_api_key
 ASTER_SECRET_KEY=your_aster_secret_key
 
 # Lighter Configuration
+# Deployment profile. Keep the Robinhood REST, WebSocket, and chain ID together.
+# See env_robinhood_example.txt for a complete Robinhood configuration.
+LIGHTER_ENVIRONMENT=core
+# LIGHTER_BASE_URL=https://api.rh.lighter.xyz
+# LIGHTER_WS_URL=wss://api.rh.lighter.xyz/stream
+# LIGHTER_CHAIN_ID=466324
 # 若需清除下列凭证，可运行：
 # python strategies/aster_lighter_cycle.py --env-file .env --reset-credentials
 # 若需在启动时替换私钥，可在命令行添加：
@@ -68,7 +74,9 @@ TELEGRAM_CHAT_ID=
 # Logging
 LOG_TO_CONSOLE=true
 LOG_TO_FILE=true
-LOG_FILE=trading_log.csv
+LOG_DIR=logs
+LOG_MAX_BYTES=10485760
+LOG_BACKUP_COUNT=5
 
 # Suppress duplicate log lines within this many seconds (set to 0 to disable)
 LOG_DEDUP_WINDOW=1.0

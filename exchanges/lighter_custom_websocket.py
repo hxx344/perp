@@ -9,6 +9,8 @@ import time
 from typing import Dict, Any, List, Optional, Tuple, Callable
 import websockets
 
+from .lighter_endpoints import CORE_MAINNET
+
 
 class LighterCustomWebSocketManager:
     """Custom WebSocket manager for Lighter order updates and order book without SDK."""
@@ -28,6 +30,7 @@ class LighterCustomWebSocketManager:
         self.best_ask = None
         self.snapshot_loaded = False
         self.order_book_offset = None
+        self.order_book_nonce = None
         self.order_book_sequence_gap = False
         self.order_book_lock = asyncio.Lock()
         # Hard caps and housekeeping
@@ -37,12 +40,16 @@ class LighterCustomWebSocketManager:
         self.last_account_orders_entries: List[Dict[str, Any]] = []
         self.last_account_orders_client_ids: List[Any] = []
 
-        # WebSocket URL
-        self.ws_url = "wss://mainnet.zklighter.elliot.ai/stream"
+        # The REST/WS/chain tuple is resolved by LighterClient and copied here.
+        self.ws_url = getattr(config, "lighter_ws_url", None) or CORE_MAINNET.ws_url
         market_index = getattr(config, "market_index", None)
         self.market_index = market_index if market_index is not None else getattr(config, "contract_id", None)
         self.account_index = getattr(config, "account_index", None)
         self.lighter_client = getattr(config, "lighter_client", None)
+        self.require_nonce_continuity = (
+            str(getattr(config, "lighter_environment", "") or "").strip().casefold()
+            == "robinhood"
+        )
 
     def set_logger(self, logger):
         """Set the logger instance."""
@@ -114,37 +121,94 @@ class LighterCustomWebSocketManager:
         if len(ob) > self.max_levels * 2:
             self._trim_side_inplace(side)
 
-    def validate_order_book_offset(self, new_offset: int) -> bool:
-        """Validate that the new offset is sequential and handle gaps."""
-        if self.order_book_offset is None:
-            # First offset, always valid
-            self.order_book_offset = new_offset
-            return True
+    @staticmethod
+    def _coerce_sequence_number(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
-        # Check if the new offset is sequential (should be +1)
-        expected_offset = self.order_book_offset + 1
-        if new_offset == expected_offset:
-            # Sequential update, update our offset
-            self.order_book_offset = new_offset
-            self.order_book_sequence_gap = False
-            return True
-        elif new_offset > expected_offset:
-            # Gap detected - we missed some updates
-            self._log(f"Order book sequence gap detected! Expected offset {expected_offset}, got {new_offset}", "WARNING")
+    @classmethod
+    def _extract_order_book_sequence(
+        cls,
+        data: Dict[str, Any],
+    ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+        order_book = data.get("order_book") if isinstance(data, dict) else None
+        if not isinstance(order_book, dict):
+            order_book = {}
+
+        def _read(*names: str) -> Optional[int]:
+            for container in (data, order_book):
+                for name in names:
+                    if name in container:
+                        parsed = cls._coerce_sequence_number(container.get(name))
+                        if parsed is not None:
+                            return parsed
+            return None
+
+        return _read("offset"), _read("begin_nonce", "beginNonce"), _read("nonce")
+
+    def validate_order_book_offset(
+        self,
+        new_offset: Optional[int],
+        *,
+        begin_nonce: Optional[int] = None,
+        nonce: Optional[int] = None,
+    ) -> bool:
+        """Validate RH book continuity.
+
+        Lighter offsets are only monotonic and may jump. The actual continuity
+        invariant is ``update.begin_nonce == previous.nonce``.
+        """
+
+        offset = self._coerce_sequence_number(new_offset)
+        begin = self._coerce_sequence_number(begin_nonce)
+        end = self._coerce_sequence_number(nonce)
+
+        if begin is not None and self.order_book_nonce is not None and begin != self.order_book_nonce:
+            self._log(
+                f"Order book nonce gap detected: expected begin_nonce {self.order_book_nonce}, got {begin}",
+                "WARNING",
+            )
             self.order_book_sequence_gap = True
             return False
-        else:
-            # Out of order or duplicate update
-            self._log(f"Out of order update received! Expected offset {expected_offset}, got {new_offset}", "WARNING")
-            return True  # Don't reconnect for out-of-order updates, just ignore them
+
+        if begin is not None and end is not None and end < begin:
+            self._log(f"Invalid order book nonce range: begin_nonce={begin}, nonce={end}", "WARNING")
+            self.order_book_sequence_gap = True
+            return False
+
+        if end is not None and self.order_book_nonce is not None and end <= self.order_book_nonce:
+            self._log(
+                f"Ignoring stale order book nonce {end}; current nonce is {self.order_book_nonce}",
+                "WARNING",
+            )
+            self.order_book_sequence_gap = False
+            return False
+
+        if offset is not None and self.order_book_offset is not None and offset <= self.order_book_offset:
+            self._log(
+                f"Ignoring stale order book offset {offset}; current offset is {self.order_book_offset}",
+                "WARNING",
+            )
+            self.order_book_sequence_gap = False
+            return False
+
+        if offset is not None:
+            self.order_book_offset = offset
+        if end is not None:
+            self.order_book_nonce = end
+        self.order_book_sequence_gap = False
+        return True
 
     def handle_order_book_cutoff(self, data: Dict[str, Any]) -> bool:
         """Handle cases where order book updates might be cutoff or incomplete."""
         order_book = data.get("order_book", {})
 
-        # Validate required fields
-        if not order_book or "code" not in order_book or "offset" not in order_book:
-            self._log("Incomplete order book update - missing required fields", "WARNING")
+        if not isinstance(order_book, dict) or not order_book:
+            self._log("Incomplete order book update - missing order_book payload", "WARNING")
             return False
 
         # Check if the order book has the expected structure
@@ -264,6 +328,7 @@ class LighterCustomWebSocketManager:
             self.best_bid = None
             self.best_ask = None
             self.order_book_offset = None
+            self.order_book_nonce = None
             self.order_book_sequence_gap = False
             self.ready_event.clear()
 
@@ -441,10 +506,13 @@ class LighterCustomWebSocketManager:
 
                                     # Handle the initial snapshot
                                     order_book = data.get("order_book", {})
-                                    if order_book and "offset" in order_book:
-                                        # Set the initial offset from the snapshot
-                                        self.order_book_offset = order_book["offset"]
-                                        self._log(f"Initial order book offset set to: {self.order_book_offset}", "INFO")
+                                    initial_offset, _, initial_nonce = self._extract_order_book_sequence(data)
+                                    self.order_book_offset = initial_offset
+                                    self.order_book_nonce = initial_nonce
+                                    self._log(
+                                        f"Initial order book sequence: offset={initial_offset}, nonce={initial_nonce}",
+                                        "INFO",
+                                    )
 
                                     self.update_order_book("bids", order_book.get("bids", []))
                                     self.update_order_book("asks", order_book.get("asks", []))
@@ -470,16 +538,24 @@ class LighterCustomWebSocketManager:
                                         self._log("Skipping incomplete order book update", "WARNING")
                                         continue
 
-                                    # Extract offset from the message
                                     order_book = data.get("order_book", {})
-                                    if not order_book or "offset" not in order_book:
-                                        self._log("Order book update missing offset, skipping", "WARNING")
+                                    new_offset, begin_nonce, new_nonce = self._extract_order_book_sequence(data)
+                                    if new_offset is None and begin_nonce is None and new_nonce is None:
+                                        self._log("Order book update missing sequence fields, skipping", "WARNING")
                                         continue
+                                    if self.require_nonce_continuity and (begin_nonce is None or new_nonce is None):
+                                        self._log(
+                                            "Robinhood order book update missing begin_nonce/nonce; reconnecting",
+                                            "WARNING",
+                                        )
+                                        self.order_book_sequence_gap = True
+                                        break
 
-                                    new_offset = order_book["offset"]
-
-                                    # Validate offset sequence
-                                    if not self.validate_order_book_offset(new_offset):
+                                    if not self.validate_order_book_offset(
+                                        new_offset,
+                                        begin_nonce=begin_nonce,
+                                        nonce=new_nonce,
+                                    ):
                                         # Sequence gap detected, try to request fresh snapshot first
                                         if self.order_book_sequence_gap:
                                             self._log("Sequence gap detected, requesting fresh snapshot...", "WARNING")
@@ -546,6 +622,9 @@ class LighterCustomWebSocketManager:
                             # Handle sequence gap and integrity issues outside the lock
                             if self.order_book_sequence_gap:
                                 try:
+                                    # Do not expose stale BBO levels while the
+                                    # fresh snapshot is being requested.
+                                    await self.reset_order_book()
                                     await self.request_fresh_snapshot()
                                     self.order_book_sequence_gap = False
                                 except Exception as e:
@@ -575,8 +654,11 @@ class LighterCustomWebSocketManager:
             except Exception as e:
                 self._log(f"Failed to connect to Lighter websocket: {e}", "ERROR")
 
+            self.running = False
+            await self.reset_order_book()
+
             # Wait before reconnecting with exponential backoff
-            if self.running and not self._stop:
+            if not self._stop:
                 self._log(f"Waiting {reconnect_delay} seconds before reconnecting...", "INFO")
                 await asyncio.sleep(reconnect_delay)
                 # Exponential backoff: double the delay, but cap at max_reconnect_delay

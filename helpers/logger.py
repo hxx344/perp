@@ -5,22 +5,67 @@ Trading logger with structured output and error handling.
 import os
 import csv
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import pytz
 from decimal import Decimal
+from typing import Optional
+
+
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 5
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
 
 
 class TradingLogger:
     """Enhanced logging with structured output and error handling."""
 
-    def __init__(self, exchange: str, ticker: str, log_to_console: bool = False, enable_debug: bool = False):
+    def __init__(
+        self,
+        exchange: str,
+        ticker: str,
+        log_to_console: Optional[bool] = None,
+        enable_debug: bool = False,
+    ):
         self.exchange = exchange
         self.ticker = ticker
         self.enable_debug = enable_debug
-        # Ensure logs directory exists at the project root
+        self.log_to_file = _env_bool("LOG_TO_FILE", True)
+        self.log_max_bytes = _positive_env_int("LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES)
+        self.log_backup_count = _positive_env_int("LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT)
+        console_enabled = (
+            _env_bool("LOG_TO_CONSOLE", False)
+            if log_to_console is None
+            else bool(log_to_console)
+        )
+
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-        logs_dir = os.path.join(project_root, 'logs')
-        os.makedirs(logs_dir, exist_ok=True)
+        configured_log_dir = os.path.expanduser(os.getenv("LOG_DIR", "logs").strip() or "logs")
+        if os.path.isabs(configured_log_dir):
+            logs_dir = os.path.abspath(configured_log_dir)
+        else:
+            logs_dir = os.path.abspath(os.path.join(project_root, configured_log_dir))
+        if self.log_to_file:
+            os.makedirs(logs_dir, exist_ok=True)
 
         order_file_name = f"{exchange}_{ticker}_orders.csv"
         debug_log_file_name = f"{exchange}_{ticker}_activity.log"
@@ -34,7 +79,7 @@ class TradingLogger:
         self.log_file = os.path.join(logs_dir, order_file_name)
         self.debug_log_file = os.path.join(logs_dir, debug_log_file_name)
         self.timezone = pytz.timezone(os.getenv('TIMEZONE', 'Asia/Shanghai'))
-        self.logger = self._setup_logger(log_to_console)
+        self.logger = self._setup_logger(console_enabled)
 
     def _setup_logger(self, log_to_console: bool) -> logging.Logger:
         """Setup the logger with proper configuration."""
@@ -51,11 +96,6 @@ class TradingLogger:
                     handler.setLevel(logging.DEBUG)
                 elif isinstance(handler, logging.StreamHandler):
                     handler.setLevel(logging.DEBUG if self.enable_debug else logging.INFO)
-
-        # If handlers already exist, just update levels and reuse the logger as-is
-        if logger.handlers:
-            _apply_handler_levels()
-            return logger
 
         class _DedupFilter(logging.Filter):
             """Filter out exact duplicate messages within a short time window."""
@@ -101,26 +141,75 @@ class TradingLogger:
             tz=self.timezone
         )
 
-        # Optional de-dup filter on logger
+        # Reconfigure our named logger deterministically if it was already created.
+        for existing_filter in list(logger.filters):
+            if getattr(existing_filter, "_trading_logger_dedup", False):
+                logger.removeFilter(existing_filter)
+
         try:
             window = float(os.getenv("LOG_DEDUP_WINDOW", "0.0"))
         except Exception:
             window = 0.0
         if window > 0:
-            logger.addFilter(_DedupFilter(window))
+            dedup_filter = _DedupFilter(window)
+            dedup_filter._trading_logger_dedup = True  # type: ignore[attr-defined]
+            logger.addFilter(dedup_filter)
 
-        # File handler
-        file_handler = logging.FileHandler(self.debug_log_file)
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
+        expected_file = os.path.abspath(self.debug_log_file)
+        for handler in list(logger.handlers):
+            if isinstance(handler, logging.FileHandler):
+                compatible = (
+                    self.log_to_file
+                    and isinstance(handler, RotatingFileHandler)
+                    and os.path.abspath(handler.baseFilename) == expected_file
+                    and handler.maxBytes == self.log_max_bytes
+                    and handler.backupCount == self.log_backup_count
+                )
+                if compatible:
+                    handler.setFormatter(formatter)
+                else:
+                    logger.removeHandler(handler)
+                    handler.close()
+            elif isinstance(handler, logging.NullHandler):
+                logger.removeHandler(handler)
+                handler.close()
 
-        # Console handler if requested
+        if self.log_to_file and not any(
+            isinstance(handler, logging.FileHandler) for handler in logger.handlers
+        ):
+            file_handler = RotatingFileHandler(
+                self.debug_log_file,
+                maxBytes=self.log_max_bytes,
+                backupCount=self.log_backup_count,
+                encoding="utf-8",
+            )
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+
+        console_handlers = [
+            handler
+            for handler in logger.handlers
+            if isinstance(handler, logging.StreamHandler)
+            and not isinstance(handler, logging.FileHandler)
+            and not isinstance(handler, logging.NullHandler)
+        ]
         if log_to_console:
-            console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.DEBUG if self.enable_debug else logging.INFO)
-            console_handler.setFormatter(formatter)
-            logger.addHandler(console_handler)
+            if not console_handlers:
+                console_handler = logging.StreamHandler()
+                console_handler.setLevel(logging.DEBUG if self.enable_debug else logging.INFO)
+                console_handler.setFormatter(formatter)
+                logger.addHandler(console_handler)
+            else:
+                for handler in console_handlers:
+                    handler.setFormatter(formatter)
+        else:
+            for handler in console_handlers:
+                logger.removeHandler(handler)
+                handler.close()
+
+        if not logger.handlers:
+            logger.addHandler(logging.NullHandler())
 
         _apply_handler_levels()
 
@@ -142,6 +231,8 @@ class TradingLogger:
 
     def log_transaction(self, order_id: str, side: str, quantity: Decimal, price: Decimal, status: str):
         """Log a transaction to CSV file."""
+        if not self.log_to_file:
+            return
         try:
             timestamp = datetime.now(self.timezone).strftime("%Y-%m-%d %H:%M:%S")
             row = [timestamp, order_id, side, quantity, price, status]
