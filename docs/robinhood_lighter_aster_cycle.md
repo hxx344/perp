@@ -47,6 +47,8 @@ Linux 上可直接复用原策略参数，不复制代码：
 python -m strategies.robinhood_lighter_cycle --quantity 0.00020 --randomize-direction --slippage 0.3 --max-wait 3 --cycles 1
 ```
 
+Linux 入口优先复用 `/etc/perp/robinhood.env`，不会要求再次创建同一份凭据。
+
 `robinhood_lighter_cycle` 只是参数档，核心执行仍是下方的
 `aster_lighter_cycle`：
 

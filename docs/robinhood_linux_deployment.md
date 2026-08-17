@@ -13,8 +13,8 @@
 
 ## 最简原地运行
 
-手动运行不需要复制代码到 `/opt/perp`，也不需要创建 `perp` 用户或安装
-systemd。只需在当前仓库和现有虚拟环境中准备一次 `.env.robinhood`，然后执行：
+手动运行不需要复制代码到 `/opt/perp`，也不需要创建新的用户或安装 systemd。
+入口会直接读取前面安装步骤已经创建的 `/etc/perp/robinhood.env`，然后执行：
 
 ```bash
 python -m strategies.robinhood_lighter_cycle --quantity 0.00020 --randomize-direction --slippage 0.3 --max-wait 3
@@ -22,8 +22,9 @@ python -m strategies.robinhood_lighter_cycle --quantity 0.00020 --randomize-dire
 
 这就是实盘运行命令，不含额外确认步骤；Aster 腿是虚拟的，Lighter 腿是真实的。
 这个薄入口直接复用 `aster_lighter_cycle`，只自动补齐 BTC、Robinhood 端点、
-`.env.robinhood`、Binance 虚拟 Aster 行情、2 倍杠杆、10 档深度和 10 秒 Lighter
-等待时间。命令行中继续传入同名参数即可覆盖数值；`--quantity` 保留为必填，避免
+Binance 虚拟 Aster 行情、2 倍杠杆、10 档深度和 10 秒 Lighter 等待时间。
+凭据文件按 `/etc/perp/robinhood.env`、`.env.robinhood`、`.env` 的顺序选择，也可用
+`--env-file` 显式指定。命令行中继续传入同名参数即可覆盖数值；`--quantity` 保留为必填，避免
 误用默认实盘数量。没有指定 `--cycles` 时与原程序相同，会持续运行直到停止；首次
 真实验证应增加 `--cycles 1`。
 

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from typing import Sequence
 
 from strategies import aster_lighter_cycle
 
 
 ROBINHOOD_DEFAULT_ARGS: tuple[str, ...] = (
-    "--env-file",
-    ".env.robinhood",
     "--aster-ticker",
     "BTC",
     "--lighter-ticker",
@@ -26,6 +25,11 @@ ROBINHOOD_DEFAULT_ARGS: tuple[str, ...] = (
     "10",
     "--lighter-max-wait",
     "10",
+)
+DEFAULT_ENV_CANDIDATES: tuple[str, ...] = (
+    "/etc/perp/robinhood.env",
+    ".env.robinhood",
+    ".env",
 )
 ROBINHOOD_REQUIRED_ARGS: tuple[str, ...] = (
     "--lighter-environment",
@@ -47,10 +51,23 @@ LIGHTER_ENV_KEYS: tuple[str, ...] = (
 )
 
 
+def resolve_default_env_file() -> str:
+    for candidate in DEFAULT_ENV_CANDIDATES:
+        path = Path(candidate)
+        try:
+            if path.is_file() and os.access(path, os.R_OK):
+                return candidate
+        except OSError:
+            continue
+    return DEFAULT_ENV_CANDIDATES[0]
+
+
 def build_cycle_argv(user_args: Sequence[str]) -> list[str]:
     """Apply RH defaults, user overrides, then the mandatory endpoint profile."""
     return [
         sys.argv[0],
+        "--env-file",
+        resolve_default_env_file(),
         *ROBINHOOD_DEFAULT_ARGS,
         *user_args,
         *ROBINHOOD_REQUIRED_ARGS,

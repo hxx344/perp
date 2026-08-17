@@ -312,7 +312,7 @@ python runbot.py --exchange grvt --ticker BTC --quantity 0.05 --take-profit 0.02
 
 若需执行文档中所述的单轮对冲流程（Aster Maker → Lighter 反向 Taker → Aster 反向 Maker → Lighter 反向 Taker），可以使用 `strategies/aster_lighter_cycle.py` 脚本。Robinhood Chain Lighter 的端点、签名和小额 canary 配置见 [迁移说明](docs/robinhood_lighter_aster_cycle.md)，生产服务器准备见 [Linux 部署手册](docs/robinhood_linux_deployment.md)：
 
-Robinhood Lighter 可以在当前目录直接运行，不需要复制代码、创建系统用户或安装 systemd：`python -m strategies.robinhood_lighter_cycle --quantity 0.00020 --randomize-direction --slippage 0.3 --max-wait 3`。该入口复用原策略，只自动补齐 Robinhood 端点、`.env.robinhood`、Binance 虚拟行情和 2 倍杠杆。
+Robinhood Lighter 可以在当前目录直接运行，不需要复制代码、创建系统用户或安装 systemd：`python -m strategies.robinhood_lighter_cycle --quantity 0.00020 --randomize-direction --slippage 0.3 --max-wait 3`。该入口复用原策略，优先读取已有的 `/etc/perp/robinhood.env`，并自动补齐 Robinhood 端点、Binance 虚拟行情和 2 倍杠杆。
 
 ```bash
 python strategies/aster_lighter_cycle.py \
