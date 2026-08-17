@@ -83,6 +83,28 @@ def test_client_order_indexes_are_monotonic_uint48_and_orders_use_stp(monkeypatc
     assert [call["self_trade_equality_mode"] for call in signer.calls] == [23, 23]
 
 
+def test_reserved_client_order_index_can_be_persisted_before_submit(monkeypatch):
+    client = _make_client(monkeypatch)
+    signer = _FakeSignerClient()
+    client.lighter_client = signer
+    client.base_amount_multiplier = 100_000
+    client.price_multiplier = 10
+
+    reserved = client.reserve_client_order_index()
+    result = asyncio.run(
+        client.place_limit_order(
+            "1",
+            Decimal("0.001"),
+            Decimal("50000.1"),
+            "buy",
+            client_order_index=reserved,
+        )
+    )
+
+    assert result.order_id == str(reserved)
+    assert signer.calls[-1]["client_order_index"] == reserved
+
+
 def test_perp_order_constraints_enforce_runtime_minimums_and_size_step(monkeypatch):
     client = _make_client(monkeypatch)
     client.market_detail = SimpleNamespace()

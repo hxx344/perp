@@ -56,6 +56,10 @@ class OrderInfo:
     filled_size: Decimal = Decimal("0")
     remaining_size: Decimal = Decimal("0")
     cancel_reason: str = ''
+    # Lighter exposes this separately from the resting order index. Keeping it
+    # optional preserves the common exchange interface while allowing a maker
+    # to manage only orders created by its own process.
+    client_order_index: Optional[str] = None
 
 
 class BaseExchangeClient(ABC):

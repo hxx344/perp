@@ -161,6 +161,7 @@ celerybeat.pid
 # Environments
 .env
 .env.*
+robinhood.env
 !.env.example
 !.env.*.example
 !.env.template

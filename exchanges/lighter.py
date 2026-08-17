@@ -8,6 +8,7 @@ import asyncio
 import time
 import logging
 import re
+import secrets
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
 from typing import Dict, Any, List, Optional, Tuple, Iterable
 
@@ -143,7 +144,12 @@ class LighterClient(BaseExchangeClient):
         self.spot_min_quote_amount: Optional[Decimal] = None
         self.min_base_amount: Optional[Decimal] = None
         self.min_quote_amount: Optional[Decimal] = None
-        self._last_client_order_index = 0
+        # Start each client in a random upper-half uint48 namespace. Values are
+        # still monotonic within the process, while independent strategy
+        # processes have a negligible collision probability even when they
+        # submit during the same millisecond.
+        random_span = (1 << 47) - (1 << 32)
+        self._last_client_order_index = (1 << 47) + secrets.randbelow(random_span)
 
     def _log_debug(self, message: str) -> None:
         if self._debug_orders:
@@ -1224,6 +1230,16 @@ class LighterClient(BaseExchangeClient):
 
         return OrderResult(success=True, order_id=str(order_params['client_order_index']))
 
+    def reserve_client_order_index(self) -> int:
+        """Reserve the next low-collision uint48 client order index."""
+
+        now_ms = int(time.time_ns() // 1_000_000)
+        client_order_index = max(now_ms, self._last_client_order_index + 1)
+        if client_order_index > MAX_CLIENT_ORDER_INDEX:
+            raise RuntimeError("Generated Lighter client_order_index exceeds uint48")
+        self._last_client_order_index = client_order_index
+        return client_order_index
+
     async def place_limit_order(
         self,
         contract_id: str,
@@ -1233,6 +1249,7 @@ class LighterClient(BaseExchangeClient):
         *,
         time_in_force: str = "gtt",
         reduce_only: bool = False,
+        client_order_index: Optional[int] = None,
     ) -> OrderResult:
         """Place a validated limit order with an explicit time-in-force policy."""
         # Ensure client is initialized
@@ -1254,11 +1271,21 @@ class LighterClient(BaseExchangeClient):
             raise Exception(f"Invalid side: {side}")
 
         # client_order_index is uint48 and must be unique across all markets.
-        now_ms = int(time.time_ns() // 1_000_000)
-        client_order_index = max(now_ms, self._last_client_order_index + 1)
-        if client_order_index > MAX_CLIENT_ORDER_INDEX:
-            raise RuntimeError("Generated Lighter client_order_index exceeds uint48")
-        self._last_client_order_index = client_order_index
+        if client_order_index is None:
+            client_order_index = self.reserve_client_order_index()
+        else:
+            try:
+                client_order_index = int(client_order_index)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Lighter client_order_index must be an integer") from exc
+            if not 0 <= client_order_index <= MAX_CLIENT_ORDER_INDEX:
+                raise ValueError("Lighter client_order_index must fit in uint48")
+            # An explicitly reserved value may equal the current high-water
+            # mark. Larger caller-supplied values advance it for later orders.
+            self._last_client_order_index = max(
+                self._last_client_order_index,
+                client_order_index,
+            )
         self.current_order_client_id = client_order_index
         self.current_order = None
 
@@ -1529,6 +1556,9 @@ class LighterClient(BaseExchangeClient):
             remaining_size = self._decimal_or_zero(getattr(order, "remaining_base_amount", None))
             filled_size = self._decimal_or_zero(getattr(order, "filled_base_amount", None))
             order_index = getattr(order, "order_index", getattr(order, "id", None))
+            client_order_index = getattr(order, "client_order_index", None)
+            if client_order_index is None:
+                client_order_index = getattr(order, "clientOrderIndex", None)
             status_value = getattr(order, "status", "")
             status_text = status_value.upper() if isinstance(status_value, str) else str(status_value)
 
@@ -1541,7 +1571,10 @@ class LighterClient(BaseExchangeClient):
                     price=price,
                     status=status_text,
                     filled_size=filled_size,
-                    remaining_size=remaining_size
+                    remaining_size=remaining_size,
+                    client_order_index=(
+                        str(client_order_index) if client_order_index is not None else None
+                    )
                 ))
 
         return contract_orders

@@ -1,25 +1,30 @@
-"""Minimal Lighter market-making loop with Binance hedging.
+"""Minimal Robinhood Lighter market-making loop.
 
-This module keeps a single bid/ask resting on Lighter, adjusts them according to
-mid-price and a static spread, and hedges net exposure on Binance Futures once
-an inventory threshold is breached. Hot-update configuration is reloaded each
-loop iteration so ops can pause the cycle or tweak parameters without restarts.
+This module keeps a single post-only bid/ask resting on Lighter, anchors quotes
+to a public Binance Futures book when available, and optionally hedges net
+exposure on Binance Futures once an inventory threshold is breached. Binance
+trading is deliberately opt-in; the normal Robinhood deployment only reads
+public Binance prices. Hot-update configuration is reloaded each loop iteration
+so ops can pause the cycle or tweak parameters without restarts.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import contextlib
+import ctypes
 import hmac
 import json
 import logging
 import os
 import random
+import re
+import secrets
 import signal
 import sys
 import time
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN, InvalidOperation
+from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN, ROUND_UP, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, cast
@@ -31,6 +36,30 @@ import dotenv
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
+
+
+DEFAULT_ENV_CANDIDATES: tuple[str, ...] = (
+    "/etc/perp/robinhood.env",
+    "robinhood.env",
+    ".env.robinhood",
+    ".env",
+)
+LIGHTER_ENDPOINT_ENV_KEYS: tuple[str, ...] = (
+    "LIGHTER_ENVIRONMENT",
+    "LIGHTER_ENDPOINT_PROFILE",
+    "LIGHTER_BASE_URL",
+    "LIGHTER_WS_URL",
+    "LIGHTER_CHAIN_ID",
+)
+LIGHTER_CREDENTIAL_ENV_KEYS: tuple[str, ...] = (
+    "LIGHTER_ACCOUNT_INDEX",
+    "LIGHTER_API_PRIVATE_KEYS",
+    "API_KEY_PRIVATE_KEYS",
+    "API_KEY_PRIVATE_KEY",
+    "LIGHTER_API_KEY_INDEX",
+    "L1_WALLET_PRIVATE_KEY",
+    "LIGHTER_L1_PRIVATE_KEY",
+)
 
 from exchanges import ExchangeFactory
 from exchanges.lighter import LighterClient
@@ -58,18 +87,30 @@ class SimpleMakerSettings:
     base_spread_bps: Decimal
     hedge_threshold: Decimal
     hedge_buffer: Decimal = Decimal("0")
-    enable_binance_hedge: bool = True
+    enable_binance_hedge: bool = False
+    hedge_cooldown_seconds: float = 0.0
+    max_hedge_quantity: Optional[Decimal] = None
     inventory_limit: Optional[Decimal] = None
     config_path: str = "configs/hot_update.json"
     env_file: Optional[str] = None
+    lighter_environment: str = "robinhood"
+    lighter_leverage: Optional[int] = 2
     loop_sleep_seconds: float = 3.0
     order_refresh_ticks: int = 2
+    order_refresh_bps: Decimal = Decimal("1")
+    min_quote_lifetime_seconds: float = 5.0
+    order_ack_timeout_seconds: float = 5.0
+    binance_reference_timeout_seconds: float = 1.0
+    max_cycles: int = 0
     log_to_console: bool = True
     metrics_interval_seconds: float = 30.0
     allowed_sides: Optional[Iterable[str]] = None
     order_quantity_min: Optional[Decimal] = None
     order_quantity_max: Optional[Decimal] = None
-    fill_cooldown_seconds: float = 10.0
+    fill_cooldown_seconds: float = 5.0
+    use_binance_reference: bool = True
+    inventory_skew_bps: Decimal = Decimal("3")
+    ownership_state_path: Optional[str] = None
 
     def effective_inventory_limit(self) -> Decimal:
         return self.inventory_limit if self.inventory_limit is not None else self.hedge_threshold
@@ -82,6 +123,29 @@ class ActiveOrder:
     order_id: str
     price: Decimal
     side: str
+    client_order_index: Optional[str] = None
+    created_at: float = 0.0
+    confirmed: bool = False
+    missing_active_snapshots: int = 0
+
+
+def resolve_default_env_file() -> str:
+    """Return the first readable Robinhood environment file.
+
+    The deployment credential file is preferred over repository-local files so
+    a stale ``.env`` cannot silently select another Lighter account.
+    """
+
+    for candidate in DEFAULT_ENV_CANDIDATES:
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        try:
+            if path.is_file() and os.access(path, os.R_OK):
+                return candidate
+        except OSError:
+            continue
+    return DEFAULT_ENV_CANDIDATES[0]
 
 
 def compute_target_prices(
@@ -93,16 +157,85 @@ def compute_target_prices(
     half_spread = (mid_price * spread_bps / Decimal("10000")).quantize(tick_size, rounding=ROUND_HALF_UP)
     if half_spread < tick_size:
         half_spread = tick_size
-    bid_price = (mid_price - half_spread).quantize(tick_size, rounding=ROUND_HALF_UP)
-    ask_price = (mid_price + half_spread).quantize(tick_size, rounding=ROUND_HALF_UP)
+    # Directional rounding keeps the bid at or below its intended level and
+    # the ask at or above it. This matters when the reference is Binance and
+    # the local Robinhood book is one tick away from the lead price.
+    bid_price = (mid_price - half_spread).quantize(tick_size, rounding=ROUND_DOWN)
+    ask_price = (mid_price + half_spread).quantize(tick_size, rounding=ROUND_UP)
     return {"buy": bid_price, "sell": ask_price}
 
 
 def should_enable_side(net_position: Decimal, limit: Decimal, side: str) -> bool:
     """Check if quoting for a side should remain enabled under inventory constraints."""
     if side == "buy":
-        return net_position <= limit
-    return net_position >= -limit
+        return net_position < limit
+    return net_position > -limit
+
+
+def side_has_inventory_capacity(
+    net_position: Decimal,
+    limit: Decimal,
+    side: str,
+    order_quantity: Decimal,
+) -> bool:
+    """Ensure a full next quote cannot take inventory through the hard cap."""
+
+    quantity = abs(order_quantity)
+    if quantity <= 0:
+        return should_enable_side(net_position, limit, side)
+    if side == "buy":
+        return net_position + quantity < limit
+    if side == "sell":
+        return net_position - quantity > -limit
+    raise ValueError(f"Invalid side: {side!r}")
+
+
+def apply_inventory_skew(
+    reference_mid: Decimal,
+    net_position: Decimal,
+    inventory_limit: Decimal,
+    max_skew_bps: Decimal,
+) -> Decimal:
+    """Shift the quote center to encourage inventory back toward zero.
+
+    A long inventory moves both quotes down (less aggressive bid, more
+    aggressive ask); a short inventory moves them up. The adjustment is linear
+    and capped at ``max_skew_bps`` when the hard inventory limit is reached.
+    """
+
+    if reference_mid <= 0 or inventory_limit <= 0 or max_skew_bps <= 0:
+        return reference_mid
+    ratio = net_position / inventory_limit
+    ratio = max(Decimal("-1"), min(Decimal("1"), ratio))
+    adjustment = reference_mid * max_skew_bps * ratio / Decimal("10000")
+    return reference_mid - adjustment
+
+
+def clamp_maker_targets(
+    targets: Dict[str, Decimal],
+    best_bid: Decimal,
+    best_ask: Decimal,
+    tick_size: Decimal,
+) -> Dict[str, Decimal]:
+    """Prevent a reference-price quote from crossing the local Lighter book."""
+
+    if tick_size <= 0:
+        return {"buy": best_bid, "sell": best_ask}
+
+    # Improving the local BBO is the main source of volume when Lighter's
+    # spread is wider than Binance. Stay one tick away from the opposite side
+    # rather than forcing every quote to join the existing BBO.
+    max_post_only_bid = best_ask - tick_size
+    min_post_only_ask = best_bid + tick_size
+    bid = min(targets["buy"], max_post_only_bid)
+    ask = max(targets["sell"], min_post_only_ask)
+    if bid >= ask:
+        # A stale or dislocated reference should never create a crossed pair.
+        bid = best_bid
+        ask = best_ask
+    bid = bid.quantize(tick_size, rounding=ROUND_DOWN)
+    ask = ask.quantize(tick_size, rounding=ROUND_UP)
+    return {"buy": bid, "sell": ask}
 
 
 def required_hedge_quantity(net_position: Decimal, threshold: Decimal, buffer: Decimal) -> Decimal:
@@ -134,7 +267,13 @@ class BinanceHedger:
         signature = hmac.new(self.api_secret, query.encode(), sha256).hexdigest()
         return signature
 
-    async def place_market_order(self, side: str, quantity: Decimal) -> Dict[str, Any]:
+    async def place_market_order(
+        self,
+        side: str,
+        quantity: Decimal,
+        *,
+        reduce_only: bool = False,
+    ) -> Dict[str, Any]:
         normalized_qty = await self.prepare_market_quantity(quantity)
         if normalized_qty <= 0:
             raise ValueError(
@@ -149,6 +288,8 @@ class BinanceHedger:
             "timestamp": timestamp,
             "recvWindow": 5000,
         }
+        if reduce_only:
+            params["reduceOnly"] = "true"
         params["signature"] = self._sign(params)
         headers = {"X-MBX-APIKEY": self.api_key}
 
@@ -264,8 +405,40 @@ class BinanceHedger:
         return {"step_size": self._quantity_step, "min_quantity": self._min_quantity}
 
 
+class BinancePublicReference:
+    """Read-only Binance book-ticker reference used to anchor maker quotes."""
+
+    BASE_URL = "https://fapi.binance.com"
+
+    def __init__(self, symbol: str, session: aiohttp.ClientSession) -> None:
+        self.symbol = symbol.upper()
+        self.session = session
+
+    async def fetch_mid_price(self) -> Decimal:
+        """Return Binance Futures best-bid/ask midpoint without credentials."""
+
+        async with self.session.get(
+            f"{self.BASE_URL}/fapi/v1/ticker/bookTicker",
+            params={"symbol": self.symbol},
+        ) as response:
+            data = await response.json()
+            if response.status >= 400:
+                raise RuntimeError(f"Binance public book ticker failed: {response.status} {data}")
+
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Unexpected Binance public book ticker response: {data!r}")
+        try:
+            bid = Decimal(str(data.get("bidPrice", "0")))
+            ask = Decimal(str(data.get("askPrice", "0")))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise RuntimeError(f"Invalid Binance public book ticker response: {data!r}") from exc
+        if bid <= 0 or ask <= 0 or bid >= ask:
+            raise RuntimeError(f"Invalid Binance public book ticker prices: bid={bid} ask={ask}")
+        return (bid + ask) / Decimal("2")
+
+
 class SimpleMarketMaker:
-    """Run a lightweight maker loop on Lighter with threshold hedging on Binance."""
+    """Run a lightweight post-only maker loop on Robinhood Lighter."""
 
     def __init__(self, settings: SimpleMakerSettings) -> None:
         self.settings = settings
@@ -273,15 +446,24 @@ class SimpleMarketMaker:
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
         self._hedger: Optional[BinanceHedger] = None
+        self._binance_reference: Optional[BinancePublicReference] = None
+        self._last_binance_reference_mid: Decimal = Decimal("0")
+        self._last_binance_reference_time: float = 0.0
         self._lighter_client: Optional[LighterClient] = None
         self._lighter_config: Optional[TradingConfig] = None
         self._tracked_orders: Dict[str, ActiveOrder] = {}
+        # The REST active-order endpoint returns the whole account. Keep a
+        # client-id registry so this process never cancels a manual order or a
+        # quote owned by another strategy.
+        self._own_client_order_indices: set[str] = set()
         self._last_hot_update: Dict[str, Any] = {}
         self._last_metrics_time: float = 0.0
         self._lighter_order_fills: Dict[str, Decimal] = {}
         self._lighter_session_volume_quote: Decimal = Decimal("0")
         self._lighter_session_volume_base: Decimal = Decimal("0")
         self._binance_position_estimate: Decimal = Decimal("0")
+        self._binance_state_known = not settings.enable_binance_hedge
+        self._last_hedge_timestamp = 0.0
         self._binance_initial_wallet_balance: Optional[Decimal] = None
         self._base_rate_limit_backoff_seconds = max(float(self.settings.loop_sleep_seconds), 1.0)
         self._rate_limit_backoff_seconds = self._base_rate_limit_backoff_seconds
@@ -295,7 +477,9 @@ class SimpleMarketMaker:
         self._latest_metrics: Dict[str, Decimal] = {}
         self._latest_net_position: Decimal = Decimal("0")
         self._latest_net_position_time: float = 0.0
+        self._inventory_state_known = False
         self._state_update_lock = asyncio.Lock()
+        self._quote_operation_lock = asyncio.Lock()
         self._binance_session_realized_pnl: Decimal = Decimal("0")
         self._binance_inventory_base: Decimal = Decimal("0")
         self._binance_avg_entry_price: Decimal = Decimal("0")
@@ -312,9 +496,19 @@ class SimpleMarketMaker:
         self._flatten_active = False
         self._fill_cooldown_seconds = max(0.0, float(settings.fill_cooldown_seconds))
         self._last_fill_timestamp: Dict[str, float] = {"buy": 0.0, "sell": 0.0}
+        self._stop_completed = False
+        self._stop_error: Optional[RuntimeError] = None
+        self._ownership_state_path: Optional[Path] = None
+        self._instance_lock_path: Optional[Path] = None
+        self._instance_lock_fd: Optional[int] = None
+        self._instance_lock_token = ""
 
     async def __aenter__(self) -> "SimpleMarketMaker":
-        await self.start()
+        try:
+            await self.start()
+        except Exception:
+            await self.stop()
+            raise
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -324,21 +518,45 @@ class SimpleMarketMaker:
         if self._running:
             return
 
-        env_path = self.settings.env_file
-        if env_path:
-            loaded = dotenv.load_dotenv(env_path)
+        env_path = self.settings.env_file or resolve_default_env_file()
+        # Endpoint and chain settings must come from the selected profile. Clear
+        # inherited values first so a shell used for Core cannot redirect this
+        # Robinhood strategy. When a protected file exists, its credentials are
+        # authoritative as well; a partial file must not silently inherit keys
+        # from an unrelated shell session.
+        for key in LIGHTER_ENDPOINT_ENV_KEYS:
+            os.environ.pop(key, None)
+        env_path_obj = Path(env_path)
+        if not env_path_obj.is_absolute():
+            env_path_obj = PROJECT_ROOT / env_path_obj
+        if env_path_obj.is_file():
+            for key in LIGHTER_CREDENTIAL_ENV_KEYS:
+                os.environ.pop(key, None)
+            loaded = dotenv.load_dotenv(str(env_path_obj), override=True)
             if loaded:
-                self.logger.log(f"Loaded environment variables from '{env_path}'", "INFO")
+                self.logger.log(f"Loaded environment variables from '{env_path_obj}'", "INFO")
             else:
                 self.logger.log(
-                    f"Env file '{env_path}' not found or empty; using existing process environment",
+                    f"Env file '{env_path_obj}' is empty; using existing credential environment",
                     "WARNING",
                 )
         else:
-            dotenv.load_dotenv()
+            self.logger.log(
+                f"Env file '{env_path_obj}' not found; using existing credential environment",
+                "WARNING",
+            )
+
+        lighter_environment = (self.settings.lighter_environment or "robinhood").strip().lower()
+        if lighter_environment != "robinhood":
+            raise ValueError(
+                "lighter_simple_market_maker is restricted to the Robinhood Lighter profile; "
+                "use strategies.aster_lighter_cycle for Core Lighter"
+            )
+        os.environ["LIGHTER_ENVIRONMENT"] = "robinhood"
 
         timeout = aiohttp.ClientTimeout(total=15)
         self._session = aiohttp.ClientSession(timeout=timeout)
+        self._binance_reference = BinancePublicReference(self.settings.binance_symbol, self._session)
 
         initial_binance_position = Decimal("0")
         initial_binance_avg_price = Decimal("0")
@@ -376,9 +594,11 @@ class SimpleMarketMaker:
                 if wallet_balance is not None:
                     self._binance_initial_wallet_balance = wallet_balance
             except Exception as exc:  # pragma: no cover - network dependent
-                self.logger.log(f"Failed to seed Binance position estimate: {exc}", "WARNING")
-                self._binance_position_estimate = Decimal("0")
-                self._binance_initial_wallet_balance = None
+                self._binance_state_known = False
+                raise RuntimeError(
+                    f"Binance hedge was enabled but its account position could not be reconciled: {exc}"
+                ) from exc
+            self._binance_state_known = True
         else:
             self._hedger = None
             self._binance_position_estimate = Decimal("0")
@@ -401,6 +621,10 @@ class SimpleMarketMaker:
             boost_mode=False,
             maker_depth_level=int(self._last_hot_update.get("aster_maker_depth_level", 10) or 10),
         )
+        # LighterClient consumes these optional profile attributes before it
+        # falls back to process environment; keep this strategy RH-only even
+        # when an operator starts it from a shell with stale Core variables.
+        setattr(trading_config, "lighter_environment", "robinhood")
 
         self._lighter_config = trading_config
         lighter_client = cast(
@@ -409,11 +633,19 @@ class SimpleMarketMaker:
         )
         lighter_client.setup_order_update_handler(self._handle_lighter_order_update)
         self._lighter_client = lighter_client
+        self._validate_robinhood_credentials(lighter_client)
+        self._initialize_runtime_state(lighter_client.account_index)
+        self._acquire_instance_lock()
+        self._load_ownership_state()
         await self._lighter_client.connect()
         await self._ensure_lighter_account_tier()
         contract_id, tick_size = await self._lighter_client.get_contract_attributes()
         trading_config.contract_id = contract_id
         trading_config.tick_size = tick_size
+        runtime_step = self._runtime_quantity_step()
+        if runtime_step is not None and runtime_step > 0:
+            self._quantity_step = runtime_step
+        await self._reconcile_startup_orders()
         await self._configure_lighter_leverage()
         await self._lighter_client.wait_for_market_data(timeout=10)
 
@@ -442,8 +674,299 @@ class SimpleMarketMaker:
             "INFO",
         )
 
+    def _initialize_runtime_state(self, account_index: int) -> None:
+        configured = self.settings.ownership_state_path
+        if configured:
+            state_path = Path(configured).expanduser()
+            if not state_path.is_absolute():
+                state_path = PROJECT_ROOT / state_path
+        else:
+            ticker = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.settings.lighter_ticker.upper())
+            state_path = PROJECT_ROOT / "logs" / f"rh_lighter_maker_{account_index}_{ticker}.json"
+        self._ownership_state_path = state_path.resolve()
+        self._instance_lock_path = self._ownership_state_path.with_suffix(
+            self._ownership_state_path.suffix + ".lock"
+        )
+
+    @staticmethod
+    def _process_exists(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if os.name == "nt":
+            # ``os.kill(pid, 0)`` is not a non-destructive probe on Windows;
+            # use a query-only process handle instead.
+            try:
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    return True
+                return ctypes.get_last_error() == 5  # access denied => process exists
+            except Exception:
+                return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        return True
+
+    def _acquire_instance_lock(self) -> None:
+        path = self._instance_lock_path
+        if path is None:
+            raise RuntimeError("Maker runtime state path was not initialized")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        token = secrets.token_hex(16)
+        payload = json.dumps({"pid": os.getpid(), "token": token})
+
+        for _ in range(2):
+            try:
+                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                try:
+                    existing = json.loads(path.read_text(encoding="utf-8"))
+                    existing_pid = int(existing.get("pid", 0))
+                except Exception:
+                    existing_pid = 0
+                if existing_pid and self._process_exists(existing_pid):
+                    raise RuntimeError(
+                        f"Another Robinhood maker process is already running for this account "
+                        f"(pid={existing_pid}, lock='{path}')"
+                    )
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            os.write(fd, payload.encode("utf-8"))
+            self._instance_lock_fd = fd
+            self._instance_lock_token = token
+            return
+
+        raise RuntimeError(f"Unable to acquire maker instance lock '{path}'")
+
+    def _release_instance_lock(self) -> None:
+        fd = self._instance_lock_fd
+        self._instance_lock_fd = None
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+        path = self._instance_lock_path
+        if path is None or not self._instance_lock_token:
+            return
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if existing.get("token") == self._instance_lock_token:
+                path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            self.logger.log(f"Failed to release maker instance lock '{path}': {exc}", "ERROR")
+        finally:
+            self._instance_lock_token = ""
+
+    def _load_ownership_state(self) -> None:
+        path = self._ownership_state_path
+        if path is None or not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            values = payload.get("client_order_indices", [])
+            if not isinstance(values, list):
+                raise ValueError("client_order_indices must be a list")
+            loaded: set[str] = set()
+            for value in values:
+                normalized = str(int(value))
+                if not 0 <= int(normalized) < (1 << 48):
+                    raise ValueError(f"client order index is outside uint48: {value!r}")
+                loaded.add(normalized)
+        except Exception as exc:
+            raise RuntimeError(f"Invalid maker ownership state '{path}': {exc}") from exc
+        self._own_client_order_indices.update(loaded)
+
+    def _persist_ownership_state(self) -> None:
+        path = self._ownership_state_path
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "account_index": getattr(self._lighter_client, "account_index", None),
+            "ticker": self.settings.lighter_ticker.upper(),
+            "client_order_indices": sorted(
+                self._own_client_order_indices,
+                key=lambda value: int(value),
+            ),
+            "updated_at_ms": int(time.time() * 1000),
+        }
+        temp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            os.replace(temp_path, path)
+            if os.name != "nt":
+                os.chmod(path, 0o600)
+        except Exception:
+            with contextlib.suppress(OSError):
+                temp_path.unlink()
+            raise
+
+    def _remember_owned_client_index(self, value: Any) -> str:
+        normalized = str(int(value))
+        if not 0 <= int(normalized) < (1 << 48):
+            raise ValueError(f"Lighter client_order_index is outside uint48: {value!r}")
+        self._own_client_order_indices.add(normalized)
+        self._persist_ownership_state()
+        return normalized
+
+    def _discard_owned_client_index(self, value: Any) -> None:
+        if value is None:
+            return
+        try:
+            normalized = str(int(value))
+        except (TypeError, ValueError):
+            normalized = str(value).strip()
+        if normalized and normalized in self._own_client_order_indices:
+            self._own_client_order_indices.discard(normalized)
+            self._persist_ownership_state()
+
+    async def _reconcile_startup_orders(self) -> None:
+        assert self._lighter_client is not None
+        assert self._lighter_config is not None
+
+        saved_indices = set(self._own_client_order_indices)
+        active_orders: list[Any] = []
+        deadline = time.monotonic() + max(
+            0.5,
+            float(self.settings.order_ack_timeout_seconds),
+        )
+        last_error: Optional[BaseException] = None
+        while True:
+            try:
+                active_orders = await self._lighter_client.get_active_orders(
+                    self._lighter_config.contract_id
+                )
+                last_error = None
+            except Exception as exc:
+                last_error = exc
+
+            if last_error is None:
+                unmanaged = [order for order in active_orders if not self._is_own_order(order)]
+                if unmanaged:
+                    order_ids = [str(getattr(order, "order_id", "unknown")) for order in unmanaged]
+                    raise RuntimeError(
+                        "Robinhood maker requires an exclusive clean market account; "
+                        f"found unmanaged active order(s): {order_ids}. Cancel them or use a dedicated account."
+                    )
+
+                active_owned_indices = {
+                    client_index
+                    for client_index in (self._order_client_index(order) for order in active_orders)
+                    if client_index is not None
+                }
+                if not saved_indices or saved_indices & active_owned_indices:
+                    break
+
+            if time.monotonic() >= deadline:
+                if last_error is not None:
+                    raise RuntimeError(
+                        f"Could not reconcile persisted maker orders during startup: {last_error}"
+                    ) from last_error
+                raise RuntimeError(
+                    "Persisted maker order IDs were not visible after the reconciliation window; "
+                    "manual order-status review is required before restarting"
+                )
+            await asyncio.sleep(0.25)
+
+        active_owned_indices = {
+            client_index
+            for client_index in (self._order_client_index(order) for order in active_orders)
+            if client_index is not None
+        }
+        if saved_indices - active_owned_indices:
+            # A persisted ID can be absent only after the exchange has
+            # answered consistently for the full window. Keep it in state and
+            # stop instead of forgetting an order whose REST visibility lagged.
+            raise RuntimeError(
+                "Persisted maker order reconciliation is incomplete; refusing to quote"
+            )
+
+        if not active_orders:
+            self._tracked_orders.clear()
+            self._persist_ownership_state()
+            return
+
+        for order in active_orders:
+            client_index = self._order_client_index(order)
+            if client_index is None:
+                continue
+            side = str(getattr(order, "side", "")).lower()
+            if side not in {"buy", "sell"}:
+                continue
+            self._tracked_orders.setdefault(
+                side,
+                ActiveOrder(
+                    order_id=str(order.order_id),
+                    price=Decimal(str(order.price)),
+                    side=side,
+                    client_order_index=client_index,
+                    created_at=0.0,
+                    confirmed=True,
+                ),
+            )
+
+        self.logger.log(
+            f"Found {len(active_orders)} persisted maker quote(s); cancelling before restart",
+            "WARNING",
+        )
+        await self._cancel_all_orders(reconciliation_attempts=12)
+
+    @staticmethod
+    def _validate_robinhood_credentials(client: LighterClient) -> None:
+        """Reject reserved key indexes and placeholder/malformed RH keys."""
+
+        account_index = getattr(client, "account_index", None)
+        if not isinstance(account_index, int) or account_index < 0:
+            raise ValueError(f"Invalid Robinhood Lighter account index: {account_index!r}")
+
+        key_map = getattr(client, "api_private_keys", None)
+        if not isinstance(key_map, dict) or not key_map:
+            raise ValueError("Robinhood Lighter API credentials are missing")
+        invalid_indexes = sorted(
+            index
+            for index in key_map
+            if not isinstance(index, int) or index < 4 or index > 254
+        )
+        if invalid_indexes:
+            raise ValueError(
+                "Robinhood Lighter API key indexes must be in the conservative range 4..254; "
+                f"invalid indexes: {invalid_indexes}"
+            )
+        invalid_key_indexes = [
+            index
+            for index, private_key in key_map.items()
+            if re.fullmatch(r"0x[0-9a-fA-F]{64}", str(private_key).strip()) is None
+        ]
+        if invalid_key_indexes:
+            raise ValueError(
+                "Robinhood Lighter API private keys must use 0x followed by 64 hexadecimal characters; "
+                f"invalid key indexes: {sorted(invalid_key_indexes)}"
+            )
+
     async def _ensure_lighter_account_tier(self) -> None:
         if self._lighter_client is None:
+            return
+
+        # Account-tier changes require a deliberate operator action and, on
+        # Robinhood, can require an empty account plus a cooldown. Never turn a
+        # small maker deployment into an account-management transaction.
+        if (self.settings.lighter_environment or "").strip().lower() == "robinhood":
+            self.logger.log("Skipping automatic Robinhood account-tier changes", "INFO")
             return
 
         target_tier = os.getenv("LIGHTER_TARGET_ACCOUNT_TIER", "premium") or "premium"
@@ -512,9 +1035,13 @@ class SimpleMarketMaker:
             try:
                 leverage_limits = cast(Dict[str, Optional[int]], limits_getter())
             except Exception as exc:  # pragma: no cover - defensive logging
+                if self.settings.lighter_leverage is not None:
+                    raise RuntimeError(f"Failed to load Lighter leverage limits: {exc}") from exc
                 self.logger.log(f"Failed to load Lighter leverage limits: {exc}", "WARNING")
                 return
         else:  # pragma: no cover - unexpected SDK change
+            if self.settings.lighter_leverage is not None:
+                raise RuntimeError("Current Lighter client does not expose leverage metadata")
             self.logger.log(
                 "Current Lighter client does not expose leverage metadata; skipping auto configuration",
                 "WARNING",
@@ -524,27 +1051,47 @@ class SimpleMarketMaker:
         max_leverage = leverage_limits.get("max")
         default_leverage = leverage_limits.get("default")
         if max_leverage in (None, 0):
+            if self.settings.lighter_leverage is not None:
+                raise RuntimeError(
+                    "Unable to determine Lighter max leverage from live market metadata"
+                )
             self.logger.log(
                 "Unable to determine Lighter max leverage from market metadata; set leverage manually if needed",
                 "WARNING",
             )
             return
 
-        try:
+        if self.settings.lighter_leverage is None:
             target_leverage = int(max_leverage)
-        except (TypeError, ValueError):
-            self.logger.log(f"Invalid Lighter leverage limit received: {max_leverage}", "WARNING")
-            return
+        else:
+            try:
+                target_leverage = int(self.settings.lighter_leverage)
+            except (TypeError, ValueError):
+                self.logger.log(
+                    f"Invalid configured Lighter leverage: {self.settings.lighter_leverage}",
+                    "ERROR",
+                )
+                return
 
         if target_leverage <= 0:
             self.logger.log(f"Ignoring non-positive Lighter leverage limit: {target_leverage}", "WARNING")
             return
 
         default_display = str(default_leverage) if default_leverage is not None else "unknown"
-        self.logger.log(
-            f"Targeting Lighter max leverage {target_leverage}x (default {default_display}x)",
-            "INFO",
-        )
+        if target_leverage > int(max_leverage):
+            raise ValueError(
+                f"Configured Lighter leverage {target_leverage}x exceeds market maximum {max_leverage}x"
+            )
+        if self.settings.lighter_leverage is None:
+            self.logger.log(
+                f"Targeting Lighter max leverage {target_leverage}x (default {default_display}x)",
+                "INFO",
+            )
+        else:
+            self.logger.log(
+                f"Targeting Lighter leverage {target_leverage}x (market max {max_leverage}x, default {default_display}x)",
+                "INFO",
+            )
 
         await self._ensure_lighter_leverage(target_leverage)
 
@@ -552,28 +1099,25 @@ class SimpleMarketMaker:
         if leverage <= 0:
             return
         if self._lighter_client is None or self._lighter_config is None:
-            self.logger.log("Cannot update Lighter leverage: client not initialized", "WARNING")
-            return
+            raise RuntimeError("Cannot update Lighter leverage: client not initialized")
 
         signer_client = getattr(self._lighter_client, "lighter_client", None)
         if signer_client is None:
-            self.logger.log("Cannot update Lighter leverage: signer client unavailable", "WARNING")
-            return
+            raise RuntimeError("Cannot update Lighter leverage: signer client unavailable")
 
         contract_id = getattr(self._lighter_config, "contract_id", None)
         if contract_id is None:
-            self.logger.log("Cannot update Lighter leverage: contract id not resolved", "ERROR")
-            return
+            raise RuntimeError("Cannot update Lighter leverage: contract id not resolved")
         try:
             market_index = int(contract_id)
         except (TypeError, ValueError):
-            self.logger.log(f"Cannot update Lighter leverage: invalid contract id '{contract_id}'", "ERROR")
-            return
+            raise RuntimeError(
+                f"Cannot update Lighter leverage: invalid contract id '{contract_id}'"
+            )
 
         margin_mode = getattr(signer_client, "CROSS_MARGIN_MODE", None)
         if margin_mode is None:
-            self.logger.log("Cannot update Lighter leverage: margin mode unavailable", "WARNING")
-            return
+            raise RuntimeError("Cannot update Lighter leverage: margin mode unavailable")
 
         try:
             tx_info, _, err = await signer_client.update_leverage(
@@ -582,8 +1126,9 @@ class SimpleMarketMaker:
                 int(leverage),
             )
         except Exception as exc:  # pragma: no cover - network/SDK failures
-            self.logger.log(f"Failed to update Lighter leverage to {leverage}x: {exc}", "ERROR")
-            return
+            raise RuntimeError(
+                f"Failed to update Lighter leverage to {leverage}x: {exc}"
+            ) from exc
 
         if err is not None:
             message = str(err)
@@ -595,8 +1140,7 @@ class SimpleMarketMaker:
                 )
                 return
 
-            self.logger.log(f"Failed to update Lighter leverage to {leverage}x: {message}", "ERROR")
-            return
+            raise RuntimeError(f"Failed to update Lighter leverage to {leverage}x: {message}")
 
         self.logger.log(
             f"Lighter leverage updated to {leverage}x (tx={tx_info})",
@@ -614,26 +1158,50 @@ class SimpleMarketMaker:
             await task
 
     async def stop(self) -> None:
-        if not self._running:
-            await self._shutdown_state_task()
-            if self._session and not self._session.closed:
-                await self._session.close()
+        if self._stop_completed:
+            if self._stop_error is not None:
+                raise self._stop_error
             return
 
         self._running = False
         await self._shutdown_state_task()
+        shutdown_errors: list[BaseException] = []
+
+        if (
+            self._lighter_client is not None
+            and self._lighter_config is not None
+            and getattr(self._lighter_config, "contract_id", "")
+        ):
+            try:
+                await self._cancel_all_orders(reconciliation_attempts=12)
+            except Exception as exc:
+                shutdown_errors.append(exc)
+
+        if self._lighter_client is not None:
+            try:
+                await self._lighter_client.disconnect()
+            except Exception as exc:
+                shutdown_errors.append(exc)
 
         try:
-            if self._lighter_client is not None:
-                await self._lighter_client.disconnect()
-        finally:
             if self._session and not self._session.closed:
                 await self._session.close()
+        except Exception as exc:
+            shutdown_errors.append(exc)
+
+        self._release_instance_lock()
+
+        self._stop_completed = True
+        if shutdown_errors:
+            detail = "; ".join(str(error) for error in shutdown_errors)
+            self._stop_error = RuntimeError(f"Market-maker shutdown was not clean: {detail}")
+            raise self._stop_error from shutdown_errors[0]
 
     async def run(self) -> None:
         if not self._running:
             raise RuntimeError("SimpleMarketMaker.start() must be called first")
 
+        completed_iterations = 0
         try:
             while self._running:
                 try:
@@ -642,10 +1210,25 @@ class SimpleMarketMaker:
                     delay = self._handle_iteration_failure(exc)
                     if delay is None:
                         raise
+                    try:
+                        await self._cancel_all_orders(reconciliation_attempts=3)
+                    except Exception as cancel_exc:
+                        self.logger.log(
+                            "Could not confirm quote withdrawal during transient failure: "
+                            f"{cancel_exc}",
+                            "ERROR",
+                        )
                     await asyncio.sleep(delay)
                     continue
 
                 self._reset_rate_limit_backoff()
+                completed_iterations += 1
+                if self.settings.max_cycles > 0 and completed_iterations >= self.settings.max_cycles:
+                    self.logger.log(
+                        f"Completed requested maker iterations: {completed_iterations}",
+                        "INFO",
+                    )
+                    break
                 await asyncio.sleep(self.settings.loop_sleep_seconds)
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             self.logger.log("Maker loop cancelled", "WARNING")
@@ -653,7 +1236,38 @@ class SimpleMarketMaker:
             await self.stop()
 
     async def _iteration(self) -> None:
-        await self._refresh_quotes()
+        async with self._quote_operation_lock:
+            await self._refresh_quotes()
+
+    async def _resolve_reference_mid(self, fallback_mid: Decimal) -> Decimal:
+        """Use Binance public midpoint, with only a short last-good cache."""
+
+        if not self.settings.use_binance_reference:
+            return fallback_mid
+        if self._binance_reference is None:
+            return Decimal("0")
+
+        now = time.monotonic()
+        try:
+            reference_mid = await asyncio.wait_for(
+                self._binance_reference.fetch_mid_price(),
+                timeout=max(0.1, self.settings.binance_reference_timeout_seconds),
+            )
+            if reference_mid > 0:
+                self._last_binance_reference_mid = reference_mid
+                self._last_binance_reference_time = now
+                return reference_mid
+        except Exception as exc:  # pragma: no cover - network dependent
+            self.logger.log(f"Binance public reference unavailable: {exc}", "WARNING")
+
+        # Keep a very short stale window so a transient Binance hiccup does not
+        # immediately jump quotes while avoiding reliance on old lead prices.
+        if (
+            self._last_binance_reference_mid > 0
+            and now - self._last_binance_reference_time <= max(self.settings.loop_sleep_seconds * 2.0, 5.0)
+        ):
+            return self._last_binance_reference_mid
+        return Decimal("0")
 
     async def _refresh_quotes(self) -> None:
         assert self._lighter_client is not None
@@ -662,7 +1276,6 @@ class SimpleMarketMaker:
         hot_update = await self._load_hot_update()
         if not hot_update.get("cycle_enabled", True):
             self.logger.log("Cycle paused via hot update; sleeping", "WARNING")
-            self._tracked_orders.clear()
             await self._cancel_all_orders()
             return
 
@@ -680,7 +1293,11 @@ class SimpleMarketMaker:
         best_bid, best_ask = await self._lighter_client.fetch_bbo_prices(contract_id)
 
         if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
-            self.logger.log("Invalid Lighter depth snapshot; skipping iteration", "WARNING")
+            self.logger.log(
+                "Invalid Lighter depth snapshot; cancelling own quotes until the book recovers",
+                "WARNING",
+            )
+            await self._cancel_all_orders()
             return
 
         now = time.time()
@@ -689,37 +1306,144 @@ class SimpleMarketMaker:
             await self._refresh_state_if_needed(max_age=max_age)
 
         net_position = self._latest_net_position
+        if not self._inventory_state_known:
+            self.logger.log(
+                "Inventory state is unknown; cancelling own quotes and waiting for reconciliation",
+                "WARNING",
+            )
+            await self._cancel_all_orders()
+            return
+        if self.settings.enable_binance_hedge and not self._binance_state_known:
+            self.logger.log(
+                "Binance hedge position is unknown; cancelling own quotes until reconciliation",
+                "WARNING",
+            )
+            await self._cancel_all_orders()
+            return
 
-        mid_price = (best_bid + best_ask) / 2
-        self._lighter_last_mark_price = mid_price
+        lighter_mid = (best_bid + best_ask) / 2
+        mid_price = await self._resolve_reference_mid(lighter_mid)
+        if mid_price <= 0:
+            self.logger.log(
+                "Binance reference is stale; cancelling own quotes until it recovers",
+                "WARNING",
+            )
+            await self._cancel_all_orders()
+            return
+        self._lighter_last_mark_price = lighter_mid
         spread_scale = self._resolve_spread_scale(hot_update)
-        targets = compute_target_prices(mid_price, spread_scale, self._lighter_config.tick_size)
-
         inventory_cap = self.settings.effective_inventory_limit()
-        bid_enabled = should_enable_side(net_position, inventory_cap, "buy")
-        ask_enabled = should_enable_side(net_position, inventory_cap, "sell")
+        mid_price = apply_inventory_skew(
+            mid_price,
+            net_position,
+            inventory_cap,
+            self.settings.inventory_skew_bps,
+        )
+        targets = compute_target_prices(mid_price, spread_scale, self._lighter_config.tick_size)
+        targets = clamp_maker_targets(
+            targets,
+            best_bid,
+            best_ask,
+            self._lighter_config.tick_size,
+        )
 
-        await self._sync_side("buy", targets["buy"], bid_enabled)
-        await self._sync_side("sell", targets["sell"], ask_enabled)
+        max_quote_quantity = self._max_quote_quantity()
+        bid_quote_quantity = self._normalize_order_quantity(
+            max_quote_quantity,
+            targets["buy"],
+        )
+        ask_quote_quantity = self._normalize_order_quantity(
+            max_quote_quantity,
+            targets["sell"],
+        )
+        bid_enabled = side_has_inventory_capacity(
+            net_position,
+            inventory_cap,
+            "buy",
+            bid_quote_quantity,
+        )
+        ask_enabled = side_has_inventory_capacity(
+            net_position,
+            inventory_cap,
+            "sell",
+            ask_quote_quantity,
+        )
+
+        # One active-order snapshot per iteration avoids two authenticated REST
+        # reads and reduces rate-limit pressure during quote refreshes.
+        active_orders = await self._lighter_client.get_active_orders(contract_id)
+        await self._sync_side("buy", targets["buy"], bid_enabled, active_orders=active_orders)
+        await self._sync_side("sell", targets["sell"], ask_enabled, active_orders=active_orders)
 
         await self._maybe_execute_hedge(net_position)
 
-    async def _sync_side(self, side: str, target_price: Decimal, enabled: bool) -> None:
+    async def _sync_side(
+        self,
+        side: str,
+        target_price: Decimal,
+        enabled: bool,
+        *,
+        active_orders: Optional[Iterable[Any]] = None,
+    ) -> None:
         assert self._lighter_client is not None
         assert self._lighter_config is not None
 
-        active_orders = await self._lighter_client.get_active_orders(self._lighter_config.contract_id)
-        relevant_orders = [order for order in active_orders if order.side == side]
-        replace_threshold = self._lighter_config.tick_size * Decimal(self.settings.order_refresh_ticks)
+        if active_orders is None:
+            active_orders = await self._lighter_client.get_active_orders(self._lighter_config.contract_id)
+        side_orders = [order for order in active_orders if order.side == side]
+        unmanaged_orders = [order for order in side_orders if not self._is_own_order(order, side)]
+        if unmanaged_orders:
+            self.logger.log(
+                f"Leaving {len(unmanaged_orders)} unmanaged {side} order(s) untouched",
+                "WARNING",
+            )
+        relevant_orders = [order for order in side_orders if self._is_own_order(order, side)]
+        pending = self._tracked_orders.get(side)
+        if not relevant_orders and pending is not None:
+            pending_age = max(0.0, time.monotonic() - pending.created_at)
+            if not pending.confirmed:
+                if pending_age <= self.settings.order_ack_timeout_seconds:
+                    return
+                raise RuntimeError(
+                    f"Lighter {side} quote {pending.client_order_index or pending.order_id} "
+                    f"was not confirmed within {self.settings.order_ack_timeout_seconds:.1f}s"
+                )
+            # A confirmed order disappearing from one active-order snapshot is
+            # not proof that it filled or cancelled. Keep the side blocked and
+            # fail closed after a second miss rather than stacking a replacement
+            # on top of a quote that may still be resting.
+            pending.missing_active_snapshots += 1
+            if pending.missing_active_snapshots <= 2:
+                return
+            raise RuntimeError(
+                f"Confirmed Lighter {side} quote {pending.client_order_index or pending.order_id} "
+                "disappeared from active-order reconciliation without a terminal update"
+            )
+        if unmanaged_orders and not relevant_orders:
+            # Do not submit another quote beside an order this process cannot
+            # prove it owns (for example, after a restart).
+            self._tracked_orders.pop(side, None)
+            return
+        replace_threshold = max(
+            self._lighter_config.tick_size * Decimal(self.settings.order_refresh_ticks),
+            abs(target_price) * self.settings.order_refresh_bps / Decimal("10000"),
+        )
 
         if side not in self._allowed_sides:
             for order in relevant_orders:
                 try:
-                    await self._lighter_client.cancel_order(order.order_id)
-                    self.logger.log(
-                        f"Cancelled {side} order {order.order_id} due to side whitelist",
-                        "INFO",
-                    )
+                    cancel_result = await self._lighter_client.cancel_order(order.order_id)
+                    if getattr(cancel_result, "success", False):
+                        self.logger.log(
+                            f"Requested cancellation of {side} order {order.order_id} due to side whitelist",
+                            "INFO",
+                        )
+                    else:
+                        self.logger.log(
+                            f"Failed to request cancellation of {side} order {order.order_id}: "
+                            f"{getattr(cancel_result, 'error_message', 'unknown error')}",
+                            "ERROR",
+                        )
                 except Exception as exc:  # pragma: no cover - defensive
                     self.logger.log(f"Failed to cancel order {order.order_id}: {exc}", "ERROR")
             if side in self._tracked_orders:
@@ -727,17 +1451,57 @@ class SimpleMarketMaker:
             return
 
         kept: Iterable[ActiveOrder] = ()
+        cancellation_attempted = False
         for idx, order in enumerate(relevant_orders):
             price_diff = abs(order.price - target_price)
-            keep = enabled and idx == 0 and price_diff <= replace_threshold
+            previous = self._tracked_orders.get(side)
+            client_index = self._order_client_index(order)
+            same_order = previous is not None and (
+                previous.order_id == str(order.order_id)
+                or (
+                    client_index is not None
+                    and previous.client_order_index == client_index
+                )
+            )
+            created_at = previous.created_at if same_order else time.monotonic()
+            quote_age = max(0.0, time.monotonic() - created_at)
+            in_minimum_lifetime = quote_age < self.settings.min_quote_lifetime_seconds
+            emergency_threshold = max(
+                replace_threshold,
+                abs(target_price) * Decimal("2") / Decimal("10000"),
+            )
+            keep_for_lifetime = in_minimum_lifetime and price_diff < emergency_threshold
+            keep = enabled and idx == 0 and (
+                price_diff <= replace_threshold or keep_for_lifetime
+            )
             if keep:
-                self._tracked_orders[side] = ActiveOrder(order_id=order.order_id, price=order.price, side=side)
+                self._tracked_orders[side] = ActiveOrder(
+                    order_id=order.order_id,
+                    price=order.price,
+                    side=side,
+                    client_order_index=client_index,
+                    created_at=created_at,
+                    confirmed=True,
+                    missing_active_snapshots=0,
+                )
                 kept = (self._tracked_orders[side],)
                 continue
             try:
-                await self._lighter_client.cancel_order(order.order_id)
-                self.logger.log(f"Cancelled stale {side} order {order.order_id}", "INFO")
+                cancel_result = await self._lighter_client.cancel_order(order.order_id)
+                cancellation_attempted = True
+                if getattr(cancel_result, "success", False):
+                    self.logger.log(
+                        f"Requested cancellation of stale {side} order {order.order_id}",
+                        "INFO",
+                    )
+                else:
+                    self.logger.log(
+                        f"Failed to request cancellation of {side} order {order.order_id}: "
+                        f"{getattr(cancel_result, 'error_message', 'unknown error')}",
+                        "ERROR",
+                    )
             except Exception as exc:
+                cancellation_attempted = True
                 self.logger.log(f"Failed to cancel order {order.order_id}: {exc}", "ERROR")
 
         if not enabled:
@@ -746,6 +1510,12 @@ class SimpleMarketMaker:
             return
 
         if kept:
+            return
+
+        # A send acknowledgement is not a sequencer cancellation confirmation.
+        # Never stack a replacement beside an order cancelled in this same
+        # iteration; the next active-order snapshot must prove it disappeared.
+        if cancellation_attempted:
             return
 
         if self._fill_cooldown_seconds > 0:
@@ -762,16 +1532,88 @@ class SimpleMarketMaker:
                 )
                 return
 
-        order_quantity = self._resolve_order_quantity()
+        # PAUSE/FLATTEN can arrive while this iteration is awaiting market or
+        # account data. Recheck immediately before the only state-changing
+        # operation so a command cannot be followed by a late replacement.
+        if self._external_pause or self._flatten_active:
+            return
+
+        order_quantity = self._normalize_order_quantity(
+            self._resolve_order_quantity(),
+            target_price,
+        )
+        if order_quantity <= 0:
+            self.logger.log(
+                f"Skipping {side} quote: quantity is below the runtime market minimum",
+                "WARNING",
+            )
+            return
+
+        place_kwargs: Dict[str, Any] = {"time_in_force": "post_only"}
+        reserved_client_index: Optional[str] = None
+        reserve_client_index = getattr(
+            self._lighter_client,
+            "reserve_client_order_index",
+            None,
+        )
+        if callable(reserve_client_index):
+            reserved_client_index = self._remember_owned_client_index(
+                reserve_client_index()
+            )
+            place_kwargs["client_order_index"] = int(reserved_client_index)
+            # Persist ownership and install the pending guard before the
+            # network call. A kill -9 after send therefore remains recoverable
+            # on the next startup.
+            self._tracked_orders[side] = ActiveOrder(
+                order_id=reserved_client_index,
+                price=target_price,
+                side=side,
+                client_order_index=reserved_client_index,
+                created_at=time.monotonic(),
+                confirmed=False,
+                missing_active_snapshots=0,
+            )
+
         order_result = await self._lighter_client.place_limit_order(
             self._lighter_config.contract_id,
             order_quantity,
             target_price,
             side,
+            **place_kwargs,
         )
         if not order_result.success:
             self.logger.log(f"Failed to place {side} order: {order_result.error_message}", "ERROR")
             return
+        if order_result.order_id:
+            if (
+                reserved_client_index is not None
+                and reserved_client_index not in self._own_client_order_indices
+            ):
+                self.logger.log(
+                    f"Lighter {side} quote reached a terminal state before send acknowledgement",
+                    "WARNING",
+                )
+                return
+            returned_client_index = self._remember_owned_client_index(order_result.order_id)
+            if (
+                reserved_client_index is not None
+                and returned_client_index != reserved_client_index
+            ):
+                self._discard_owned_client_index(reserved_client_index)
+            existing = self._tracked_orders.get(side)
+            if (
+                existing is None
+                or existing.client_order_index != returned_client_index
+            ):
+                self._tracked_orders[side] = ActiveOrder(
+                    order_id=returned_client_index,
+                    price=target_price,
+                    side=side,
+                    client_order_index=returned_client_index,
+                    created_at=time.monotonic(),
+                    confirmed=False,
+                    missing_active_snapshots=0,
+                )
         price_display = self._format_decimal(target_price, 6)
         qty_display = self._format_decimal(order_quantity, 6)
         self.logger.log(
@@ -785,6 +1627,10 @@ class SimpleMarketMaker:
         if self._hedger is None:
             return
 
+        now = time.monotonic()
+        if now - self._last_hedge_timestamp < self.settings.hedge_cooldown_seconds:
+            return
+
         combined_position = net_position + self._binance_position_estimate
         hedge_qty = required_hedge_quantity(
             combined_position,
@@ -794,8 +1640,15 @@ class SimpleMarketMaker:
         if hedge_qty <= 0:
             return
 
+        max_hedge_quantity = self.settings.max_hedge_quantity
+        if max_hedge_quantity is not None and max_hedge_quantity > 0:
+            hedge_qty = min(hedge_qty, max_hedge_quantity)
+
         hedge_side = "SELL" if combined_position > 0 else "BUY"
         raw_hedge_qty = hedge_qty
+        # Throttle attempts as well as successful fills. Repeatedly retrying an
+        # uncertain cross-venue response is riskier than waiting to reconcile.
+        self._last_hedge_timestamp = now
         try:
             hedge_qty = await self._hedger.prepare_market_quantity(hedge_qty)
         except Exception as exc:
@@ -839,6 +1692,7 @@ class SimpleMarketMaker:
                 self._lighter_last_mark_price,
             )
             self._binance_position_estimate += signed_qty
+            self._binance_state_known = True
             if fill_price > 0:
                 self._binance_last_mark_price = fill_price
             self._apply_binance_fill_to_session_pnl(signed_qty, fill_price)
@@ -863,6 +1717,7 @@ class SimpleMarketMaker:
                 "INFO",
             )
         except Exception as exc:
+            self._binance_state_known = False
             self.logger.log(f"Binance hedge failed: {exc}", "ERROR")
 
     async def _update_state_once(self, force: bool = False) -> None:
@@ -878,7 +1733,9 @@ class SimpleMarketMaker:
                 position_size = await self._lighter_client.get_account_positions()
             except Exception as pos_exc:
                 self.logger.log(f"Failed to fetch Lighter account position fallback: {pos_exc}", "ERROR")
-                position_size = Decimal("0")
+                self._inventory_state_known = False
+                self._latest_net_position_time = 0.0
+                return
             metrics = {
                 "position_size": position_size,
                 "available_balance": Decimal("0"),
@@ -892,6 +1749,8 @@ class SimpleMarketMaker:
                 "unrealized_pnl": Decimal("0"),
                 "realized_pnl": Decimal("0"),
             }
+
+        self._inventory_state_known = True
 
         self._latest_metrics = metrics
         self._latest_net_position = metrics.get("position_size", self._latest_net_position)
@@ -946,16 +1805,116 @@ class SimpleMarketMaker:
 
             await asyncio.sleep(self._state_refresh_interval)
 
-    async def _cancel_all_orders(self) -> None:
+    async def _cancel_all_orders(self, *, reconciliation_attempts: int = 3) -> None:
         assert self._lighter_client is not None
         assert self._lighter_config is not None
-        active_orders = await self._lighter_client.get_active_orders(self._lighter_config.contract_id)
-        for order in active_orders:
+        if not self._own_client_order_indices and not self._tracked_orders:
+            return
+        attempts = max(1, int(reconciliation_attempts))
+        observed_client_indices: set[str] = set()
+        cancel_requested_order_ids: set[str] = set()
+        last_query_error: Optional[BaseException] = None
+
+        for attempt in range(attempts):
             try:
-                await self._lighter_client.cancel_order(order.order_id)
+                active_orders = await self._lighter_client.get_active_orders(
+                    self._lighter_config.contract_id
+                )
             except Exception as exc:
-                self.logger.log(f"Failed to cancel order {order.order_id}: {exc}", "ERROR")
-        self._tracked_orders.clear()
+                last_query_error = exc
+                self.logger.log(
+                    f"Failed to reconcile active orders during cancellation: {exc}",
+                    "ERROR",
+                )
+                if attempt + 1 < attempts:
+                    await asyncio.sleep(0.25)
+                continue
+
+            last_query_error = None
+            own_orders = [
+                order
+                for order in active_orders
+                if self._is_own_order(order, getattr(order, "side", None))
+            ]
+            active_client_indices = {
+                client_index
+                for client_index in (self._order_client_index(order) for order in own_orders)
+                if client_index is not None
+            }
+
+            for client_index in observed_client_indices - active_client_indices:
+                self._discard_owned_client_index(client_index)
+                self._forget_tracked_order("", client_index)
+
+            for order in own_orders:
+                client_index = self._order_client_index(order)
+                if client_index:
+                    observed_client_indices.add(client_index)
+                order_id = str(order.order_id)
+                if order_id in cancel_requested_order_ids:
+                    continue
+                try:
+                    result = await self._lighter_client.cancel_order(order.order_id)
+                    if getattr(result, "success", False):
+                        cancel_requested_order_ids.add(order_id)
+                    else:
+                        self.logger.log(
+                            f"Cancellation request failed for order {order.order_id}: "
+                            f"{getattr(result, 'error_message', 'unknown error')}",
+                            "ERROR",
+                        )
+                except Exception as exc:
+                    self.logger.log(f"Failed to cancel order {order.order_id}: {exc}", "ERROR")
+
+            if not self._own_client_order_indices and not self._tracked_orders:
+                return
+            if attempt + 1 < attempts:
+                await asyncio.sleep(0.25)
+
+        unresolved = sorted(
+            self._own_client_order_indices
+            | {
+                tracked.client_order_index or tracked.order_id
+                for tracked in self._tracked_orders.values()
+            }
+        )
+        if unresolved:
+            detail = (
+                f"; last reconciliation error: {last_query_error}"
+                if last_query_error is not None
+                else ""
+            )
+            raise RuntimeError(
+                f"Could not confirm cancellation of {len(unresolved)} own quote(s): {unresolved}{detail}"
+            )
+
+    @staticmethod
+    def _order_client_index(order: Any) -> Optional[str]:
+        value = getattr(order, "client_order_index", None)
+        if value is None and isinstance(order, dict):
+            value = order.get("client_order_index") or order.get("clientOrderIndex")
+        if value is None:
+            return None
+        try:
+            text = str(int(value))
+        except (TypeError, ValueError):
+            text = str(value).strip()
+        return text or None
+
+    def _is_own_order(self, order: Any, side: Optional[str] = None) -> bool:
+        """Return whether an active order belongs to this maker process."""
+
+        client_index = self._order_client_index(order)
+        if client_index is not None and client_index in self._own_client_order_indices:
+            return True
+        if side:
+            tracked = self._tracked_orders.get(side)
+            order_id = getattr(order, "order_id", None)
+            if order_id is None and isinstance(order, dict):
+                order_id = order.get("order_id") or order.get("id")
+            if tracked is not None and str(order_id or "") == tracked.order_id:
+                return True
+        return False
 
     async def _load_hot_update(self) -> Dict[str, Any]:
         source = self.settings.config_path
@@ -1059,6 +2018,12 @@ class SimpleMarketMaker:
         self._lighter_inventory_base = new_pos
         self._lighter_avg_entry_price = new_avg
         self._lighter_session_realized_pnl = new_realized
+        # Private fills arrive before the slower account REST refresh. Feed the
+        # signed delta into the quote risk gate immediately; the next account
+        # snapshot remains authoritative and will correct any discrepancy.
+        self._latest_net_position = new_pos
+        self._latest_net_position_time = time.time()
+        self._inventory_state_known = True
 
     def _apply_binance_fill_to_session_pnl(self, signed_quantity: Decimal, price: Decimal) -> None:
         new_pos, new_avg, new_realized = self._update_session_position(
@@ -1132,19 +2097,81 @@ class SimpleMarketMaker:
                 return
 
             status = str(update.get("status", "")).upper()
-            if status not in {"FILLED", "CANCELED", "PARTIALLY_FILLED"}:
+            terminal_status = (
+                status == "FILLED"
+                or status.startswith("CANCEL")
+                or status.startswith("REJECT")
+                or status.startswith("EXPIRED")
+            )
+            working_status = status in {
+                "OPEN",
+                "PENDING",
+                "PENDING_NEW",
+                "PARTIALLY_FILLED",
+            }
+            if not terminal_status and not working_status:
                 return
 
             order_id = str(update.get("order_id") or "")
             if not order_id:
                 return
 
+            client_order_index_value = update.get("client_order_index") or update.get("clientOrderIndex")
+            client_order_index = (
+                str(client_order_index_value).strip()
+                if client_order_index_value is not None
+                else ""
+            )
+            if client_order_index:
+                if client_order_index not in self._own_client_order_indices:
+                    inflight_client_index = getattr(
+                        self._lighter_client,
+                        "current_order_client_id",
+                        None,
+                    )
+                    if str(inflight_client_index or "") != client_order_index:
+                        return
+                    # The private WS acknowledgement can win the race against
+                    # the REST send response. Adopt only the exact client id
+                    # currently being submitted by this LighterClient.
+                    client_order_index = self._remember_owned_client_index(
+                        client_order_index
+                    )
+            elif not any(tracked.order_id == order_id for tracked in self._tracked_orders.values()):
+                # Private account streams may omit the client id on older
+                # payloads. Only accept an update if the resting order index is
+                # already tracked by this process.
+                return
+
+            side = str(update.get("side") or "").lower()
+            for tracked_side, tracked in tuple(self._tracked_orders.items()):
+                if (
+                    tracked.order_id == order_id
+                    or (
+                        client_order_index
+                        and tracked.client_order_index == client_order_index
+                    )
+                ):
+                    tracked.order_id = order_id
+                    tracked.confirmed = working_status
+                    if side in {"buy", "sell"} and tracked_side != side:
+                        self._tracked_orders.pop(tracked_side, None)
+                        tracked.side = side
+                        self._tracked_orders[side] = tracked
+                    break
+
+            if working_status and status != "PARTIALLY_FILLED":
+                return
+
             filled_total = abs(self._to_decimal(update.get("filled_size")))
             previous_filled = self._lighter_order_fills.get(order_id, Decimal("0"))
             delta_filled = filled_total - previous_filled
             if delta_filled <= 0:
-                if status in {"FILLED", "CANCELED"}:
+                if terminal_status:
                     self._lighter_order_fills.pop(order_id, None)
+                    if client_order_index:
+                        self._discard_owned_client_index(client_order_index)
+                    self._forget_tracked_order(order_id, client_order_index)
                 return
 
             self._lighter_order_fills[order_id] = filled_total
@@ -1157,7 +2184,6 @@ class SimpleMarketMaker:
             if quote_delta > 0:
                 self._lighter_session_volume_quote += quote_delta
 
-            side = str(update.get("side") or "").lower()
             direction = Decimal("0")
             if side == "buy":
                 direction = Decimal("1")
@@ -1170,10 +2196,21 @@ class SimpleMarketMaker:
             if signed_quantity != 0 and price > 0:
                 self._apply_fill_to_session_pnl(signed_quantity, price)
 
-            if status in {"FILLED", "CANCELED"}:
+            if terminal_status:
                 self._lighter_order_fills.pop(order_id, None)
+                if client_order_index:
+                    self._discard_owned_client_index(client_order_index)
+                self._forget_tracked_order(order_id, client_order_index)
         except Exception as exc:  # pragma: no cover - defensive logging
             self.logger.log(f"Failed to process Lighter order update: {exc}", "ERROR")
+
+    def _forget_tracked_order(self, order_id: str, client_order_index: str) -> None:
+        for side, tracked in tuple(self._tracked_orders.items()):
+            if tracked.order_id == order_id or (
+                client_order_index
+                and tracked.client_order_index == client_order_index
+            ):
+                self._tracked_orders.pop(side, None)
 
     async def _maybe_report_metrics(self, lighter_metrics: Dict[str, Decimal], *, force: bool = False) -> None:
         now = time.time()
@@ -1186,8 +2223,10 @@ class SimpleMarketMaker:
             try:
                 binance_metrics = await self._hedger.get_account_metrics()
             except Exception as exc:
+                self._binance_state_known = False
                 self.logger.log(f"Failed to fetch Binance metrics: {exc}", "ERROR")
             else:
+                self._binance_state_known = True
                 self._binance_position_estimate = binance_metrics.get("position_size", self._binance_position_estimate)
                 wallet_balance = binance_metrics.get("wallet_balance", Decimal("0"))
                 if self._binance_initial_wallet_balance is None:
@@ -1416,12 +2455,66 @@ class SimpleMarketMaker:
     def is_paused(self) -> bool:
         return self._external_pause
 
+    async def _flatten_binance_hedge(
+        self,
+        *,
+        tolerance: Decimal,
+        max_attempts: int,
+    ) -> None:
+        if self._hedger is None:
+            return
+
+        for attempt in range(1, max_attempts + 1):
+            metrics = await self._hedger.get_account_metrics()
+            position = self._to_decimal(metrics.get("position_size"))
+            self._binance_position_estimate = position
+            self._binance_inventory_base = position
+            self._binance_state_known = True
+            if abs(position) <= tolerance:
+                return
+
+            quantity = await self._hedger.prepare_market_quantity(abs(position))
+            if quantity <= 0:
+                raise RuntimeError(
+                    f"Binance hedge position {position} is below its executable lot size"
+                )
+            side = "SELL" if position > 0 else "BUY"
+            response = await self._hedger.place_market_order(
+                side,
+                quantity,
+                reduce_only=True,
+            )
+            executed = abs(self._to_decimal(response.get("executedQty")))
+            if executed <= 0:
+                raise RuntimeError(
+                    f"Binance emergency reduce-only order did not execute (attempt {attempt})"
+                )
+            fill_price = self._resolve_binance_fill_price(
+                response,
+                executed,
+                self._binance_last_mark_price,
+            )
+            signed_fill = executed if side == "BUY" else -executed
+            if fill_price > 0:
+                self._apply_binance_fill_to_session_pnl(signed_fill, fill_price)
+                self._binance_session_volume_quote += executed * fill_price
+            self._binance_session_volume_base += executed
+
+        metrics = await self._hedger.get_account_metrics()
+        residual = self._to_decimal(metrics.get("position_size"))
+        self._binance_position_estimate = residual
+        self._binance_inventory_base = residual
+        if abs(residual) > tolerance:
+            raise RuntimeError(
+                f"Binance hedge flatten exhausted {max_attempts} attempts; residual={residual}"
+            )
+
     async def emergency_flatten(
         self,
         *,
         tolerance: Optional[Decimal] = None,
         price_offset_ticks: int = 0,
-        max_iterations: Optional[int] = None,
+        max_iterations: Optional[int] = 10,
         sleep_interval: float = 1.5,
     ) -> None:
         if self._lighter_client is None or self._lighter_config is None:
@@ -1433,14 +2526,25 @@ class SimpleMarketMaker:
                 self.logger.log("Emergency flatten already in progress; ignoring duplicate request", "WARNING")
                 return
             self._flatten_active = True
+            self.pause_trading()
+            operation_lock_acquired = False
 
             try:
+                await self._quote_operation_lock.acquire()
+                operation_lock_acquired = True
                 tick_size = self._lighter_config.tick_size
-                tol = tolerance if tolerance is not None else Decimal("0.01")
-                if tol < 0:
-                    tol = Decimal("0")
-                if tol == 0 and tick_size > 0:
-                    tol = tick_size / Decimal("10")
+                runtime_step = self._runtime_quantity_step() or self._quantity_step
+                minimum_tolerance = (
+                    runtime_step / Decimal("2")
+                    if runtime_step > 0
+                    else Decimal("0.00000001")
+                )
+                if tolerance is None:
+                    tol = minimum_tolerance
+                else:
+                    # A coordinator's generic tolerance must never classify
+                    # this maker's entire small inventory as already flat.
+                    tol = min(max(Decimal("0"), tolerance), minimum_tolerance)
 
                 self.logger.log(
                     (
@@ -1452,17 +2556,18 @@ class SimpleMarketMaker:
                     "WARNING",
                 )
 
-                self.pause_trading()
                 await self._cancel_all_orders()
                 await self._update_state_guarded(force=True)
 
-                flatten_hot_update = await self._load_hot_update()
-                spread_scale = self._resolve_spread_scale(flatten_hot_update)
-
+                attempt_limit = max(1, int(max_iterations or 10))
                 order_attempts = 0
                 while True:
                     net_position = self._lighter_inventory_base
                     if abs(net_position) <= tol:
+                        await self._flatten_binance_hedge(
+                            tolerance=tol,
+                            max_attempts=attempt_limit,
+                        )
                         self.logger.log(
                             (
                                 "Emergency flatten complete after {attempt} iterations; residual={residual}"
@@ -1474,23 +2579,23 @@ class SimpleMarketMaker:
                         )
                         break
 
-                    if max_iterations is not None and order_attempts >= max_iterations:
+                    if order_attempts >= attempt_limit:
                         residual = self._format_decimal(net_position, 6)
-                        self.logger.log(
-                            (
-                                "Emergency flatten max iterations reached; residual position {residual}"
-                            ).format(residual=residual),
-                            "ERROR",
+                        raise RuntimeError(
+                            "Emergency flatten max attempts reached; "
+                            f"residual Lighter position {residual}"
                         )
                         break
 
                     side = "sell" if net_position > 0 else "buy"
                     quantity = self._sample_flatten_quantity(net_position)
                     if quantity <= 0:
-                        self.logger.log("Emergency flatten residual quantity zero; nothing to do", "INFO")
-                        break
+                        raise RuntimeError(
+                            f"Emergency flatten residual {net_position} is not executable"
+                        )
 
-                    attempt_number = order_attempts + 1
+                    order_attempts += 1
+                    attempt_number = order_attempts
                     try:
                         best_bid, best_ask = await self._lighter_client.fetch_bbo_prices(
                             self._lighter_config.contract_id
@@ -1501,13 +2606,18 @@ class SimpleMarketMaker:
                         await self._update_state_guarded(force=True)
                         continue
 
-                    mid_price = (best_bid + best_ask) / 2
-                    price: Decimal
-                    if tick_size > 0:
-                        targets = compute_target_prices(mid_price, spread_scale, tick_size)
-                        price = targets["sell"] if side == "sell" else targets["buy"]
-                    else:  # pragma: no cover - defensive fallback
-                        price = best_bid if side == "sell" else best_ask
+                    if best_bid <= 0 or best_ask <= 0 or best_bid >= best_ask:
+                        self.logger.log(
+                            "Emergency flatten received an invalid Lighter book; retrying",
+                            "ERROR",
+                        )
+                        await asyncio.sleep(sleep_interval)
+                        await self._update_state_guarded(force=True)
+                        continue
+
+                    # IOC orders must be marketable: sell into best bid and buy
+                    # from best ask. A positive offset increases urgency.
+                    price = best_bid if side == "sell" else best_ask
 
                     if price <= 0:
                         self.logger.log("Emergency flatten aborted: invalid computed price", "ERROR")
@@ -1517,10 +2627,11 @@ class SimpleMarketMaker:
                     if tick_size > 0 and offset_ticks > 0:
                         offset = Decimal(offset_ticks) * tick_size
                         if side == "sell":
-                            price = price + offset
-                        else:
                             price = max(tick_size, price - offset)
-                        price = price.quantize(tick_size, rounding=ROUND_HALF_UP)
+                            price = price.quantize(tick_size, rounding=ROUND_DOWN)
+                        else:
+                            price = price + offset
+                            price = price.quantize(tick_size, rounding=ROUND_UP)
 
                     try:
                         order_result = await self._lighter_client.place_limit_order(
@@ -1528,6 +2639,8 @@ class SimpleMarketMaker:
                             quantity,
                             price,
                             side,
+                            time_in_force="ioc",
+                            reduce_only=True,
                         )
                     except Exception as exc:
                         self.logger.log(f"Emergency flatten order exception: {exc}", "ERROR")
@@ -1561,11 +2674,14 @@ class SimpleMarketMaker:
                     await asyncio.sleep(max(sleep_interval, self.settings.loop_sleep_seconds))
                     await self._update_state_guarded(force=True)
                     await self._cancel_all_orders()
-                    order_attempts = attempt_number
             finally:
-                await self._cancel_all_orders()
-                self._flatten_active = False
-                self.pause_trading()
+                try:
+                    await self._cancel_all_orders()
+                finally:
+                    if operation_lock_acquired:
+                        self._quote_operation_lock.release()
+                    self._flatten_active = False
+                    self.pause_trading()
 
     def export_position_snapshot(self) -> Dict[str, str]:
         lighter_position = self._format_decimal(self._lighter_inventory_base, 6)
@@ -1598,6 +2714,49 @@ class SimpleMarketMaker:
 
     def current_net_position(self) -> Decimal:
         return self._latest_net_position
+
+    def _max_quote_quantity(self) -> Decimal:
+        """Return the largest size that the next quote may submit."""
+
+        if self._dynamic_quantity_range is None:
+            return abs(self.settings.order_quantity)
+        return abs(self._dynamic_quantity_range[1])
+
+    def _runtime_quantity_step(self) -> Optional[Decimal]:
+        client = self._lighter_client
+        getter = getattr(client, "_spot_size_step", None) if client is not None else None
+        if callable(getter):
+            try:
+                value = getter()
+                if isinstance(value, Decimal) and value > 0:
+                    return value
+            except Exception:
+                pass
+        return None
+
+    def _normalize_order_quantity(self, quantity: Decimal, price: Decimal) -> Decimal:
+        """Align size to live market precision and satisfy base/quote minimums."""
+
+        if quantity <= 0:
+            return Decimal("0")
+        step = self._runtime_quantity_step() or self._quantity_step
+        if step > 0:
+            quantity = (quantity / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+        client = self._lighter_client
+        min_base = getattr(client, "min_base_amount", None) if client is not None else None
+        min_quote = getattr(client, "min_quote_amount", None) if client is not None else None
+        required = min_base if isinstance(min_base, Decimal) and min_base > 0 else Decimal("0")
+        if isinstance(min_quote, Decimal) and min_quote > 0 and price > 0:
+            quote_required = min_quote / price
+            if step > 0:
+                quote_required = (quote_required / step).to_integral_value(rounding=ROUND_UP) * step
+            required = max(required, quote_required)
+        if quantity < required:
+            quantity = required
+        if step > 0 and quantity > 0:
+            quantity = (quantity / step).to_integral_value(rounding=ROUND_UP) * step
+        return quantity
 
     def _resolve_order_quantity(self) -> Decimal:
         if self._dynamic_quantity_range is None:
@@ -1641,21 +2800,83 @@ class SimpleMarketMaker:
 
 
 def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
-    parser = argparse.ArgumentParser(description="Run a minimal Lighter market maker with Binance hedging")
-    parser.add_argument("--lighter-ticker", required=True, help="Lighter market ticker symbol (e.g. ETH-PERP)")
-    parser.add_argument("--binance-symbol", required=True, help="Binance futures symbol (e.g. ETHUSDT)")
-    parser.add_argument("--order-quantity", required=True, type=_decimal, help="Per-order base quantity")
-    parser.add_argument("--spread-bps", required=True, type=_decimal, help="Half-spread in basis points")
-    parser.add_argument("--hedge-threshold", required=True, type=_decimal, help="Inventory threshold that triggers hedging")
+    parser = argparse.ArgumentParser(description="Run a post-only Robinhood Lighter market maker")
+    parser.add_argument("--lighter-ticker", default="BTC", help="Lighter market ticker symbol (default: BTC)")
+    parser.add_argument("--binance-symbol", default=None, help="Binance Futures reference symbol (default: <ticker>USDT)")
+    parser.add_argument("--order-quantity", default="0.00020", type=_decimal, help="Per-order base quantity (default: 0.00020)")
+    parser.add_argument("--spread-bps", default="5", type=_decimal, help="Half-spread in basis points (default: 5)")
+    parser.add_argument("--hedge-threshold", default="0.001", type=_decimal, help="Inventory threshold for optional hedging (default: 0.001)")
     parser.add_argument("--hedge-buffer", default="0", type=_decimal, help="Buffer deducted from hedge quantity")
+    parser.add_argument(
+        "--hedge-cooldown-seconds",
+        default=30.0,
+        type=float,
+        help="Minimum seconds between explicit Binance hedge attempts (default: 30)",
+    )
+    parser.add_argument(
+        "--max-hedge-quantity",
+        default=None,
+        type=_decimal,
+        help="Maximum quantity per Binance hedge attempt (default: hedge threshold)",
+    )
     parser.add_argument("--inventory-limit", default=None, type=_decimal, help="Inventory cap for pausing one side of quotes")
-    parser.add_argument("--config-path", default="configs/hot_update.json", help="Hot update JSON file or URL")
-    parser.add_argument("--env-file", default=None, help="Optional path to a .env file to load before starting")
-    parser.add_argument("--loop-sleep", default=3.0, type=float, help="Seconds between main loop iterations")
+    parser.add_argument(
+        "--inventory-skew-bps",
+        default="3",
+        type=_decimal,
+        help="Maximum quote-center skew at the inventory limit (default: 3 bps)",
+    )
+    parser.add_argument(
+        "--config-path",
+        default="configs/robinhood_market_maker.json",
+        help="Hot update JSON file or URL",
+    )
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        help="Credential env file (auto: /etc/perp/robinhood.env, robinhood.env, .env.robinhood, .env)",
+    )
+    parser.add_argument(
+        "--ownership-state-file",
+        default=None,
+        help="Override the automatic crash-recovery client-order state file",
+    )
+    parser.add_argument("--lighter-leverage", default=2, type=int, help="Lighter leverage to configure (default: 2)")
+    parser.add_argument("--loop-sleep", default=2.0, type=float, help="Seconds between main loop iterations")
+    parser.add_argument(
+        "--cycles",
+        default=0,
+        type=int,
+        help="Stop and cancel own quotes after N successful iterations (0 = run continuously)",
+    )
     parser.add_argument("--order-refresh-ticks", default=2, type=int, help="Price difference in ticks before replacing orders")
     parser.add_argument(
+        "--order-refresh-bps",
+        default="1",
+        type=_decimal,
+        help="Minimum price movement in basis points before replacing quotes (default: 1)",
+    )
+    parser.add_argument(
+        "--min-quote-lifetime-seconds",
+        default=5.0,
+        type=float,
+        help="Minimum quote lifetime unless inventory or a 2 bps move requires cancellation",
+    )
+    parser.add_argument(
+        "--order-ack-timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Maximum wait for a submitted quote to appear in private/active-order state",
+    )
+    parser.add_argument(
+        "--binance-reference-timeout-seconds",
+        default=1.0,
+        type=float,
+        help="Maximum wait for one Binance public reference request (default: 1)",
+    )
+    parser.add_argument(
         "--fill-cooldown-seconds",
-        default=10.0,
+        default=5.0,
         type=float,
         help="Seconds to wait after an order is filled before placing a new order on the same side",
     )
@@ -1681,31 +2902,105 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         help="Optional maximum order quantity when sampling random size",
     )
     parser.add_argument(
+        "--enable-binance-hedge",
+        action="store_true",
+        help="Enable threshold Binance Futures hedging (disabled by default)",
+    )
+    parser.add_argument(
         "--disable-binance-hedge",
         action="store_true",
-        help="Disable Binance hedging; rely on directional VPS exposure balancing",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--disable-binance-reference",
+        action="store_true",
+        help="Quote from the local Lighter midpoint instead of Binance public prices",
     )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.enable_binance_hedge and args.disable_binance_hedge:
+        parser.error("--enable-binance-hedge and --disable-binance-hedge are mutually exclusive")
+    if args.order_quantity <= 0:
+        parser.error("--order-quantity must be positive")
+    if args.spread_bps <= 0:
+        parser.error("--spread-bps must be positive")
+    if args.hedge_threshold <= 0:
+        parser.error("--hedge-threshold must be positive")
+    if args.hedge_buffer < 0:
+        parser.error("--hedge-buffer must not be negative")
+    if args.hedge_cooldown_seconds < 0:
+        parser.error("--hedge-cooldown-seconds must not be negative")
+    if args.max_hedge_quantity is not None and args.max_hedge_quantity <= 0:
+        parser.error("--max-hedge-quantity must be positive")
+    if args.inventory_limit is not None and args.inventory_limit <= 0:
+        parser.error("--inventory-limit must be positive")
+    if args.inventory_skew_bps < 0:
+        parser.error("--inventory-skew-bps must not be negative")
+    if args.lighter_leverage <= 0:
+        parser.error("--lighter-leverage must be positive")
+    if args.loop_sleep <= 0:
+        parser.error("--loop-sleep must be positive")
+    if args.cycles < 0:
+        parser.error("--cycles must not be negative")
+    if args.order_refresh_ticks <= 0:
+        parser.error("--order-refresh-ticks must be positive")
+    if args.order_refresh_bps < 0:
+        parser.error("--order-refresh-bps must not be negative")
+    if args.min_quote_lifetime_seconds < 0:
+        parser.error("--min-quote-lifetime-seconds must not be negative")
+    if args.order_ack_timeout_seconds <= 0:
+        parser.error("--order-ack-timeout-seconds must be positive")
+    if args.binance_reference_timeout_seconds <= 0:
+        parser.error("--binance-reference-timeout-seconds must be positive")
+    if args.fill_cooldown_seconds < 0:
+        parser.error("--fill-cooldown-seconds must not be negative")
+    if args.order_quantity_min is not None and args.order_quantity_min <= 0:
+        parser.error("--order-quantity-min must be positive")
+    if args.order_quantity_max is not None and args.order_quantity_max <= 0:
+        parser.error("--order-quantity-max must be positive")
+    if (
+        args.order_quantity_min is not None
+        and args.order_quantity_max is not None
+        and args.order_quantity_min > args.order_quantity_max
+    ):
+        parser.error("--order-quantity-min must not exceed --order-quantity-max")
+    lighter_ticker = str(args.lighter_ticker).upper()
+    binance_symbol = str(args.binance_symbol or f"{lighter_ticker}USDT").upper()
     return SimpleMakerSettings(
-        lighter_ticker=args.lighter_ticker,
-        binance_symbol=args.binance_symbol,
+        lighter_ticker=lighter_ticker,
+        binance_symbol=binance_symbol,
         order_quantity=args.order_quantity,
         base_spread_bps=args.spread_bps,
         hedge_threshold=args.hedge_threshold,
         hedge_buffer=args.hedge_buffer,
-        enable_binance_hedge=not args.disable_binance_hedge,
+        hedge_cooldown_seconds=max(0.0, args.hedge_cooldown_seconds),
+        max_hedge_quantity=(
+            max(Decimal("0"), args.max_hedge_quantity)
+            if args.max_hedge_quantity is not None
+            else args.hedge_threshold
+        ),
+        enable_binance_hedge=bool(args.enable_binance_hedge and not args.disable_binance_hedge),
         inventory_limit=args.inventory_limit,
         config_path=args.config_path,
         env_file=args.env_file,
+        lighter_environment="robinhood",
+        lighter_leverage=args.lighter_leverage,
         loop_sleep_seconds=args.loop_sleep,
-        order_refresh_ticks=max(1, args.order_refresh_ticks),
-    fill_cooldown_seconds=max(0.0, args.fill_cooldown_seconds),
+        max_cycles=args.cycles,
+        order_refresh_ticks=args.order_refresh_ticks,
+        order_refresh_bps=args.order_refresh_bps,
+        min_quote_lifetime_seconds=args.min_quote_lifetime_seconds,
+        order_ack_timeout_seconds=args.order_ack_timeout_seconds,
+        binance_reference_timeout_seconds=args.binance_reference_timeout_seconds,
+        fill_cooldown_seconds=args.fill_cooldown_seconds,
         log_to_console=not args.no_console_log,
         metrics_interval_seconds=max(5.0, args.metrics_interval),
         allowed_sides=frozenset(args.allowed_sides) if args.allowed_sides else None,
         order_quantity_min=args.order_quantity_min,
         order_quantity_max=args.order_quantity_max,
+        use_binance_reference=not args.disable_binance_reference,
+        inventory_skew_bps=args.inventory_skew_bps,
+        ownership_state_path=args.ownership_state_file,
     )
 
 
@@ -1747,7 +3042,6 @@ async def _async_main(settings: SimpleMakerSettings) -> None:
             shutdown_reason = "Shutdown requested via signal"
 
         maker.logger.log(f"{shutdown_reason}; stopping maker", "WARNING")
-        await maker.stop()
 
         if run_error is not None:
             _LOGGER.exception("Maker loop terminated due to error", exc_info=run_error)

@@ -1,5 +1,7 @@
 import asyncio
 import aiohttp
+import json
+import pytest
 import time
 from decimal import Decimal, ROUND_DOWN
 from types import SimpleNamespace
@@ -9,10 +11,15 @@ from helpers.logger import TradingLogger
 from exchanges.lighter import LighterClient
 from trading_bot import TradingConfig
 from strategies.lighter_simple_market_maker import (
+    ActiveOrder,
+    _parse_args,
+    apply_inventory_skew,
     SimpleMarketMaker,
     SimpleMakerSettings,
+    clamp_maker_targets,
     compute_target_prices,
     required_hedge_quantity,
+    side_has_inventory_capacity,
     should_enable_side,
 )
 
@@ -29,6 +36,707 @@ def test_should_enable_side_applies_inventory_limit():
     assert not should_enable_side(Decimal("6"), limit, "buy")
     assert should_enable_side(Decimal("-4"), limit, "sell")
     assert not should_enable_side(Decimal("-8"), limit, "sell")
+
+
+def test_inventory_gate_reserves_full_next_quote_and_is_strict_at_cap():
+    limit = Decimal("0.001")
+    assert side_has_inventory_capacity(Decimal("0"), limit, "buy", Decimal("0.0002"))
+    assert not side_has_inventory_capacity(Decimal("0.0008"), limit, "buy", Decimal("0.0002"))
+    assert side_has_inventory_capacity(Decimal("0"), limit, "sell", Decimal("0.0002"))
+    assert not side_has_inventory_capacity(Decimal("-0.0008"), limit, "sell", Decimal("0.0002"))
+    assert not should_enable_side(limit, limit, "buy")
+    assert not should_enable_side(-limit, limit, "sell")
+
+
+def test_inventory_skew_moves_quotes_toward_flattening_inventory():
+    mid = Decimal("100")
+    limit = Decimal("1")
+    assert apply_inventory_skew(mid, Decimal("0.5"), limit, Decimal("4")) == Decimal("99.98")
+    assert apply_inventory_skew(mid, Decimal("-0.5"), limit, Decimal("4")) == Decimal("100.02")
+    assert apply_inventory_skew(mid, Decimal("2"), limit, Decimal("4")) == Decimal("99.96")
+
+
+def test_reference_targets_never_cross_local_lighter_book():
+    targets = {"buy": Decimal("101.00"), "sell": Decimal("102.00")}
+    clamped = clamp_maker_targets(targets, Decimal("99.50"), Decimal("100.50"), Decimal("0.01"))
+    assert clamped == {"buy": Decimal("100.49"), "sell": Decimal("102.00")}
+
+    crossed = clamp_maker_targets(
+        {"buy": Decimal("101.00"), "sell": Decimal("101.10")},
+        Decimal("99.50"),
+        Decimal("100.50"),
+        Decimal("0.01"),
+    )
+    assert crossed["buy"] < crossed["sell"]
+    assert crossed["buy"] <= Decimal("100.49")
+    assert crossed["sell"] >= Decimal("99.51")
+
+
+def test_market_maker_defaults_are_robinhood_and_no_binance_trading():
+    settings = _parse_args([])
+    assert settings.lighter_ticker == "BTC"
+    assert settings.binance_symbol == "BTCUSDT"
+    assert settings.lighter_environment == "robinhood"
+    assert settings.enable_binance_hedge is False
+    assert settings.use_binance_reference is True
+    assert settings.order_quantity == Decimal("0.00020")
+    assert settings.lighter_leverage == 2
+    assert SimpleMakerSettings(
+        lighter_ticker="BTC",
+        binance_symbol="BTCUSDT",
+        order_quantity=Decimal("0.00020"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("0.001"),
+    ).lighter_leverage == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--cycles", "-1"],
+        ["--max-hedge-quantity", "0"],
+        ["--hedge-buffer", "-0.1"],
+        ["--order-ack-timeout-seconds", "0"],
+    ],
+)
+def test_dangerous_numeric_options_are_rejected(argv):
+    with pytest.raises(SystemExit):
+        _parse_args(argv)
+
+
+def test_robinhood_credential_validation_rejects_reserved_key_index():
+    client = SimpleNamespace(
+        account_index=7,
+        api_private_keys={2: "0x" + ("1" * 64)},
+    )
+    with pytest.raises(ValueError, match="4..254"):
+        SimpleMarketMaker._validate_robinhood_credentials(client)  # type: ignore[arg-type]
+
+
+def test_robinhood_credential_validation_accepts_key_four():
+    client = SimpleNamespace(
+        account_index=7,
+        api_private_keys={4: "0x" + ("a" * 64)},
+    )
+    SimpleMarketMaker._validate_robinhood_credentials(client)  # type: ignore[arg-type]
+
+
+def test_sync_side_uses_post_only_and_accepts_shared_order_snapshot():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = TradingConfig(
+        ticker="TEST",
+        contract_id="7",
+        quantity=Decimal("0.1"),
+        take_profit=Decimal("0"),
+        tick_size=Decimal("0.01"),
+        direction="buy",
+        max_orders=1,
+        wait_time=1,
+        exchange="lighter",
+        grid_step=Decimal("0"),
+        stop_price=Decimal("0"),
+        pause_price=Decimal("0"),
+        boost_mode=False,
+    )
+
+    class StubLighter:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def get_active_orders(self, contract_id: str):
+            self.calls.append(("active", contract_id))
+            return []
+
+        async def place_limit_order(self, contract_id, quantity, price, side, **kwargs):
+            self.calls.append(("place", contract_id, quantity, price, side, kwargs))
+            return SimpleNamespace(success=True, order_id="101")
+
+    client = StubLighter()
+    maker._lighter_client = client  # type: ignore[assignment]
+    asyncio.run(
+        maker._sync_side(
+            "buy",
+            Decimal("99.50"),
+            True,
+            active_orders=[],
+        )
+    )
+    assert [call[0] for call in client.calls] == ["place"]
+    assert client.calls[0][-1] == {"time_in_force": "post_only"}
+
+
+def test_sync_side_waits_for_pending_quote_ack_before_replacing():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        order_ack_timeout_seconds=5,
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(
+        contract_id="7",
+        tick_size=Decimal("0.01"),
+    )  # type: ignore[assignment]
+    maker._tracked_orders["buy"] = ActiveOrder(
+        order_id="101",
+        client_order_index="101",
+        price=Decimal("99.50"),
+        side="buy",
+        created_at=time.monotonic(),
+        confirmed=False,
+    )
+
+    class StubLighter:
+        async def place_limit_order(self, *args, **kwargs):
+            raise AssertionError("pending quote must not be duplicated")
+
+    maker._lighter_client = StubLighter()  # type: ignore[assignment]
+    asyncio.run(
+        maker._sync_side(
+            "buy",
+            Decimal("99.50"),
+            True,
+            active_orders=[],
+        )
+    )
+
+
+def test_confirmed_quote_missing_from_rest_never_triggers_replacement():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(
+        contract_id="7",
+        tick_size=Decimal("0.01"),
+    )  # type: ignore[assignment]
+    maker._tracked_orders["buy"] = ActiveOrder(
+        order_id="9001",
+        client_order_index="101",
+        price=Decimal("99.50"),
+        side="buy",
+        created_at=time.monotonic(),
+        confirmed=True,
+    )
+
+    class StubLighter:
+        async def place_limit_order(self, *args, **kwargs):
+            raise AssertionError("missing confirmed quote must not be replaced")
+
+    maker._lighter_client = StubLighter()  # type: ignore[assignment]
+    for _ in range(2):
+        asyncio.run(
+            maker._sync_side(
+                "buy",
+                Decimal("99.50"),
+                True,
+                active_orders=[],
+            )
+        )
+    with pytest.raises(RuntimeError, match="disappeared"):
+        asyncio.run(
+            maker._sync_side(
+                "buy",
+                Decimal("99.50"),
+                True,
+                active_orders=[],
+            )
+        )
+
+
+def test_private_open_ack_confirms_pending_quote():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(contract_id="7")  # type: ignore[assignment]
+    maker._own_client_order_indices.add("101")
+    maker._tracked_orders["buy"] = ActiveOrder(
+        order_id="101",
+        client_order_index="101",
+        price=Decimal("99.50"),
+        side="buy",
+        created_at=time.monotonic(),
+        confirmed=False,
+    )
+
+    maker._handle_lighter_order_update(
+        {
+            "contract_id": "7",
+            "order_id": "9001",
+            "client_order_index": "101",
+            "status": "OPEN",
+            "side": "buy",
+        }
+    )
+
+    assert maker._tracked_orders["buy"].confirmed is True
+    assert maker._tracked_orders["buy"].order_id == "9001"
+
+
+def test_terminal_ws_update_before_send_response_is_not_resurrected():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(
+        contract_id="7",
+        tick_size=Decimal("0.01"),
+    )  # type: ignore[assignment]
+
+    class StubLighter:
+        current_order_client_id = 101
+
+        def reserve_client_order_index(self):
+            return 101
+
+        async def place_limit_order(self, *args, **kwargs):
+            maker._handle_lighter_order_update(
+                {
+                    "contract_id": "7",
+                    "order_id": "9001",
+                    "client_order_index": "101",
+                    "status": "REJECTED_BAD_PRICE",
+                    "side": "buy",
+                }
+            )
+            return SimpleNamespace(success=True, order_id="101")
+
+    maker._lighter_client = StubLighter()  # type: ignore[assignment]
+    asyncio.run(
+        maker._sync_side(
+            "buy",
+            Decimal("99.50"),
+            True,
+            active_orders=[],
+        )
+    )
+
+    assert maker._own_client_order_indices == set()
+    assert "buy" not in maker._tracked_orders
+
+
+def test_sync_side_keeps_recent_owned_quote_inside_emergency_threshold():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        order_refresh_ticks=1,
+        order_refresh_bps=Decimal("0"),
+        min_quote_lifetime_seconds=10,
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = TradingConfig(
+        ticker="TEST",
+        contract_id="7",
+        quantity=Decimal("0.1"),
+        take_profit=Decimal("0"),
+        tick_size=Decimal("0.01"),
+        direction="buy",
+        max_orders=1,
+        wait_time=1,
+        exchange="lighter",
+        grid_step=Decimal("0"),
+        stop_price=Decimal("0"),
+        pause_price=Decimal("0"),
+        boost_mode=False,
+    )
+    client = SimpleNamespace(
+        cancel_order=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recent quote must not be cancelled")
+        ),
+        place_limit_order=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recent quote must not be replaced")
+        ),
+    )
+    maker._lighter_client = client  # type: ignore[assignment]
+    maker._own_client_order_indices.add("123")
+    maker._tracked_orders["buy"] = SimpleNamespace(
+        order_id="99",
+        client_order_index="123",
+        created_at=time.monotonic(),
+    )
+    active = SimpleNamespace(
+        order_id="99",
+        client_order_index="123",
+        side="buy",
+        price=Decimal("100.00"),
+    )
+
+    asyncio.run(
+        maker._sync_side(
+            "buy",
+            Decimal("100.02"),
+            True,
+            active_orders=[active],
+        )
+    )
+
+    assert maker._tracked_orders["buy"].order_id == "99"
+
+
+def test_unmanaged_active_order_blocks_duplicate_and_is_not_cancelled():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = TradingConfig(
+        ticker="TEST",
+        contract_id="7",
+        quantity=Decimal("0.1"),
+        take_profit=Decimal("0"),
+        tick_size=Decimal("0.01"),
+        direction="buy",
+        max_orders=1,
+        wait_time=1,
+        exchange="lighter",
+        grid_step=Decimal("0"),
+        stop_price=Decimal("0"),
+        pause_price=Decimal("0"),
+        boost_mode=False,
+    )
+
+    class StubLighter:
+        def __init__(self) -> None:
+            self.placed = []
+            self.cancelled = []
+
+        async def place_limit_order(self, *args, **kwargs):
+            self.placed.append((args, kwargs))
+            return SimpleNamespace(success=True, order_id="new")
+
+        async def cancel_order(self, order_id):
+            self.cancelled.append(order_id)
+            return SimpleNamespace(success=True)
+
+    client = StubLighter()
+    maker._lighter_client = client  # type: ignore[assignment]
+    unmanaged = SimpleNamespace(
+        side="buy",
+        order_id="manual-order",
+        client_order_index="manual-client",
+        price=Decimal("99.50"),
+    )
+    asyncio.run(
+        maker._sync_side(
+            "buy",
+            Decimal("99.50"),
+            True,
+            active_orders=[unmanaged],
+        )
+    )
+    assert client.placed == []
+    assert client.cancelled == []
+
+
+def test_cancel_all_orders_only_cancels_owned_client_indexes():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(contract_id="7")  # type: ignore[assignment]
+    maker._own_client_order_indices.add("own-client")
+    orders = [
+        SimpleNamespace(side="buy", order_id="own-order", client_order_index="own-client"),
+        SimpleNamespace(side="sell", order_id="manual-order", client_order_index="manual-client"),
+    ]
+
+    class StubLighter:
+        def __init__(self) -> None:
+            self.cancelled = []
+
+        async def get_active_orders(self, contract_id):
+            return [order for order in orders if order.order_id not in self.cancelled]
+
+        async def cancel_order(self, order_id):
+            self.cancelled.append(order_id)
+            return SimpleNamespace(success=True)
+
+    client = StubLighter()
+    maker._lighter_client = client  # type: ignore[assignment]
+    asyncio.run(maker._cancel_all_orders())
+    assert client.cancelled == ["own-order"]
+
+
+def test_cancel_all_orders_raises_when_cancellation_never_succeeds():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(contract_id="7")  # type: ignore[assignment]
+    maker._own_client_order_indices.add("own-client")
+    maker._tracked_orders["buy"] = SimpleNamespace(
+        order_id="own-order",
+        client_order_index="own-client",
+    )
+    own_order = SimpleNamespace(
+        side="buy",
+        order_id="own-order",
+        client_order_index="own-client",
+    )
+
+    class StubLighter:
+        def __init__(self) -> None:
+            self.cancel_attempts = 0
+
+        async def get_active_orders(self, contract_id):
+            return [own_order]
+
+        async def cancel_order(self, order_id):
+            self.cancel_attempts += 1
+            return SimpleNamespace(success=False, error_message="sequencer rejected")
+
+    client = StubLighter()
+    maker._lighter_client = client  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="Could not confirm cancellation"):
+        asyncio.run(maker._cancel_all_orders(reconciliation_attempts=2))
+
+    assert client.cancel_attempts == 2
+
+
+def test_owned_client_indexes_are_persisted_for_crash_recovery(tmp_path):
+    state_path = tmp_path / "maker-state.json"
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        ownership_state_path=str(state_path),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_client = SimpleNamespace(account_index=7)  # type: ignore[assignment]
+    maker._initialize_runtime_state(7)
+    maker._remember_owned_client_index(123)
+
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["client_order_indices"] == ["123"]
+
+    restarted = SimpleMarketMaker(settings)
+    restarted._lighter_client = SimpleNamespace(account_index=7)  # type: ignore[assignment]
+    restarted._initialize_runtime_state(7)
+    restarted._load_ownership_state()
+    assert restarted._own_client_order_indices == {"123"}
+
+
+def test_startup_empty_snapshot_does_not_forget_persisted_order():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        order_ack_timeout_seconds=0.1,
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(contract_id="7")  # type: ignore[assignment]
+    maker._own_client_order_indices.add("123")
+
+    class StubLighter:
+        async def get_active_orders(self, contract_id):
+            return []
+
+    maker._lighter_client = StubLighter()  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="not visible"):
+        asyncio.run(maker._reconcile_startup_orders())
+    assert maker._own_client_order_indices == {"123"}
+
+
+def test_instance_lock_rejects_second_maker_for_same_account(tmp_path):
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        ownership_state_path=str(tmp_path / "maker-state.json"),
+        log_to_console=False,
+    )
+    first = SimpleMarketMaker(settings)
+    second = SimpleMarketMaker(settings)
+    first._initialize_runtime_state(7)
+    second._initialize_runtime_state(7)
+    first._acquire_instance_lock()
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            second._acquire_instance_lock()
+    finally:
+        first._release_instance_lock()
+
+
+@pytest.mark.parametrize(
+    ("position", "expected_side", "expected_price"),
+    [
+        (Decimal("0.00020"), "sell", Decimal("99.0")),
+        (Decimal("-0.00020"), "buy", Decimal("101.0")),
+    ],
+)
+def test_emergency_flatten_uses_marketable_ioc_and_small_tolerance(
+    position,
+    expected_side,
+    expected_price,
+):
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.00020"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("0.001"),
+        loop_sleep_seconds=0,
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(
+        contract_id="7",
+        tick_size=Decimal("0.1"),
+    )  # type: ignore[assignment]
+    maker._lighter_inventory_base = position
+
+    class StubLighter:
+        base_amount_multiplier = 100_000
+        min_base_amount = Decimal("0.00020")
+        min_quote_amount = Decimal("10")
+
+        def __init__(self):
+            self.orders = []
+
+        def _spot_size_step(self):
+            return Decimal("0.00001")
+
+        async def get_active_orders(self, contract_id):
+            return []
+
+        async def cancel_order(self, order_id):
+            return SimpleNamespace(success=True)
+
+        async def fetch_bbo_prices(self, contract_id):
+            return Decimal("99.0"), Decimal("101.0")
+
+        async def place_limit_order(self, contract_id, quantity, price, side, **kwargs):
+            self.orders.append((side, quantity, price, kwargs))
+            maker._lighter_inventory_base = Decimal("0")
+            return SimpleNamespace(success=True, order_id="123", error_message=None)
+
+    client = StubLighter()
+    maker._lighter_client = client  # type: ignore[assignment]
+
+    async def no_state_update(*, force=False):
+        return None
+
+    maker._update_state_guarded = no_state_update  # type: ignore[method-assign]
+    asyncio.run(
+        maker.emergency_flatten(
+            tolerance=Decimal("0.01"),
+            max_iterations=1,
+            sleep_interval=0,
+        )
+    )
+
+    assert client.orders == [
+        (
+            expected_side,
+            Decimal("0.00020"),
+            expected_price,
+            {"time_in_force": "ioc", "reduce_only": True},
+        )
+    ]
+
+
+def test_emergency_flatten_counts_failed_book_attempts():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.00020"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("0.001"),
+        loop_sleep_seconds=0,
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(
+        contract_id="7",
+        tick_size=Decimal("0.1"),
+    )  # type: ignore[assignment]
+    maker._lighter_inventory_base = Decimal("0.00020")
+
+    class StubLighter:
+        base_amount_multiplier = 100_000
+
+        def __init__(self):
+            self.book_attempts = 0
+
+        def _spot_size_step(self):
+            return Decimal("0.00001")
+
+        async def get_active_orders(self, contract_id):
+            return []
+
+        async def fetch_bbo_prices(self, contract_id):
+            self.book_attempts += 1
+            raise aiohttp.ClientConnectionError("offline")
+
+    client = StubLighter()
+    maker._lighter_client = client  # type: ignore[assignment]
+
+    async def no_state_update(*, force=False):
+        return None
+
+    maker._update_state_guarded = no_state_update  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="max attempts"):
+        asyncio.run(
+            maker.emergency_flatten(
+                max_iterations=2,
+                sleep_interval=0,
+            )
+        )
+    assert client.book_attempts == 2
 
 
 def test_required_hedge_quantity_respects_buffer():
@@ -137,6 +845,7 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
 
     maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
     logs.clear()
+    maker._own_client_order_indices.add("101")
     maker._handle_lighter_order_update(
         {
             "contract_id": "MARKET",
@@ -145,6 +854,7 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
             "filled_size": "0.02",
             "price": "100",
             "side": "buy",
+            "client_order_index": "101",
         }
     )
     maker._handle_lighter_order_update(
@@ -155,6 +865,7 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
             "filled_size": "0.05",
             "price": "100",
             "side": "buy",
+            "client_order_index": "101",
         }
     )
     maker._lighter_last_mark_price = Decimal("100")
@@ -177,6 +888,7 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
 
     maker._last_metrics_time = time.time() - maker.settings.metrics_interval_seconds - 1
     logs.clear()
+    maker._own_client_order_indices.add("102")
     maker._handle_lighter_order_update(
         {
             "contract_id": "MARKET",
@@ -185,6 +897,7 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
             "filled_size": "0.05",
             "price": "101",
             "side": "sell",
+            "client_order_index": "102",
         }
     )
     maker._lighter_last_mark_price = Decimal("101")
@@ -204,6 +917,34 @@ def test_maybe_report_metrics_tracks_session_volume(tmp_path):
     assert "Lighter=10.05" in volume
     assert "Binance=0.00" in volume
     assert "Combined=10.05" in volume
+
+
+def test_external_lighter_order_update_is_ignored():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("10"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    maker._lighter_config = SimpleNamespace(contract_id="MARKET")  # type: ignore[assignment]
+
+    maker._handle_lighter_order_update(
+        {
+            "contract_id": "MARKET",
+            "order_id": "manual-1",
+            "client_order_index": "unmanaged-client",
+            "status": "FILLED",
+            "filled_size": "1",
+            "price": "100",
+            "side": "buy",
+        }
+    )
+
+    assert maker._lighter_session_volume_base == Decimal("0")
+    assert maker._lighter_session_volume_quote == Decimal("0")
 
 
 def test_apply_fill_to_session_pnl_tracks_realized_and_inventory(tmp_path):
@@ -340,7 +1081,13 @@ class StubHedger:
             return Decimal("0")
         return normalized
 
-    async def place_market_order(self, side: str, quantity: Decimal) -> dict:
+    async def place_market_order(
+        self,
+        side: str,
+        quantity: Decimal,
+        *,
+        reduce_only: bool = False,
+    ) -> dict:
         qty = await self.prepare_market_quantity(quantity)
         if qty <= 0:
             raise ValueError("quantity below minimum lot size")
@@ -356,6 +1103,52 @@ class StubHedger:
 
     def lot_size_constraints(self) -> dict:
         return {"step_size": self.step, "min_quantity": self.min_qty}
+
+
+def test_emergency_flatten_closes_enabled_binance_hedge_leg():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.001"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("0.01"),
+        enable_binance_hedge=True,
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+
+    class EmergencyHedger(StubHedger):
+        def __init__(self):
+            super().__init__()
+            self.position = Decimal("0.002")
+            self.reduce_flags = []
+
+        async def place_market_order(
+            self,
+            side: str,
+            quantity: Decimal,
+            *,
+            reduce_only: bool = False,
+        ) -> dict:
+            self.reduce_flags.append(reduce_only)
+            return await super().place_market_order(
+                side,
+                quantity,
+                reduce_only=reduce_only,
+            )
+
+    hedger = EmergencyHedger()
+    maker._hedger = hedger  # type: ignore[assignment]
+    asyncio.run(
+        maker._flatten_binance_hedge(
+            tolerance=Decimal("0.0005"),
+            max_attempts=2,
+        )
+    )
+
+    assert hedger.position == Decimal("0")
+    assert hedger.orders == [("SELL", Decimal("0.002"))]
+    assert hedger.reduce_flags == [True]
 
 
 def test_maybe_execute_hedge_respects_existing_binance_position():
@@ -418,6 +1211,7 @@ def test_configure_lighter_leverage_targets_max(tmp_path):
         order_quantity=Decimal("1"),
         base_spread_bps=Decimal("5"),
         hedge_threshold=Decimal("10"),
+        lighter_leverage=None,
         config_path=str(tmp_path / "hot_update.json"),
         log_to_console=False,
     )
@@ -449,6 +1243,7 @@ def test_configure_lighter_leverage_handles_missing_limit(tmp_path):
         order_quantity=Decimal("1"),
         base_spread_bps=Decimal("5"),
         hedge_threshold=Decimal("10"),
+        lighter_leverage=None,
         config_path=str(tmp_path / "hot_update.json"),
         log_to_console=False,
     )
