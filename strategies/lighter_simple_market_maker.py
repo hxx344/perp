@@ -285,12 +285,13 @@ def clamp_maker_targets(
         return {"buy": best_bid, "sell": best_ask}
 
     # Improving the local BBO is the main source of volume when Lighter's
-    # spread is wider than Binance. Stay one tick away from the opposite side
-    # rather than forcing every quote to join the existing BBO.
+    # spread is wider than Binance. Keep the quote inside the local spread and
+    # never farther from the market than the same-side BBO. The opposite-side
+    # cap preserves post-only behavior even if the reference is stale.
     max_post_only_bid = best_ask - tick_size
     min_post_only_ask = best_bid + tick_size
-    bid = min(targets["buy"], max_post_only_bid)
-    ask = max(targets["sell"], min_post_only_ask)
+    bid = max(best_bid, min(targets["buy"], max_post_only_bid))
+    ask = min(best_ask, max(targets["sell"], min_post_only_ask))
     if bid >= ask:
         # A stale or dislocated reference should never create a crossed pair.
         bid = best_bid
@@ -2954,7 +2955,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         help="Maximum relative quote-center shift from Binance depth (default: 3 bps)",
     )
     parser.add_argument("--order-quantity", default="0.00020", type=_decimal, help="Per-order base quantity (default: 0.00020)")
-    parser.add_argument("--spread-bps", default="5", type=_decimal, help="Half-spread in basis points (default: 5)")
+    parser.add_argument("--spread-bps", default="2", type=_decimal, help="Half-spread in basis points (default: 2)")
     parser.add_argument("--hedge-threshold", default="0.001", type=_decimal, help="Inventory threshold for optional hedging (default: 0.001)")
     parser.add_argument("--hedge-buffer", default="0", type=_decimal, help="Buffer deducted from hedge quantity")
     parser.add_argument(

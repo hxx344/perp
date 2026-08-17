@@ -61,7 +61,7 @@ python3 -m strategies.robinhood_lighter_market_maker --env-file robinhood.env
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--order-quantity` | `0.00020` | Base BTC per quote; runtime market minimums are applied. |
-| `--spread-bps` | `5` | Half-spread in basis points around the locally scaled Lighter midpoint. |
+| `--spread-bps` | `2` | Half-spread in basis points around the locally scaled Lighter midpoint; quotes are also kept no worse than the same-side Lighter BBO. |
 | `--binance-depth-levels` | `10` | Binance depth levels used for the relative pressure signal. |
 | `--binance-imbalance-max-bps` | `3` | Maximum quote-center shift caused by Binance depth pressure. |
 | `--inventory-limit` | threshold | Hard Lighter inventory cap. |

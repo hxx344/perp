@@ -192,7 +192,15 @@ def test_inventory_skew_moves_quotes_toward_flattening_inventory():
 def test_reference_targets_never_cross_local_lighter_book():
     targets = {"buy": Decimal("101.00"), "sell": Decimal("102.00")}
     clamped = clamp_maker_targets(targets, Decimal("99.50"), Decimal("100.50"), Decimal("0.01"))
-    assert clamped == {"buy": Decimal("100.49"), "sell": Decimal("102.00")}
+    assert clamped == {"buy": Decimal("100.49"), "sell": Decimal("100.50")}
+
+    far_away = clamp_maker_targets(
+        {"buy": Decimal("98.00"), "sell": Decimal("103.00")},
+        Decimal("99.50"),
+        Decimal("100.50"),
+        Decimal("0.01"),
+    )
+    assert far_away == {"buy": Decimal("99.50"), "sell": Decimal("100.50")}
 
     crossed = clamp_maker_targets(
         {"buy": Decimal("101.00"), "sell": Decimal("101.10")},
@@ -213,6 +221,7 @@ def test_market_maker_defaults_are_robinhood_and_no_binance_trading():
     assert settings.enable_binance_hedge is False
     assert settings.use_binance_reference is True
     assert settings.order_quantity == Decimal("0.00020")
+    assert settings.base_spread_bps == Decimal("2")
     assert settings.lighter_leverage == 2
     assert settings.binance_depth_levels == 10
     assert settings.binance_imbalance_max_bps == Decimal("3")

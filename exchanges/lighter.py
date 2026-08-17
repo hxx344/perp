@@ -5,6 +5,7 @@ Lighter exchange client implementation.
 import os
 import json
 import asyncio
+import inspect
 import time
 import logging
 import re
@@ -908,7 +909,6 @@ class LighterClient(BaseExchangeClient):
                 limits_snapshot = await account_api.account_limits(
                     self.account_index,
                     authorization=auth_token,
-                    auth=auth_token,
                 )
             except Exception as exc:
                 _emit(
@@ -1575,11 +1575,27 @@ class LighterClient(BaseExchangeClient):
         # Use OrderApi to get active orders
         order_api = OrderApi(self.api_client)
 
-        # Get active orders for the specific market
-        orders_response = await order_api.account_active_orders(
+        # The generated SDK has used both ``authorization`` (current API)
+        # and ``auth`` (older client) for this required token. Select the
+        # parameter supported by the installed SDK instead of retrying a
+        # deterministic Python ``TypeError`` five times.
+        active_orders_method = order_api.account_active_orders
+        try:
+            method_parameters = inspect.signature(active_orders_method).parameters
+        except (TypeError, ValueError):  # pragma: no cover - unusual SDK wrapper
+            method_parameters = {}
+        if "authorization" in method_parameters:
+            auth_parameter = "authorization"
+        elif "auth" in method_parameters:
+            auth_parameter = "auth"
+        else:
+            raise TypeError(
+                "Installed Lighter SDK account_active_orders has no supported auth parameter"
+            )
+        orders_response = await active_orders_method(
             account_index=self.account_index,
             market_id=self._resolve_market_index(),
-            auth=auth_token
+            **{auth_parameter: auth_token},
         )
 
         if not orders_response:

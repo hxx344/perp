@@ -157,6 +157,56 @@ def test_reserved_client_order_index_can_be_persisted_before_submit(monkeypatch)
     assert signer.calls[-1]["client_order_index"] == reserved
 
 
+def test_active_orders_uses_current_sdk_authorization_parameter(monkeypatch):
+    client = _make_client(monkeypatch)
+    client.api_client = object()
+
+    class _Signer:
+        def create_auth_token_with_expiry(self):
+            return "auth-token", None
+
+    calls = []
+
+    class _OrderApi:
+        def __init__(self, _api_client):
+            pass
+
+        async def account_active_orders(self, *, authorization, account_index, market_id):
+            calls.append((authorization, account_index, market_id))
+            return SimpleNamespace(orders=[])
+
+    client.lighter_client = _Signer()
+    monkeypatch.setattr(lighter_module, "OrderApi", _OrderApi)
+
+    assert asyncio.run(client._fetch_orders_with_retry()) == []
+    assert calls == [("auth-token", 7, 1)]
+
+
+def test_active_orders_supports_legacy_sdk_auth_parameter(monkeypatch):
+    client = _make_client(monkeypatch)
+    client.api_client = object()
+
+    class _Signer:
+        def create_auth_token_with_expiry(self):
+            return "legacy-token", None
+
+    calls = []
+
+    class _OrderApi:
+        def __init__(self, _api_client):
+            pass
+
+        async def account_active_orders(self, *, auth, account_index, market_id):
+            calls.append((auth, account_index, market_id))
+            return SimpleNamespace(orders=[])
+
+    client.lighter_client = _Signer()
+    monkeypatch.setattr(lighter_module, "OrderApi", _OrderApi)
+
+    assert asyncio.run(client._fetch_orders_with_retry()) == []
+    assert calls == [("legacy-token", 7, 1)]
+
+
 def test_perp_order_constraints_enforce_runtime_minimums_and_size_step(monkeypatch):
     client = _make_client(monkeypatch)
     client.market_detail = SimpleNamespace()
