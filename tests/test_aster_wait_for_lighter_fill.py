@@ -28,6 +28,7 @@ from strategies.aster_lighter_cycle import (
     SkipCycleError,
 )
 from exchanges.base import OrderInfo, OrderResult
+from exchanges.lighter import LighterOrderSubmissionUncertainError
 
 
 class _DummyOrder:
@@ -171,6 +172,44 @@ def test_lighter_taker_leg_uses_ioc_time_in_force():
     assert len(client.order_calls) == 1
     assert client.order_calls[0][3] == "buy"
     assert client.order_calls[0][4] == {"time_in_force": "ioc"}
+
+
+def test_lighter_taker_reconciles_but_does_not_retry_an_uncertain_submission():
+    executor = _make_executor(position_after=Decimal("0"))
+    executor.config.max_retries = 5
+    client = cast(Any, executor.lighter_client)
+    client.place_limit_order = AsyncMock(
+        side_effect=LighterOrderSubmissionUncertainError(123456, 502)
+    )
+
+    with pytest.raises(SkipCycleError, match="123456"):
+        asyncio.run(executor._execute_lighter_taker("LEG2", "buy", Decimal("100")))
+
+    assert client.place_limit_order.await_count == 1
+    assert executor._cycle_had_timeout is True
+
+
+def test_lighter_taker_accepts_delayed_position_after_uncertain_submission():
+    executor = _make_executor(position_after=Decimal("0"))
+    executor.config.max_retries = 5
+    client = cast(Any, executor.lighter_client)
+    client.get_account_positions = AsyncMock(
+        side_effect=[Decimal("0"), Decimal("1")]
+    )
+    client.place_limit_order = AsyncMock(
+        side_effect=LighterOrderSubmissionUncertainError(123457, 502)
+    )
+
+    result = asyncio.run(
+        executor._execute_lighter_taker("LEG2", "buy", Decimal("100"))
+    )
+
+    assert result.status == "FILLED"
+    assert result.order_id == "123457"
+    assert result.quantity == Decimal("1")
+    assert client.place_limit_order.await_count == 1
+    assert client.get_account_positions.await_count == 2
+    assert executor._cycle_had_timeout is True
 
 
 @pytest.mark.parametrize(

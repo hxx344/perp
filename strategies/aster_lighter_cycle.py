@@ -55,6 +55,7 @@ import dotenv
 from exchanges import ExchangeFactory
 from exchanges.aster import AsterMarketDataWebSocket
 from exchanges.base import OrderInfo
+from exchanges.lighter import LighterOrderSubmissionUncertainError
 from exchanges.lighter_endpoints import (
     LighterEndpointProfile,
     resolve_lighter_endpoint_profile,
@@ -4102,15 +4103,28 @@ class HedgingCycleExecutor:
                 elif direction_normalized == "sell":
                     expected_final_position = position_before - order_quantity
 
-            order_result = await self.lighter_client.place_limit_order(
-                self.lighter_config.contract_id,
-                order_quantity,
-                target_price,
-                direction,
-                time_in_force="ioc",
-            )
+            uncertain_submission = False
+            try:
+                order_result = await self.lighter_client.place_limit_order(
+                    self.lighter_config.contract_id,
+                    order_quantity,
+                    target_price,
+                    direction,
+                    time_in_force="ioc",
+                )
+            except LighterOrderSubmissionUncertainError as exc:
+                # The signed transaction may already have reached the sequencer.
+                # Never send a replacement until the private stream/position has
+                # had time to reveal the outcome.
+                uncertain_submission = True
+                order_result = None
+                client_order_id = str(exc.client_order_index)
+                self.logger.log(
+                    f"{leg_name} | {exc}; reconciling private order state and position",
+                    "WARNING",
+                )
 
-            if not order_result.success:
+            if order_result is not None and not order_result.success:
                 error_message = order_result.error_message or "Unknown error"
                 lowered = error_message.lower()
                 if (
@@ -4141,17 +4155,20 @@ class HedgingCycleExecutor:
                 await asyncio.sleep(self.config.retry_delay_seconds)
                 continue
 
-            if not order_result.order_id:
+            if not uncertain_submission and order_result is not None:
+                client_order_id = str(order_result.order_id or "")
+
+            if not client_order_id:
                 raise RuntimeError(f"{leg_name} | Lighter order returned without a client order id")
-            else:
+            if not uncertain_submission:
                 self.logger.log(
-                    f"{leg_name} | Lighter order placed: client_id={order_result.order_id}, side={direction}, qty={order_quantity}, limit={target_price}",
+                    f"{leg_name} | Lighter order placed: client_id={client_order_id}, side={direction}, qty={order_quantity}, limit={target_price}",
                     "INFO",
                 )
 
             try:
                 fill_info = await self._wait_for_lighter_fill(
-                    str(order_result.order_id),
+                    client_order_id,
                     leg_name,
                     expected_final_position=expected_final_position,
                     expected_fill_size=order_quantity,
@@ -4160,7 +4177,7 @@ class HedgingCycleExecutor:
                 )
             except SkipCycleError:
                 self.logger.log(
-                    f"{leg_name} | Skipping cycle after Lighter timeout/position mismatch (client_id={order_result.order_id})",
+                    f"{leg_name} | Skipping cycle after Lighter timeout/position mismatch (client_id={client_order_id})",
                     "WARNING",
                 )
                 raise

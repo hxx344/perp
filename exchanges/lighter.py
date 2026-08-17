@@ -20,6 +20,7 @@ from helpers.logger import TradingLogger
 from lighter.signer_client import SignerClient
 from lighter.api_client import ApiClient
 from lighter.configuration import Configuration
+from lighter.exceptions import ApiException
 from lighter.api.account_api import AccountApi
 from lighter.api.order_api import OrderApi
 
@@ -52,6 +53,20 @@ ASSET_SYMBOL_ALIASES = {
     "USDC.EE": "USDC",
     "USDC": "USDC",
 }
+
+
+class LighterOrderSubmissionUncertainError(ConnectionError):
+    """Raised when Lighter may have accepted an order but no response arrived."""
+
+    def __init__(self, client_order_index: int, status: Optional[int] = None):
+        status_text = f"HTTP {status}" if status is not None else "a transport failure"
+        super().__init__(
+            f"Lighter order submission outcome is uncertain after {status_text} "
+            f"(client_order_index={client_order_index}); refusing to resubmit before "
+            "position reconciliation"
+        )
+        self.client_order_index = client_order_index
+        self.status = status
 
 
 class LighterClient(BaseExchangeClient):
@@ -760,6 +775,16 @@ class LighterClient(BaseExchangeClient):
                 self.logger.log("Lighter client initialized successfully", "INFO")
             except Exception as e:
                 self.logger.log(f"Failed to initialize Lighter client: {e}", "ERROR")
+                signer_client = self.lighter_client
+                self.lighter_client = None
+                if signer_client is not None:
+                    try:
+                        await signer_client.close()
+                    except Exception as close_exc:
+                        self.logger.log(
+                            f"Failed to close partially initialized Lighter signer: {close_exc}",
+                            "WARNING",
+                        )
                 raise
         return self.lighter_client
 
@@ -774,6 +799,7 @@ class LighterClient(BaseExchangeClient):
 
         except Exception as e:
             self.logger.log(f"Error connecting to Lighter: {e}", "ERROR")
+            await self.disconnect()
             raise
 
     async def ensure_account_tier(
@@ -1048,17 +1074,31 @@ class LighterClient(BaseExchangeClient):
 
     async def disconnect(self) -> None:
         """Disconnect from Lighter."""
-        try:
-            if hasattr(self, 'ws_manager') and self.ws_manager:
-                await self.ws_manager.disconnect()
-                self.ws_manager = None
+        ws_manager = self.ws_manager
+        signer_client = self.lighter_client
+        api_client = self.api_client
+        self.ws_manager = None
+        self.lighter_client = None
+        self.api_client = None
 
-            # Close shared API client
-            if self.api_client:
-                await self.api_client.close()
-                self.api_client = None
-        except Exception as e:
-            self.logger.log(f"Error during Lighter disconnect: {e}", "ERROR")
+        if ws_manager is not None:
+            try:
+                await ws_manager.disconnect()
+            except Exception as exc:
+                self.logger.log(f"Error closing Lighter WebSocket: {exc}", "ERROR")
+
+        # SignerClient owns a separate ApiClient/session from self.api_client.
+        if signer_client is not None:
+            try:
+                await signer_client.close()
+            except Exception as exc:
+                self.logger.log(f"Error closing Lighter signer client: {exc}", "ERROR")
+
+        if api_client is not None:
+            try:
+                await api_client.close()
+            except Exception as exc:
+                self.logger.log(f"Error closing Lighter API client: {exc}", "ERROR")
 
     def get_exchange_name(self) -> str:
         """Get the exchange name."""
@@ -1192,8 +1232,8 @@ class LighterClient(BaseExchangeClient):
         )
         raise ValueError("WebSocket not running. No bid/ask prices available")
 
-    async def _submit_order_with_retry(self, order_params: Dict[str, Any]) -> OrderResult:
-        """Submit an order with Lighter using official SDK."""
+    async def _submit_order_once(self, order_params: Dict[str, Any]) -> OrderResult:
+        """Submit one order attempt with Lighter using the official SDK."""
         # Ensure client is initialized
         if self.lighter_client is None:
             # This is a sync method, so we need to handle this differently
@@ -1207,7 +1247,22 @@ class LighterClient(BaseExchangeClient):
                 f"Lighter order params: {order_params}",
                 "INFO",
             )
-        create_order, tx_hash, error = await lighter_client.create_order(**order_params)
+        try:
+            create_order, tx_hash, error = await lighter_client.create_order(**order_params)
+        except ApiException as exc:
+            try:
+                status = int(exc.status) if exc.status is not None else None
+            except (TypeError, ValueError):
+                status = None
+            if status is not None and 500 <= status <= 599:
+                # A gateway timeout/error does not prove that the sequencer did
+                # not receive the signed transaction. Retrying here could double
+                # the intended IOC fill, so let the strategy reconcile position.
+                raise LighterOrderSubmissionUncertainError(
+                    int(order_params["client_order_index"]),
+                    status,
+                ) from exc
+            raise
         if error is not None:
             if self._debug_orders:
                 self.logger.log(
@@ -1355,7 +1410,7 @@ class LighterClient(BaseExchangeClient):
             f"client_idx={client_order_index} side={'sell' if is_ask else 'buy'} qty={quantity} price={price}"
         )
 
-        order_result = await self._submit_order_with_retry(order_params)
+        order_result = await self._submit_order_once(order_params)
         return order_result
 
     async def place_open_order(self, contract_id: str, quantity: Decimal, direction: str) -> OrderResult:

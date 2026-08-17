@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 import exchanges.lighter as lighter_module
-from exchanges.lighter import MAX_CLIENT_ORDER_INDEX, LighterClient
+from exchanges.lighter import (
+    MAX_CLIENT_ORDER_INDEX,
+    LighterClient,
+    LighterOrderSubmissionUncertainError,
+)
+from lighter.exceptions import ServiceException
 
 
 class _Config(dict):
@@ -35,6 +40,53 @@ class _FakeSignerClient:
     async def create_order(self, **kwargs):
         self.calls.append(kwargs)
         return object(), {"code": 200}, None
+
+
+class _FailingSignerClient(_FakeSignerClient):
+    async def create_order(self, **kwargs):
+        self.calls.append(kwargs)
+        raise ServiceException(status=502, reason="Bad Gateway", body="Bad Gateway")
+
+
+class _ClosableClient:
+    def __init__(self, *, fail: bool = False):
+        self.close_calls = 0
+        self.fail = fail
+
+    async def close(self):
+        self.close_calls += 1
+        if self.fail:
+            raise RuntimeError("close failed")
+
+
+class _ClosableWebSocket:
+    def __init__(self, *, fail: bool = False):
+        self.disconnect_calls = 0
+        self.fail = fail
+
+    async def disconnect(self):
+        self.disconnect_calls += 1
+        if self.fail:
+            raise RuntimeError("disconnect failed")
+
+
+class _RejectingSignerClient(_ClosableClient):
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.__class__.instances.append(self)
+
+    def check_client(self):
+        return "invalid signer"
+
+
+class _SharedApiClient(_ClosableClient):
+    instances = []
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.__class__.instances.append(self)
 
 
 def _make_client(monkeypatch) -> LighterClient:
@@ -160,3 +212,66 @@ def test_lighter_ioc_order_is_non_resting_reduce_only_and_tick_aligned(monkeypat
                 time_in_force="ioc",
             )
         )
+
+
+def test_lighter_502_is_uncertain_and_never_retried(monkeypatch):
+    client = _make_client(monkeypatch)
+    signer = _FailingSignerClient()
+    client.lighter_client = signer
+    client.base_amount_multiplier = 100_000
+    client.price_multiplier = 10
+    client.config.tick_size = Decimal("0.1")
+
+    with pytest.raises(LighterOrderSubmissionUncertainError) as exc_info:
+        asyncio.run(
+            client.place_limit_order(
+                "1",
+                Decimal("0.00020"),
+                Decimal("50000.1"),
+                "buy",
+                time_in_force="ioc",
+            )
+        )
+
+    assert len(signer.calls) == 1
+    assert isinstance(exc_info.value, ConnectionError)
+    assert exc_info.value.status == 502
+    assert str(exc_info.value.client_order_index) in str(exc_info.value)
+    assert "refusing to resubmit" in str(exc_info.value)
+
+
+def test_disconnect_closes_signer_and_api_even_when_websocket_close_fails(monkeypatch):
+    client = _make_client(monkeypatch)
+    signer = _ClosableClient()
+    api_client = _ClosableClient()
+    ws_manager = _ClosableWebSocket(fail=True)
+    client.lighter_client = signer
+    client.api_client = api_client
+    client.ws_manager = ws_manager
+
+    asyncio.run(client.disconnect())
+
+    assert ws_manager.disconnect_calls == 1
+    assert signer.close_calls == 1
+    assert api_client.close_calls == 1
+    assert client.ws_manager is None
+    assert client.lighter_client is None
+    assert client.api_client is None
+
+
+def test_connect_failure_closes_both_created_api_sessions(monkeypatch):
+    client = _make_client(monkeypatch)
+    _RejectingSignerClient.instances.clear()
+    _SharedApiClient.instances.clear()
+    monkeypatch.setattr(lighter_module, "SignerClient", _RejectingSignerClient)
+    monkeypatch.setattr(lighter_module, "ApiClient", _SharedApiClient)
+
+    with pytest.raises(Exception, match="CheckClient error: invalid signer"):
+        asyncio.run(client.connect())
+
+    assert len(_RejectingSignerClient.instances) == 1
+    assert _RejectingSignerClient.instances[0].close_calls == 1
+    assert len(_SharedApiClient.instances) == 1
+    assert _SharedApiClient.instances[0].close_calls == 1
+    assert client.lighter_client is None
+    assert client.api_client is None
