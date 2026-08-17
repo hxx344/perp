@@ -7,7 +7,8 @@ LIGHTER_CHAIN_ID=466324
 # Create these credentials on Robinhood Lighter before starting the strategy.
 # Use API key indexes 4..254 until the conflicting reserved-key docs are clarified.
 LIGHTER_ACCOUNT_INDEX=
-# The exported key may be 64 hex characters with or without a 0x prefix.
+# Current SDK exports 80 hex characters; older SDK keys may contain 64.
+# Both forms may include a leading 0x prefix.
 LIGHTER_API_PRIVATE_KEYS={"4":"0xREPLACE_WITH_PRIVATE_KEY"}
 
 # Optional diagnostics. Never log private keys.

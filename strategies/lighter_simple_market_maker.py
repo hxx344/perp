@@ -1041,14 +1041,19 @@ class SimpleMarketMaker:
                 "Robinhood Lighter API key indexes must be in the conservative range 4..254; "
                 f"invalid indexes: {invalid_indexes}"
             )
+        # The current Lighter SDK generates a 40-byte API key (80 hex
+        # characters, optionally prefixed with 0x).  Older SDKs emitted a
+        # 32-byte value, so keep accepting that format for existing accounts.
+        valid_key_pattern = r"(?:0x)?(?:[0-9a-fA-F]{80}|[0-9a-fA-F]{64})"
         invalid_key_indexes = [
             index
             for index, private_key in key_map.items()
-            if re.fullmatch(r"(?:0x)?[0-9a-fA-F]{64}", str(private_key).strip()) is None
+            if re.fullmatch(valid_key_pattern, str(private_key).strip()) is None
         ]
         if invalid_key_indexes:
             raise ValueError(
-                "Robinhood Lighter API private keys must use an optional 0x followed by 64 hexadecimal characters; "
+                "Robinhood Lighter API private keys must use an optional 0x followed by 80 hexadecimal characters "
+                "(64 hexadecimal characters are accepted for older SDK keys); "
                 f"invalid key indexes: {sorted(invalid_key_indexes)}"
             )
 

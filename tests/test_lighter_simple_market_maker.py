@@ -265,6 +265,14 @@ def test_robinhood_credential_validation_accepts_raw_key_without_0x():
     SimpleMarketMaker._validate_robinhood_credentials(client)  # type: ignore[arg-type]
 
 
+def test_robinhood_credential_validation_accepts_current_sdk_key_length():
+    client = SimpleNamespace(
+        account_index=7,
+        api_private_keys={4: "c" * 80},
+    )
+    SimpleMarketMaker._validate_robinhood_credentials(client)  # type: ignore[arg-type]
+
+
 def test_sync_side_uses_post_only_and_accepts_shared_order_snapshot():
     settings = SimpleMakerSettings(
         lighter_ticker="TEST",
