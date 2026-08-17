@@ -72,6 +72,32 @@ def test_canary_service_and_runtime_dependencies_fail_closed():
     assert "skip-network" not in runner
 
 
+def test_quickstart_keeps_install_read_only_until_explicit_live_flags():
+    quickstart = (PROJECT_ROOT / "deploy/robinhood/quickstart.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--run-canary" in quickstart
+    assert "--confirm-live" in quickstart
+    assert "git pull" not in quickstart
+    assert "--run-canary requires --confirm-live" in quickstart
+    assert "install -d -o root" in quickstart
+
+
+def test_install_supports_root_git_checks_and_exact_wheelhouse_manifest():
+    installer = (PROJECT_ROOT / "deploy/robinhood/install.sh").read_text(
+        encoding="utf-8"
+    )
+    wheelhouse_verifier = (
+        PROJECT_ROOT / "deploy/robinhood/verify_wheelhouse.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'safe.directory=${PROJECT_ROOT}' in installer
+    assert "chmod 0755" not in installer
+    assert "verify_wheelhouse.py" in installer
+    assert "actual != expected" in wheelhouse_verifier
+
+
 @pytest.mark.parametrize(
     ("quantity", "reference_price", "expected_errors"),
     [

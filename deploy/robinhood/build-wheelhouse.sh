@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="${PERP_PROJECT_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)}"
-PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 OUTPUT=""
 
 usage() {
@@ -54,8 +54,9 @@ for command_name in "${PYTHON_BIN}" find grep sha256sum wc; do
     exit 1
   fi
 done
-if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)'; then
-  printf '%s\n' 'wheelhouse: Python 3.11 is required to match the deployment runtime' >&2
+PYTHON_VERSION="$("${PYTHON_BIN}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+  printf 'wheelhouse: Python >= 3.11 is required, got %s\n' "${PYTHON_VERSION}" >&2
   exit 1
 fi
 
@@ -83,5 +84,6 @@ fi
   cd -- "${OUTPUT}"
   sha256sum -- *.whl > SHA256SUMS
 )
+"${PYTHON_BIN}" "${SCRIPT_DIR}/verify_wheelhouse.py" "${OUTPUT}"
 printf 'Wheelhouse ready at %s (%s wheels).\n' \
   "${OUTPUT}" "$(find "${OUTPUT}" -maxdepth 1 -type f -name '*.whl' | wc -l)"

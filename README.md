@@ -312,6 +312,8 @@ python runbot.py --exchange grvt --ticker BTC --quantity 0.05 --take-profit 0.02
 
 若需执行文档中所述的单轮对冲流程（Aster Maker → Lighter 反向 Taker → Aster 反向 Maker → Lighter 反向 Taker），可以使用 `strategies/aster_lighter_cycle.py` 脚本。Robinhood Chain Lighter 的端点、签名和小额 canary 配置见 [迁移说明](docs/robinhood_lighter_aster_cycle.md)，生产服务器准备见 [Linux 部署手册](docs/robinhood_linux_deployment.md)：
 
+Linux 已提供一键入口：`sudo bash deploy/robinhood/quickstart.sh --project-root /opt/perp --ticker BTC --quantity 0.00020`。它只安装依赖并执行只读预检；真实 canary 必须额外显式传入 `--run-canary --confirm-live`。
+
 ```bash
 python strategies/aster_lighter_cycle.py \
    --aster-ticker ETH \

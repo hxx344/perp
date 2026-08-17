@@ -11,11 +11,40 @@
 `run.sh --confirm-live` 或显式启动 systemd 服务时才可能向 Lighter
 发送真实 IOC 订单。
 
+## 快速入口
+
+如果代码已经在 `/opt/perp`，可以用一个入口完成系统依赖、Python 环境、
+systemd 配置和只读预检：
+
+```bash
+sudo bash /opt/perp/deploy/robinhood/quickstart.sh \
+  --project-root /opt/perp \
+  --ticker BTC \
+  --quantity 0.00020
+```
+
+第一次运行会创建 `/etc/perp/robinhood.env` 模板并退出；填入账户索引和
+API key 后重复同一命令即可。确认预检、保证金和初始仓位无误后，才显式运行
+单轮真实 canary：
+
+```bash
+sudo bash /opt/perp/deploy/robinhood/quickstart.sh \
+  --project-root /opt/perp \
+  --ticker BTC \
+  --quantity 0.00020 \
+  --run-canary \
+  --confirm-live
+```
+
+快速入口不会自动 `git pull`、启用 systemd 或进入连续交易；连续模式仍按本文
+第 7 节的人工闸门执行。
+
 ## 1. 主机和网络要求
 
-建议使用 Ubuntu 24.04 或 Debian 12+，x86_64，Python 3.11 以上。
-Ubuntu 22.04 默认 Python 3.10，只有在已经通过可信来源独立提供 Python 3.11+
-时才属于支持范围。
+建议使用 Ubuntu 24.04（默认 Python 3.12）或 Debian 12+（默认 Python 3.11），
+x86_64，运行时 Python >=3.11。Ubuntu 22.04 默认 Python 3.10，只有在已经通过
+可信来源独立提供 Python 3.11+ 时才属于支持范围。wheelhouse 必须由与目标机相同
+的 Python 小版本和 CPU 架构构建。
 服务器必须保持 NTP 同步，并允许 DNS 与出站 TCP 443 访问：
 
 | 主机 | 用途 |
@@ -55,19 +84,19 @@ sudo install -d -o perp -g perp -m 0750 /opt/perp
 ```bash
 sudo -u perp -H bash /opt/perp/deploy/robinhood/install.sh \
   --project-root /opt/perp \
-  --python python3.11
+  --python python3
 ```
 
 脚本只会从当前 checkout 的 `requirements-robinhood.txt` 创建/更新 `.venv`，
 不会安装私有 EdgeX SDK，也不会克隆仓库、修改密钥、启用服务或启动交易。
 正式多机发布仍应复用同一台 canary 机器验证过的 wheel 产物，避免传递依赖变化。
 
-网络不稳定或多机发布时，在与目标机相同架构、相同 Python 3.11 的联网 Linux
+网络不稳定或多机发布时，在与目标机相同架构、相同 Python 小版本的联网 Linux
 主机上构建一次 wheelhouse。输出目录必须为空：
 
 ```bash
 sudo -u perp -H bash /opt/perp/deploy/robinhood/build-wheelhouse.sh \
-  --python python3.11 \
+  --python python3 \
   --output /var/lib/perp/wheelhouse-rh
 ```
 
@@ -76,12 +105,13 @@ sudo -u perp -H bash /opt/perp/deploy/robinhood/build-wheelhouse.sh \
 ```bash
 sudo -u perp -H bash /opt/perp/deploy/robinhood/install.sh \
   --project-root /opt/perp \
-  --python python3.11 \
+  --python python3 \
   --wheelhouse /var/lib/perp/wheelhouse-rh
 ```
 
-安装器会先验证所有 wheel 的 SHA-256，再使用 `--no-index`；目标机不再访问
-GitHub 或 PyPI。不要混用其他 Python 次版本或 CPU 架构构建的 wheelhouse。
+安装器会先验证 wheelhouse 文件集合与 `SHA256SUMS` 完全一致，并验证每个 wheel
+的 SHA-256，再使用 `--no-index`；目标机不再访问 GitHub 或 PyPI。不要混用其他
+Python 次版本或 CPU 架构构建的 wheelhouse。
 
 ## 3. 凭证文件
 

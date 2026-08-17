@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 DEFAULT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)"
 PROJECT_ROOT="${DEFAULT_ROOT}"
 VENV=""
-PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 SERVICE_USER="perp"
 SERVICE_GROUP="perp"
 SERVICE_ENV_FILE="/etc/perp/robinhood-service.env"
@@ -24,7 +24,7 @@ reads a private key from argv, enables a service, or starts live trading.
 Options:
   --project-root PATH       Existing repository checkout (default: current checkout)
   --venv PATH               Virtual environment path (default: PROJECT_ROOT/.venv)
-  --python COMMAND          Python >= 3.11 executable (default: python3.11)
+  --python COMMAND          Python >= 3.11 executable (default: python3)
   --wheelhouse PATH         Install only from a verified local wheelhouse
   --skip-dependencies       Do not create/update the virtual environment
   --allow-dirty             Allow an uncommitted checkout (diagnostics only)
@@ -127,15 +127,24 @@ PROJECT_ROOT="$(cd -- "${PROJECT_ROOT}" 2>/dev/null && pwd -P)" || {
   printf '%s\n' 'install: project root does not exist' >&2
   exit 1
 }
-if [[ ! -e "${PROJECT_ROOT}/.git" || ! -f "${PROJECT_ROOT}/requirements-robinhood.txt" || ! -f "${PROJECT_ROOT}/requirements-robinhood-offline.txt" || ! -d "${PROJECT_ROOT}/strategies" ]]; then
+if [[ ! -e "${PROJECT_ROOT}/.git" || ! -f "${PROJECT_ROOT}/requirements-robinhood.txt" || ! -f "${PROJECT_ROOT}/requirements-robinhood-offline.txt" || ! -f "${PROJECT_ROOT}/deploy/robinhood/verify_wheelhouse.py" || ! -d "${PROJECT_ROOT}/strategies" ]]; then
   printf 'install: path is not a complete repository checkout: %s\n' "${PROJECT_ROOT}" >&2
   exit 1
 fi
-DEPLOY_COMMIT="$(git -C "${PROJECT_ROOT}" rev-parse --verify HEAD 2>/dev/null)" || {
+
+git_safe() {
+  if ((EUID == 0)); then
+    git -c "safe.directory=${PROJECT_ROOT}" "$@"
+  else
+    git "$@"
+  fi
+}
+
+DEPLOY_COMMIT="$(git_safe -C "${PROJECT_ROOT}" rev-parse --verify HEAD 2>/dev/null)" || {
   printf '%s\n' 'install: unable to resolve the deployment commit' >&2
   exit 1
 }
-if ((ALLOW_DIRTY == 0)) && [[ -n "$(git -C "${PROJECT_ROOT}" status --porcelain --untracked-files=normal)" ]]; then
+if ((ALLOW_DIRTY == 0)) && [[ -n "$(git_safe -C "${PROJECT_ROOT}" status --porcelain --untracked-files=normal)" ]]; then
   printf '%s\n' 'install: checkout has uncommitted files; commit/tag the release or use --allow-dirty for diagnostics' >&2
   exit 1
 fi
@@ -181,10 +190,6 @@ if ((INSTALL_DEPENDENCIES)); then
     exit 1
   fi
   if [[ -n "${WHEELHOUSE}" ]]; then
-    if ! command -v sha256sum >/dev/null 2>&1; then
-      printf '%s\n' 'install: sha256sum is required for offline wheel verification' >&2
-      exit 1
-    fi
     WHEELHOUSE="$(cd -- "${WHEELHOUSE}" 2>/dev/null && pwd -P)" || {
       printf '%s\n' 'install: wheelhouse directory does not exist' >&2
       exit 1
@@ -193,10 +198,7 @@ if ((INSTALL_DEPENDENCIES)); then
       printf '%s\n' 'install: wheelhouse SHA256SUMS is missing' >&2
       exit 1
     fi
-    (
-      cd -- "${WHEELHOUSE}"
-      sha256sum --check --strict SHA256SUMS
-    )
+    "${PYTHON_BIN}" "${PROJECT_ROOT}/deploy/robinhood/verify_wheelhouse.py" "${WHEELHOUSE}"
     "${VENV}/bin/python" -m pip install \
       --disable-pip-version-check \
       --no-index \
@@ -207,11 +209,6 @@ if ((INSTALL_DEPENDENCIES)); then
   fi
   "${VENV}/bin/python" -c 'import aiohttp, dotenv, lighter, web3, websockets'
   install -d -m 0750 "${PROJECT_ROOT}/logs"
-  chmod 0755 \
-    "${PROJECT_ROOT}/deploy/robinhood/install.sh" \
-    "${PROJECT_ROOT}/deploy/robinhood/build-wheelhouse.sh" \
-    "${PROJECT_ROOT}/deploy/robinhood/preflight.sh" \
-    "${PROJECT_ROOT}/deploy/robinhood/run.sh"
   printf 'Python environment installed at %s. No trading process was started.\n' "${VENV}"
 fi
 
@@ -224,12 +221,8 @@ if ((INSTALL_SYSTEMD)); then
     printf '%s\n' 'install: systemd project path may contain only letters, digits, dot, underscore, slash, and hyphen' >&2
     exit 1
   fi
-  if [[ ! "${SERVICE_ENV_FILE}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
-    printf '%s\n' 'install: service environment path must be an absolute simple path' >&2
-    exit 1
-  fi
-  if [[ "${SERVICE_ENV_FILE}" != /etc/perp/*.env ]]; then
-    printf '%s\n' 'install: service environment path must be /etc/perp/<name>.env' >&2
+  if [[ ! "${SERVICE_ENV_FILE}" =~ ^/etc/perp/[A-Za-z0-9][A-Za-z0-9._-]*\.env$ ]]; then
+    printf '%s\n' 'install: service environment path must match /etc/perp/<basename>.env' >&2
     exit 1
   fi
   if [[ ! "${SERVICE_USER}" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] || [[ ! "${SERVICE_GROUP}" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then

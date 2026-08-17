@@ -18,9 +18,19 @@ RUN_MODE="${PERP_RUN_MODE:-canary}"
 CONTINUOUS_ACK="${PERP_CONTINUOUS_ACK:-}"
 CONFIRM_LIVE=0
 
-if [[ "${PYTHON}" != */* ]]; then
-  PYTHON="$(command -v "${PYTHON}" 2>/dev/null || true)"
-fi
+absolute_path_from_project() {
+  local path="$1"
+  local parent
+  local leaf
+  if [[ "${path}" != /* ]]; then
+    path="${PROJECT_ROOT}/${path}"
+  fi
+  parent="$(dirname -- "${path}")"
+  leaf="$(basename -- "${path}")"
+  [[ -n "${leaf}" && "${leaf}" != "." && "${leaf}" != ".." ]] || return 1
+  parent="$(cd -- "${parent}" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s\n' "${parent}" "${leaf}"
+}
 
 usage() {
   cat <<'EOF'
@@ -109,6 +119,33 @@ while (($#)); do
       ;;
   esac
 done
+
+if ! PROJECT_ROOT="$(cd -- "${PROJECT_ROOT}" 2>/dev/null && pwd -P)"; then
+  printf 'run: project root does not exist: %s\n' "${PROJECT_ROOT}" >&2
+  exit 1
+fi
+if [[ -n "${PERP_VENV+x}" ]]; then
+  if ! VENV="$(absolute_path_from_project "${VENV}")"; then
+    printf 'run: virtual environment path cannot be resolved: %s\n' "${VENV}" >&2
+    exit 1
+  fi
+else
+  VENV="${PROJECT_ROOT}/.venv"
+fi
+if [[ -z "${PERP_PYTHON+x}" ]]; then
+  PYTHON="${VENV}/bin/python"
+elif [[ "${PYTHON}" == */* ]]; then
+  if ! PYTHON="$(absolute_path_from_project "${PYTHON}")"; then
+    printf 'run: Python path cannot be resolved: %s\n' "${PYTHON}" >&2
+    exit 1
+  fi
+else
+  PYTHON="$(command -v "${PYTHON}" 2>/dev/null || true)"
+fi
+if ! ENV_FILE="$(absolute_path_from_project "${ENV_FILE}")"; then
+  printf 'run: credential env path cannot be resolved: %s\n' "${ENV_FILE}" >&2
+  exit 1
+fi
 
 if [[ ! -x "${PYTHON}" ]]; then
   printf 'run: Python interpreter is not executable: %s\n' "${PYTHON}" >&2
