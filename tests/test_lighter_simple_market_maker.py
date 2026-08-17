@@ -13,10 +13,12 @@ from trading_bot import TradingConfig
 from strategies.lighter_simple_market_maker import (
     ActiveOrder,
     _parse_args,
+    apply_orderbook_imbalance,
     apply_inventory_skew,
     SimpleMarketMaker,
     SimpleMakerSettings,
     clamp_maker_targets,
+    compute_orderbook_imbalance,
     compute_target_prices,
     required_hedge_quantity,
     side_has_inventory_capacity,
@@ -28,6 +30,137 @@ def test_compute_target_prices_respects_tick_size():
     prices = compute_target_prices(Decimal("100"), Decimal("10"), Decimal("0.5"))
     assert prices["buy"] == Decimal("99.5")
     assert prices["sell"] == Decimal("100.5")
+
+
+def test_orderbook_imbalance_is_relative_and_directional():
+    balanced = compute_orderbook_imbalance(
+        [["100", "2"], ["99", "1"]],
+        [["101", "2"], ["102", "1"]],
+        depth_levels=2,
+    )
+    bid_heavy = compute_orderbook_imbalance(
+        [["100", "8"], ["99", "4"]],
+        [["101", "2"], ["102", "1"]],
+        depth_levels=2,
+    )
+    ask_heavy = compute_orderbook_imbalance(
+        [["100", "2"], ["99", "1"]],
+        [["101", "8"], ["102", "4"]],
+        depth_levels=2,
+    )
+
+    assert balanced == Decimal("0")
+    assert bid_heavy > 0
+    assert ask_heavy < 0
+    assert bid_heavy == -ask_heavy
+
+
+def test_orderbook_signal_shifts_local_price_by_bps_not_absolute_binance_price():
+    assert apply_orderbook_imbalance(
+        Decimal("100"), Decimal("0.5"), Decimal("3")
+    ) == Decimal("100.015")
+    assert apply_orderbook_imbalance(
+        Decimal("10000"), Decimal("0.5"), Decimal("3")
+    ) == Decimal("10001.500")
+
+
+def test_orderbook_imbalance_rejects_empty_depth():
+    with pytest.raises(ValueError, match="no usable"):
+        compute_orderbook_imbalance([], [], depth_levels=10)
+    with pytest.raises(ValueError, match="no usable"):
+        compute_orderbook_imbalance([["100", "1"]], [], depth_levels=10)
+
+
+class _DepthResponse:
+    status = 200
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def json(self):
+        return self.payload
+
+
+class _DepthSession:
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls = []
+
+    def get(self, url, *, params):
+        self.calls.append((url, params))
+        return _DepthResponse(self.payload)
+
+
+def test_binance_public_reference_reads_depth_endpoint():
+    from strategies.lighter_simple_market_maker import BinancePublicReference
+
+    session = _DepthSession(
+        {
+            "bids": [["100", "5"], ["99", "1"]],
+            "asks": [["101", "1"], ["102", "1"]],
+        }
+    )
+    reference = BinancePublicReference("OTHERUSDT", session)  # type: ignore[arg-type]
+
+    signal = asyncio.run(reference.fetch_orderbook_imbalance(depth_levels=5))
+
+    assert signal > 0
+    assert session.calls == [
+        (
+            "https://fapi.binance.com/fapi/v1/depth",
+            {"symbol": "OTHERUSDT", "limit": 5},
+        )
+    ]
+
+
+def test_maker_applies_binance_pressure_to_lighter_midpoint_only():
+    settings = SimpleMakerSettings(
+        lighter_ticker="LIGHTER-PAIR",
+        binance_symbol="OTHERUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        binance_imbalance_max_bps=Decimal("3"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+
+    class SignalReference:
+        async def fetch_orderbook_imbalance(self, depth_levels: int) -> Decimal:
+            assert depth_levels == 10
+            return Decimal("0.5")
+
+    maker._binance_reference = SignalReference()  # type: ignore[assignment]
+    shifted = asyncio.run(maker._resolve_reference_mid(Decimal("100")))
+
+    assert shifted == Decimal("100.015")
+
+
+def test_maker_uses_neutral_signal_when_binance_depth_is_unavailable():
+    settings = SimpleMakerSettings(
+        lighter_ticker="LIGHTER-PAIR",
+        binance_symbol="OTHERUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+
+    class FailedReference:
+        async def fetch_orderbook_imbalance(self, depth_levels: int) -> Decimal:
+            raise RuntimeError("depth unavailable")
+
+    maker._binance_reference = FailedReference()  # type: ignore[assignment]
+    shifted = asyncio.run(maker._resolve_reference_mid(Decimal("100")))
+
+    assert shifted == Decimal("100")
 
 
 def test_should_enable_side_applies_inventory_limit():
@@ -81,6 +214,8 @@ def test_market_maker_defaults_are_robinhood_and_no_binance_trading():
     assert settings.use_binance_reference is True
     assert settings.order_quantity == Decimal("0.00020")
     assert settings.lighter_leverage == 2
+    assert settings.binance_depth_levels == 10
+    assert settings.binance_imbalance_max_bps == Decimal("3")
     assert SimpleMakerSettings(
         lighter_ticker="BTC",
         binance_symbol="BTCUSDT",
@@ -96,6 +231,7 @@ def test_market_maker_defaults_are_robinhood_and_no_binance_trading():
         ["--cycles", "-1"],
         ["--max-hedge-quantity", "0"],
         ["--hedge-buffer", "-0.1"],
+        ["--binance-imbalance-max-bps", "-1"],
         ["--order-ack-timeout-seconds", "0"],
     ],
 )

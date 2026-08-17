@@ -5,9 +5,12 @@ one ask on the Robinhood Chain Lighter BTC perpetual market.
 
 The default policy is deliberately small and conservative:
 
-- Binance Futures `bookTicker` is read-only and supplies the reference midpoint.
-- Lighter orders are explicitly `post_only`; Binance-led prices may improve the
-  wide local spread but remain at least one tick from the opposite Lighter side.
+- Binance Futures depth is read-only and supplies only a bounded bid/ask-pressure
+  signal. The Lighter midpoint remains the absolute price scale, so a different
+  quote asset or contract denomination does not create an absolute-price jump.
+- Lighter orders are explicitly `post_only`; the relative Binance signal may
+  shift the local center but quotes remain at least one tick from the opposite
+  Lighter side.
 - Binance trading is disabled by default. A hedge is only attempted after the
   combined inventory crosses `--hedge-threshold` and only when the operator
   explicitly enables it.
@@ -58,7 +61,9 @@ python3 -m strategies.robinhood_lighter_market_maker --env-file robinhood.env
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--order-quantity` | `0.00020` | Base BTC per quote; runtime market minimums are applied. |
-| `--spread-bps` | `5` | Half-spread in basis points around the Binance midpoint. |
+| `--spread-bps` | `5` | Half-spread in basis points around the locally scaled Lighter midpoint. |
+| `--binance-depth-levels` | `10` | Binance depth levels used for the relative pressure signal. |
+| `--binance-imbalance-max-bps` | `3` | Maximum quote-center shift caused by Binance depth pressure. |
 | `--inventory-limit` | threshold | Hard Lighter inventory cap. |
 | `--inventory-skew-bps` | `3` | Maximum quote-center shift used to pull inventory toward zero. |
 | `--hedge-threshold` | `0.001` | Combined inventory at which an optional hedge becomes eligible. |
@@ -71,10 +76,10 @@ python3 -m strategies.robinhood_lighter_market_maker --env-file robinhood.env
 | `--order-refresh-bps` | `1` | Minimum reference move before a normal replacement. |
 | `--min-quote-lifetime-seconds` | `5` | Minimum resting time, except for risk withdrawal or a large move. |
 | `--order-ack-timeout-seconds` | `5` | Maximum wait for private/REST confirmation; no duplicate is placed while waiting. |
-| `--binance-reference-timeout-seconds` | `1` | Timeout for Binance public BBO; stale reference withdraws quotes. |
+| `--binance-reference-timeout-seconds` | `1` | Timeout for one Binance depth request; a failure uses a neutral signal and the Lighter midpoint. |
 | `--fill-cooldown-seconds` | `5` | Minimum delay after a fill on the same side. |
 | `--ownership-state-file` | automatic | Override the crash-recovery state/lock location. |
-| `--disable-binance-reference` | off | Use Lighter midpoint instead of Binance public prices. |
+| `--disable-binance-reference` | off | Disable the Binance depth signal and use only the Lighter midpoint. |
 | `--enable-binance-hedge` | off | Explicitly enable authenticated Binance market hedging. |
 | `--allow-existing-binance-position` | off | Required opt-in to manage a pre-existing Binance position; use a dedicated hedge account. |
 | `--allowed-side buy/sell` | both | Restrict a canary to one side. Repeat to allow both. |
@@ -107,7 +112,7 @@ in the Robinhood Lighter UI first, or provide a separately controlled key with
 the required account-config permission. The process stops if it cannot confirm
 the leverage operation.
 
-The Binance reference requires no API key. Binance API credentials are needed
+The Binance depth signal requires no API key. Binance API credentials are needed
 only when `--enable-binance-hedge` is explicitly supplied. Hedge mode refuses
 to start with an existing Binance position unless
 `--allow-existing-binance-position` is explicitly supplied, because the bot
@@ -120,7 +125,10 @@ either venue cannot be confirmed flat.
 
 ## Tuning order
 
-1. Run one-sided with the minimum quantity and `--lighter-leverage 2`.
+1. Set `--binance-symbol` to a liquid Binance contract for the same underlying;
+   the symbols may use different quote assets or contract naming, but must not
+   represent unrelated assets. Run one-sided with the minimum quantity and
+   `--lighter-leverage 2`.
 2. Increase `--spread-bps` only after checking fills, cancel latency, maker fee,
    and adverse selection in the logs.
 3. Increase `--inventory-limit` only after verifying the account collateral and

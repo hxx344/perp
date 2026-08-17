@@ -1,11 +1,12 @@
 """Minimal Robinhood Lighter market-making loop.
 
-This module keeps a single post-only bid/ask resting on Lighter, anchors quotes
-to a public Binance Futures book when available, and optionally hedges net
-exposure on Binance Futures once an inventory threshold is breached. Binance
-trading is deliberately opt-in; the normal Robinhood deployment only reads
-public Binance prices. Hot-update configuration is reloaded each loop iteration
-so ops can pause the cycle or tweak parameters without restarts.
+This module keeps a single post-only bid/ask resting on Lighter, uses the public
+Binance Futures order book as a relative pressure signal when available, and
+optionally hedges net exposure on Binance Futures once an inventory threshold
+is breached. Binance trading is deliberately opt-in; the normal Robinhood
+deployment only reads public Binance depth. Hot-update configuration is
+reloaded each loop iteration so ops can pause the cycle or tweak parameters
+without restarts.
 """
 from __future__ import annotations
 
@@ -101,6 +102,8 @@ class SimpleMakerSettings:
     min_quote_lifetime_seconds: float = 5.0
     order_ack_timeout_seconds: float = 5.0
     binance_reference_timeout_seconds: float = 1.0
+    binance_depth_levels: int = 10
+    binance_imbalance_max_bps: Decimal = Decimal("3")
     max_cycles: int = 0
     log_to_console: bool = True
     metrics_interval_seconds: float = 30.0
@@ -164,6 +167,64 @@ def compute_target_prices(
     bid_price = (mid_price - half_spread).quantize(tick_size, rounding=ROUND_DOWN)
     ask_price = (mid_price + half_spread).quantize(tick_size, rounding=ROUND_UP)
     return {"buy": bid_price, "sell": ask_price}
+
+
+def compute_orderbook_imbalance(
+    bids: Iterable[Any],
+    asks: Iterable[Any],
+    depth_levels: int = 10,
+) -> Decimal:
+    """Return a dimensionless bid/ask pressure score in ``[-1, 1]``.
+
+    Only relative displayed size is used. This intentionally avoids importing
+    Binance's absolute price into Lighter pricing when the two venues use
+    different quote assets, contract denominations, or bases. Nearer levels
+    receive more weight so a large distant wall cannot dominate the signal.
+    """
+
+    if depth_levels <= 0:
+        raise ValueError("depth_levels must be positive")
+
+    def _score(levels: Iterable[Any]) -> Decimal:
+        score = Decimal("0")
+        for index, level in enumerate(levels):
+            if index >= depth_levels:
+                break
+            if not isinstance(level, (list, tuple)) or len(level) < 2:
+                continue
+            try:
+                price = Decimal(str(level[0]))
+                quantity = Decimal(str(level[1]))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if not price.is_finite() or not quantity.is_finite() or price <= 0 or quantity <= 0:
+                continue
+            score += quantity / Decimal(index + 1)
+        return score
+
+    bid_score = _score(bids)
+    ask_score = _score(asks)
+    total = bid_score + ask_score
+    if bid_score <= 0 or ask_score <= 0 or total <= 0:
+        raise ValueError("Binance order book has no usable bid/ask depth")
+    imbalance = (bid_score - ask_score) / total
+    return max(Decimal("-1"), min(Decimal("1"), imbalance))
+
+
+def apply_orderbook_imbalance(
+    local_mid: Decimal,
+    imbalance: Decimal,
+    max_offset_bps: Decimal,
+) -> Decimal:
+    """Shift a local Lighter midpoint by a bounded relative pressure signal."""
+
+    if local_mid <= 0 or max_offset_bps <= 0:
+        return local_mid
+    if not imbalance.is_finite():
+        return local_mid
+    bounded = max(Decimal("-1"), min(Decimal("1"), imbalance))
+    relative_offset = bounded * max_offset_bps / Decimal("10000")
+    return local_mid * (Decimal("1") + relative_offset)
 
 
 def should_enable_side(net_position: Decimal, limit: Decimal, side: str) -> bool:
@@ -407,7 +468,7 @@ class BinanceHedger:
 
 
 class BinancePublicReference:
-    """Read-only Binance book-ticker reference used to anchor maker quotes."""
+    """Read-only Binance depth source used as a relative pressure signal."""
 
     BASE_URL = "https://fapi.binance.com"
 
@@ -416,7 +477,12 @@ class BinancePublicReference:
         self.session = session
 
     async def fetch_mid_price(self) -> Decimal:
-        """Return Binance Futures best-bid/ask midpoint without credentials."""
+        """Return Binance Futures best-bid/ask midpoint without credentials.
+
+        Kept for compatibility with callers outside this strategy. The maker
+        loop deliberately does not use this absolute price as its Lighter
+        quote center.
+        """
 
         async with self.session.get(
             f"{self.BASE_URL}/fapi/v1/ticker/bookTicker",
@@ -437,6 +503,30 @@ class BinancePublicReference:
             raise RuntimeError(f"Invalid Binance public book ticker prices: bid={bid} ask={ask}")
         return (bid + ask) / Decimal("2")
 
+    async def fetch_orderbook_imbalance(self, depth_levels: int = 10) -> Decimal:
+        """Return weighted Binance bid/ask depth pressure without credentials."""
+
+        if depth_levels not in (5, 10, 20, 50, 100, 500, 1000):
+            raise ValueError(
+                "Binance depth limit must be one of 5, 10, 20, 50, 100, 500, or 1000"
+            )
+
+        async with self.session.get(
+            f"{self.BASE_URL}/fapi/v1/depth",
+            params={"symbol": self.symbol, "limit": depth_levels},
+        ) as response:
+            data = await response.json()
+            if response.status >= 400:
+                raise RuntimeError(f"Binance public depth failed: {response.status} {data}")
+
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Unexpected Binance public depth response: {data!r}")
+        return compute_orderbook_imbalance(
+            data.get("bids") or [],
+            data.get("asks") or [],
+            depth_levels=depth_levels,
+        )
+
 
 class SimpleMarketMaker:
     """Run a lightweight post-only maker loop on Robinhood Lighter."""
@@ -448,8 +538,6 @@ class SimpleMarketMaker:
         self._session: Optional[aiohttp.ClientSession] = None
         self._hedger: Optional[BinanceHedger] = None
         self._binance_reference: Optional[BinancePublicReference] = None
-        self._last_binance_reference_mid: Decimal = Decimal("0")
-        self._last_binance_reference_time: float = 0.0
         self._lighter_client: Optional[LighterClient] = None
         self._lighter_config: Optional[TradingConfig] = None
         self._tracked_orders: Dict[str, ActiveOrder] = {}
@@ -1249,35 +1337,41 @@ class SimpleMarketMaker:
         async with self._quote_operation_lock:
             await self._refresh_quotes()
 
-    async def _resolve_reference_mid(self, fallback_mid: Decimal) -> Decimal:
-        """Use Binance public midpoint, with only a short last-good cache."""
+    async def _resolve_binance_imbalance(self) -> Decimal:
+        """Read a short-lived Binance pressure signal, or return neutral."""
 
-        if not self.settings.use_binance_reference:
-            return fallback_mid
-        if self._binance_reference is None:
+        if not self.settings.use_binance_reference or self._binance_reference is None:
             return Decimal("0")
 
-        now = time.monotonic()
         try:
-            reference_mid = await asyncio.wait_for(
-                self._binance_reference.fetch_mid_price(),
+            imbalance = await asyncio.wait_for(
+                self._binance_reference.fetch_orderbook_imbalance(
+                    self.settings.binance_depth_levels,
+                ),
                 timeout=max(0.1, self.settings.binance_reference_timeout_seconds),
             )
-            if reference_mid > 0:
-                self._last_binance_reference_mid = reference_mid
-                self._last_binance_reference_time = now
-                return reference_mid
+            if imbalance.is_finite() and Decimal("-1") <= imbalance <= Decimal("1"):
+                return imbalance
         except Exception as exc:  # pragma: no cover - network dependent
-            self.logger.log(f"Binance public reference unavailable: {exc}", "WARNING")
+            self.logger.log(f"Binance orderbook signal unavailable: {exc}", "WARNING")
 
-        # Keep a very short stale window so a transient Binance hiccup does not
-        # immediately jump quotes while avoiding reliance on old lead prices.
-        if (
-            self._last_binance_reference_mid > 0
-            and now - self._last_binance_reference_time <= max(self.settings.loop_sleep_seconds * 2.0, 5.0)
-        ):
-            return self._last_binance_reference_mid
+        # A stale directional signal is more dangerous than a neutral signal.
+        # Continue using the local Lighter midpoint if Binance is unavailable.
         return Decimal("0")
+
+    async def _resolve_reference_mid(self, fallback_mid: Decimal) -> Decimal:
+        """Apply Binance orderbook pressure to the local Lighter midpoint.
+
+        The method name remains for compatibility with older integrations, but
+        Binance's absolute midpoint is intentionally never used here.
+        """
+
+        imbalance = await self._resolve_binance_imbalance()
+        return apply_orderbook_imbalance(
+            fallback_mid,
+            imbalance,
+            self.settings.binance_imbalance_max_bps,
+        )
 
     async def _refresh_quotes(self) -> None:
         assert self._lighter_client is not None
@@ -1332,14 +1426,11 @@ class SimpleMarketMaker:
             return
 
         lighter_mid = (best_bid + best_ask) / 2
+        # Lighter supplies the absolute price scale. Binance contributes only
+        # a bounded, dimensionless orderbook-pressure shift, so differing
+        # quote assets or contract multipliers cannot create a cross-market
+        # absolute-price jump.
         mid_price = await self._resolve_reference_mid(lighter_mid)
-        if mid_price <= 0:
-            self.logger.log(
-                "Binance reference is stale; cancelling own quotes until it recovers",
-                "WARNING",
-            )
-            await self._cancel_all_orders()
-            return
         self._lighter_last_mark_price = lighter_mid
         spread_scale = self._resolve_spread_scale(hot_update)
         inventory_cap = self.settings.effective_inventory_limit()
@@ -2843,7 +2934,20 @@ class SimpleMarketMaker:
 def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
     parser = argparse.ArgumentParser(description="Run a post-only Robinhood Lighter market maker")
     parser.add_argument("--lighter-ticker", default="BTC", help="Lighter market ticker symbol (default: BTC)")
-    parser.add_argument("--binance-symbol", default=None, help="Binance Futures reference symbol (default: <ticker>USDT)")
+    parser.add_argument("--binance-symbol", default=None, help="Binance Futures signal symbol (default: <ticker>USDT)")
+    parser.add_argument(
+        "--binance-depth-levels",
+        default=10,
+        type=int,
+        choices=(5, 10, 20, 50, 100),
+        help="Binance orderbook levels used for the pressure signal (default: 10)",
+    )
+    parser.add_argument(
+        "--binance-imbalance-max-bps",
+        default="3",
+        type=_decimal,
+        help="Maximum relative quote-center shift from Binance depth (default: 3 bps)",
+    )
     parser.add_argument("--order-quantity", default="0.00020", type=_decimal, help="Per-order base quantity (default: 0.00020)")
     parser.add_argument("--spread-bps", default="5", type=_decimal, help="Half-spread in basis points (default: 5)")
     parser.add_argument("--hedge-threshold", default="0.001", type=_decimal, help="Inventory threshold for optional hedging (default: 0.001)")
@@ -2960,7 +3064,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
     parser.add_argument(
         "--disable-binance-reference",
         action="store_true",
-        help="Quote from the local Lighter midpoint instead of Binance public prices",
+        help="Disable the Binance orderbook pressure signal and use only the local Lighter midpoint",
     )
 
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -2984,6 +3088,8 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         parser.error("--inventory-limit must be positive")
     if args.inventory_skew_bps < 0:
         parser.error("--inventory-skew-bps must not be negative")
+    if args.binance_imbalance_max_bps < 0:
+        parser.error("--binance-imbalance-max-bps must not be negative")
     if args.lighter_leverage <= 0:
         parser.error("--lighter-leverage must be positive")
     if args.loop_sleep <= 0:
@@ -3040,6 +3146,8 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         min_quote_lifetime_seconds=args.min_quote_lifetime_seconds,
         order_ack_timeout_seconds=args.order_ack_timeout_seconds,
         binance_reference_timeout_seconds=args.binance_reference_timeout_seconds,
+        binance_depth_levels=args.binance_depth_levels,
+        binance_imbalance_max_bps=args.binance_imbalance_max_bps,
         fill_cooldown_seconds=args.fill_cooldown_seconds,
         log_to_console=not args.no_console_log,
         metrics_interval_seconds=max(5.0, args.metrics_interval),
