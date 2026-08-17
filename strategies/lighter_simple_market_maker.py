@@ -111,6 +111,7 @@ class SimpleMakerSettings:
     use_binance_reference: bool = True
     inventory_skew_bps: Decimal = Decimal("3")
     ownership_state_path: Optional[str] = None
+    allow_existing_binance_position: bool = False
 
     def effective_inventory_limit(self) -> Decimal:
         return self.inventory_limit if self.inventory_limit is not None else self.hedge_threshold
@@ -575,6 +576,11 @@ class SimpleMarketMaker:
                 position_unrealized = hedger_snapshot.get("position_unrealized_pnl", Decimal("0"))
                 self._binance_position_estimate = position_size
                 initial_binance_position = position_size
+                if position_size != 0 and not self.settings.allow_existing_binance_position:
+                    raise RuntimeError(
+                        "Binance hedge account already has a position; use a dedicated clean "
+                        "hedge account or explicitly pass --allow-existing-binance-position"
+                    )
                 if position_size != 0 and position_notional != 0:
                     try:
                         initial_binance_avg_price = abs(position_notional) / abs(position_size)
@@ -1213,11 +1219,15 @@ class SimpleMarketMaker:
                     try:
                         await self._cancel_all_orders(reconciliation_attempts=3)
                     except Exception as cancel_exc:
+                        self._external_pause = True
                         self.logger.log(
                             "Could not confirm quote withdrawal during transient failure: "
                             f"{cancel_exc}",
                             "ERROR",
                         )
+                        raise RuntimeError(
+                            "Stopping maker because quote withdrawal could not be confirmed"
+                        ) from cancel_exc
                     await asyncio.sleep(delay)
                     continue
 
@@ -1676,14 +1686,25 @@ class SimpleMarketMaker:
 
         try:
             order_response = await self._hedger.place_market_order(hedge_side, hedge_qty)
-            executed_qty = self._to_decimal(
+            executed_raw = (
                 order_response.get("executedQty")
                 or order_response.get("cumQty")
-                or order_response.get("origQty")
-                or hedge_qty
             )
+            if executed_raw is None:
+                self._binance_state_known = False
+                self.logger.log(
+                    "Binance hedge response omitted executed quantity; waiting for account reconciliation",
+                    "ERROR",
+                )
+                return
+            executed_qty = abs(self._to_decimal(executed_raw))
             if executed_qty <= 0:
-                executed_qty = hedge_qty
+                self._binance_state_known = False
+                self.logger.log(
+                    "Binance hedge response reported zero execution; waiting for account reconciliation",
+                    "ERROR",
+                )
+                return
 
             signed_qty = executed_qty if hedge_side == "BUY" else -executed_qty
             fill_price = self._resolve_binance_fill_price(
@@ -2464,44 +2485,64 @@ class SimpleMarketMaker:
         if self._hedger is None:
             return
 
+        last_error: Optional[BaseException] = None
         for attempt in range(1, max_attempts + 1):
+            try:
+                metrics = await self._hedger.get_account_metrics()
+                position = self._to_decimal(metrics.get("position_size"))
+                self._binance_position_estimate = position
+                self._binance_inventory_base = position
+                self._binance_state_known = True
+                if abs(position) <= tolerance:
+                    return
+
+                quantity = await self._hedger.prepare_market_quantity(abs(position))
+                if quantity <= 0:
+                    raise RuntimeError(
+                        f"Binance hedge position {position} is below its executable lot size"
+                    )
+                side = "SELL" if position > 0 else "BUY"
+                response = await self._hedger.place_market_order(
+                    side,
+                    quantity,
+                    reduce_only=True,
+                )
+                executed = abs(self._to_decimal(response.get("executedQty")))
+                if executed <= 0:
+                    raise RuntimeError(
+                        f"Binance emergency reduce-only order did not execute (attempt {attempt})"
+                    )
+                fill_price = self._resolve_binance_fill_price(
+                    response,
+                    executed,
+                    self._binance_last_mark_price,
+                )
+                signed_fill = executed if side == "BUY" else -executed
+                if fill_price > 0:
+                    self._apply_binance_fill_to_session_pnl(signed_fill, fill_price)
+                    self._binance_session_volume_quote += executed * fill_price
+                self._binance_session_volume_base += executed
+            except Exception as exc:
+                last_error = exc
+                self._binance_state_known = False
+                self.logger.log(
+                    f"Binance emergency flatten attempt {attempt}/{max_attempts} failed: {exc}",
+                    "ERROR",
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(0.25)
+                    continue
+                raise RuntimeError(
+                    f"Binance emergency flatten failed after {max_attempts} attempts: {exc}"
+                ) from exc
+
+        try:
             metrics = await self._hedger.get_account_metrics()
-            position = self._to_decimal(metrics.get("position_size"))
-            self._binance_position_estimate = position
-            self._binance_inventory_base = position
-            self._binance_state_known = True
-            if abs(position) <= tolerance:
-                return
-
-            quantity = await self._hedger.prepare_market_quantity(abs(position))
-            if quantity <= 0:
-                raise RuntimeError(
-                    f"Binance hedge position {position} is below its executable lot size"
-                )
-            side = "SELL" if position > 0 else "BUY"
-            response = await self._hedger.place_market_order(
-                side,
-                quantity,
-                reduce_only=True,
-            )
-            executed = abs(self._to_decimal(response.get("executedQty")))
-            if executed <= 0:
-                raise RuntimeError(
-                    f"Binance emergency reduce-only order did not execute (attempt {attempt})"
-                )
-            fill_price = self._resolve_binance_fill_price(
-                response,
-                executed,
-                self._binance_last_mark_price,
-            )
-            signed_fill = executed if side == "BUY" else -executed
-            if fill_price > 0:
-                self._apply_binance_fill_to_session_pnl(signed_fill, fill_price)
-                self._binance_session_volume_quote += executed * fill_price
-            self._binance_session_volume_base += executed
-
-        metrics = await self._hedger.get_account_metrics()
-        residual = self._to_decimal(metrics.get("position_size"))
+            residual = self._to_decimal(metrics.get("position_size"))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not verify Binance emergency flatten after {max_attempts} attempts: {exc}"
+            ) from exc
         self._binance_position_estimate = residual
         self._binance_inventory_base = residual
         if abs(residual) > tolerance:
@@ -2907,6 +2948,11 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         help="Enable threshold Binance Futures hedging (disabled by default)",
     )
     parser.add_argument(
+        "--allow-existing-binance-position",
+        action="store_true",
+        help="Allow hedge mode to manage an existing Binance position (dedicated account required)",
+    )
+    parser.add_argument(
         "--disable-binance-hedge",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -2928,6 +2974,8 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         parser.error("--hedge-threshold must be positive")
     if args.hedge_buffer < 0:
         parser.error("--hedge-buffer must not be negative")
+    if args.hedge_buffer >= args.hedge_threshold:
+        parser.error("--hedge-buffer must be smaller than --hedge-threshold")
     if args.hedge_cooldown_seconds < 0:
         parser.error("--hedge-cooldown-seconds must not be negative")
     if args.max_hedge_quantity is not None and args.max_hedge_quantity <= 0:
@@ -3001,6 +3049,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         use_binance_reference=not args.disable_binance_reference,
         inventory_skew_bps=args.inventory_skew_bps,
         ownership_state_path=args.ownership_state_file,
+        allow_existing_binance_position=args.allow_existing_binance_position,
     )
 
 

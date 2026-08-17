@@ -1204,6 +1204,33 @@ def test_maybe_execute_hedge_skips_when_quantity_below_lot_size():
     assert maker._binance_position_estimate == Decimal("0")
 
 
+def test_maybe_execute_hedge_does_not_assume_request_quantity_filled():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("0.01"),
+        hedge_buffer=Decimal("0"),
+        config_path="configs/hot_update.json",
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+
+    class UncertainHedger(StubHedger):
+        async def place_market_order(self, side, quantity, *, reduce_only=False):
+            return {}
+
+    maker._hedger = UncertainHedger()  # type: ignore[assignment]
+    maker._binance_position_estimate = Decimal("0")
+    maker._binance_state_known = True
+
+    asyncio.run(maker._maybe_execute_hedge(Decimal("0.02")))
+
+    assert maker._binance_position_estimate == Decimal("0")
+    assert maker._binance_state_known is False
+
+
 def test_configure_lighter_leverage_targets_max(tmp_path):
     settings = SimpleMakerSettings(
         lighter_ticker="TEST",

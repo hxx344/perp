@@ -76,6 +76,7 @@ python3 -m strategies.robinhood_lighter_market_maker --env-file robinhood.env
 | `--ownership-state-file` | automatic | Override the crash-recovery state/lock location. |
 | `--disable-binance-reference` | off | Use Lighter midpoint instead of Binance public prices. |
 | `--enable-binance-hedge` | off | Explicitly enable authenticated Binance market hedging. |
+| `--allow-existing-binance-position` | off | Required opt-in to manage a pre-existing Binance position; use a dedicated hedge account. |
 | `--allowed-side buy/sell` | both | Restrict a canary to one side. Repeat to allow both. |
 
 `--take-profit` is not a parameter of this maker. The maker earns from spread
@@ -107,7 +108,10 @@ the required account-config permission. The process stops if it cannot confirm
 the leverage operation.
 
 The Binance reference requires no API key. Binance API credentials are needed
-only when `--enable-binance-hedge` is explicitly supplied.
+only when `--enable-binance-hedge` is explicitly supplied. Hedge mode refuses
+to start with an existing Binance position unless
+`--allow-existing-binance-position` is explicitly supplied, because the bot
+cannot distinguish its own hedge from a manual position.
 
 Emergency flatten uses reduce-only, marketable IOC orders on Lighter with a
 finite attempt limit. When Binance hedging is enabled, it subsequently closes
