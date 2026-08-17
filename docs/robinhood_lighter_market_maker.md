@@ -94,7 +94,9 @@ Copy `env_robinhood_example.txt` to the selected file and fill in the
 pre-created Robinhood Lighter API credentials. The strategy expects the RH
 profile (`api.rh.lighter.xyz`, chain `466324`) and refuses a Core endpoint.
 It also rejects reserved API key indexes outside `4..254` and placeholder or
-malformed private keys before connecting.
+malformed private keys before connecting. The private-key value may be the
+64 hexadecimal characters exported by the UI, with or without a leading
+`0x`.
 Keep the file private (`chmod 600 robinhood.env`) and run only one maker process
 for an account.
 

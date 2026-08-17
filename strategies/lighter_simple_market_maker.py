@@ -1044,11 +1044,11 @@ class SimpleMarketMaker:
         invalid_key_indexes = [
             index
             for index, private_key in key_map.items()
-            if re.fullmatch(r"0x[0-9a-fA-F]{64}", str(private_key).strip()) is None
+            if re.fullmatch(r"(?:0x)?[0-9a-fA-F]{64}", str(private_key).strip()) is None
         ]
         if invalid_key_indexes:
             raise ValueError(
-                "Robinhood Lighter API private keys must use 0x followed by 64 hexadecimal characters; "
+                "Robinhood Lighter API private keys must use an optional 0x followed by 64 hexadecimal characters; "
                 f"invalid key indexes: {sorted(invalid_key_indexes)}"
             )
 
