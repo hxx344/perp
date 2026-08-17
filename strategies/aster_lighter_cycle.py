@@ -76,6 +76,11 @@ except ImportError:  # pragma: no cover - fallback when executed as a script
 
 DEFAULT_ASTER_MAKER_DEPTH_LEVEL = 10
 MIN_CYCLE_INTERVAL_SECONDS = 5.0
+# Account REST can lag the private order stream immediately after a fill.  A
+# short bounded grace avoids treating that stale snapshot as real inventory,
+# while still sending emergency IOC recovery for a confirmed residual.
+LIGHTER_POSITION_SETTLE_GRACE_SECONDS = 3.0
+LIGHTER_POSITION_SETTLE_POLL_SECONDS = 0.5
 
 # Process exit codes are intentionally stable because the Linux service unit
 # uses them to decide whether an automatic restart is safe.
@@ -5044,6 +5049,13 @@ class HedgingCycleExecutor:
 
         quantity_tolerance = self._lighter_quantity_step if isinstance(self._lighter_quantity_step, Decimal) and self._lighter_quantity_step > 0 else Decimal("0.00000001")
 
+        position = await self._recheck_lighter_position_after_fill(
+            position,
+            target_position,
+            quantity_tolerance,
+        )
+        delta = position - target_position
+
         if abs(delta) <= quantity_tolerance:
             if self._preserve_initial_lighter_position:
                 self.logger.log(
@@ -5229,6 +5241,91 @@ class HedgingCycleExecutor:
                 "ERROR",
             )
             return False
+
+    async def _recheck_lighter_position_after_fill(
+        self,
+        position: Decimal,
+        target_position: Decimal,
+        tolerance: Decimal,
+    ) -> Decimal:
+        """Re-read a non-target position before sending emergency recovery.
+
+        The private order stream and account REST endpoint are eventually
+        consistent.  A just-completed flatten leg can therefore be reported as
+        FILLED while the next REST account snapshot still contains the prior
+        leg's position.  Keep the latest value, but give the account endpoint a
+        short bounded window to converge before treating it as residual risk.
+        """
+        if abs(position - target_position) <= tolerance or not self.lighter_client:
+            return position
+
+        recent_order = getattr(self.lighter_client, "current_order", None)
+        recent_status = str(getattr(recent_order, "status", "") or "").upper()
+        if recent_status != "FILLED":
+            # There is no fresh private-stream fill to reconcile.  Do not
+            # consume recovery verification attempts for an older residual.
+            return position
+
+        grace_seconds = max(
+            0.0,
+            float(getattr(self.config, "lighter_position_settle_seconds", LIGHTER_POSITION_SETTLE_GRACE_SECONDS)),
+        )
+        if grace_seconds <= 0:
+            return position
+
+        poll_seconds = max(
+            0.05,
+            min(
+                float(getattr(self.config, "poll_interval", LIGHTER_POSITION_SETTLE_POLL_SECONDS)),
+                LIGHTER_POSITION_SETTLE_POLL_SECONDS,
+            ),
+        )
+        deadline = time.monotonic() + grace_seconds
+        latest = position
+        checks = 0
+
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            await asyncio.sleep(min(poll_seconds, max(remaining, 0.0)))
+            if time.monotonic() >= deadline:
+                break
+
+            try:
+                current_raw = await self.lighter_client.get_account_positions()
+                latest = (
+                    current_raw
+                    if isinstance(current_raw, Decimal)
+                    else Decimal(str(current_raw))
+                )
+            except Exception as exc:
+                self.logger.log(
+                    f"Unable to recheck Lighter position during settle grace: {exc}",
+                    "DEBUG",
+                )
+                continue
+
+            checks += 1
+            if abs(latest - target_position) <= tolerance:
+                self.logger.log(
+                    (
+                        "Lighter account position converged during settle grace; "
+                        f"stale={_format_decimal(position)}, current={_format_decimal(latest)}, "
+                        f"target={_format_decimal(target_position)}, checks={checks}"
+                    ),
+                    "INFO",
+                )
+                return latest
+
+        if checks:
+            self.logger.log(
+                (
+                    "Lighter position remained outside target after settle grace; "
+                    f"current={_format_decimal(latest)}, target={_format_decimal(target_position)}, "
+                    f"checks={checks}; emergency recovery may be required"
+                ),
+                "DEBUG",
+            )
+        return latest
 
 
 def _parse_args() -> argparse.Namespace:

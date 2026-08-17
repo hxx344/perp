@@ -92,6 +92,34 @@ def test_ensure_lighter_flat_skips_within_tolerance() -> None:
     assert client.order_calls == []
 
 
+def test_ensure_lighter_flat_waits_for_stale_position_snapshot() -> None:
+    config = _spot_config()
+    config.lighter_position_settle_seconds = 0.2
+    executor = HedgingCycleExecutor(config)
+    client = _StubLighterClient()
+    client.current_order = OrderInfo(
+        order_id="43",
+        side="buy",
+        size=Decimal("0.3"),
+        price=Decimal("100"),
+        status="FILLED",
+        filled_size=Decimal("0.3"),
+    )
+    client.get_account_positions = AsyncMock(
+        side_effect=[Decimal("-0.00213"), Decimal("0")]
+    )
+    executor.lighter_client = cast(Any, client)
+    executor.lighter_config.contract_id = "123"
+    executor.lighter_config.tick_size = Decimal("0.01")
+    executor._lighter_quantity_step = Decimal("0.001")
+    executor._baseline_lighter_position = Decimal("0")
+
+    asyncio.run(executor.ensure_lighter_flat())
+
+    assert client.order_calls == []
+    assert client.get_account_positions.await_count == 2
+
+
 def test_ensure_lighter_flat_quantizes_quantity() -> None:
     config = _spot_config()
     executor = HedgingCycleExecutor(config)
