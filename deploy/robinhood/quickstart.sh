@@ -7,7 +7,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="${PERP_PROJECT_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd -P)}"
-PYTHON_REQUEST="${PYTHON_BIN:-python3.11}"
+PYTHON_REQUEST="${PYTHON_BIN:-python3}"
 ENV_FILE="${PERP_ENV_FILE:-/etc/perp/robinhood.env}"
 SERVICE_ENV_FILE="${PERP_SERVICE_ENV_FILE:-/etc/perp/robinhood-service.env}"
 SERVICE_USER="${PERP_SERVICE_USER:-perp}"
@@ -36,7 +36,7 @@ It never pulls code, starts systemd, or sends an order unless both
 
 Options:
   --project-root PATH       Checkout root (default: inferred from this script)
-  --python COMMAND          Python >= 3.11 (default: python3.11, then python3)
+  --python COMMAND          Python >= 3.11 (default: python3)
   --env-file PATH           Secret credential file (default: /etc/perp/robinhood.env)
   --service-env PATH        Non-secret service env (default: /etc/perp/robinhood-service.env)
   --ticker SYMBOL           Market symbol (default: BTC)
@@ -177,6 +177,14 @@ fi
 if [[ "${SERVICE_ENV_FILE}" != /* ]]; then
   SERVICE_ENV_FILE="${PROJECT_ROOT}/${SERVICE_ENV_FILE}"
 fi
+if [[ ! "${ENV_FILE}" =~ ^/etc/perp/[A-Za-z0-9][A-Za-z0-9._-]*\.env$ ]]; then
+  printf '%s\n' 'quickstart: credential env path must match /etc/perp/<basename>.env' >&2
+  exit 1
+fi
+if [[ ! "${SERVICE_ENV_FILE}" =~ ^/etc/perp/[A-Za-z0-9][A-Za-z0-9._-]*\.env$ ]]; then
+  printf '%s\n' 'quickstart: service env path must match /etc/perp/<basename>.env' >&2
+  exit 1
+fi
 for required_path in .git requirements-robinhood.txt requirements-robinhood-offline.txt strategies; do
   if [[ ! -e "${PROJECT_ROOT}/${required_path}" ]]; then
     printf 'quickstart: incomplete checkout; missing %s\n' "${PROJECT_ROOT}/${required_path}" >&2
@@ -202,9 +210,6 @@ resolve_python() {
     candidate="${PYTHON_REQUEST}"
   else
     candidate="$(command -v "${PYTHON_REQUEST}" 2>/dev/null || true)"
-    if [[ -z "${candidate}" && "${PYTHON_REQUEST}" == "python3.11" ]]; then
-      candidate="$(command -v python3 2>/dev/null || true)"
-    fi
   fi
   [[ -n "${candidate}" && -x "${candidate}" ]] || return 1
   if ! "${candidate}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then

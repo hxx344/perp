@@ -17,6 +17,13 @@ ACCOUNT_NAME=robinhood-btc-canary
 ASTER_API_KEY=
 ASTER_SECRET_KEY=
 
+# Optional hedge coordinator telemetry. Keep credentials in this protected file
+# instead of command-line arguments so they do not appear in process listings.
+HEDGE_COORDINATOR_URL=
+HEDGE_COORDINATOR_AGENT=
+HEDGE_COORDINATOR_USERNAME=
+HEDGE_COORDINATOR_PASSWORD=
+
 # The Core Lighter Arbitrum provisioning variables are intentionally omitted.
 # Robinhood mode never transfers funds from an L1 wallet automatically.
 

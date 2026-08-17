@@ -434,6 +434,7 @@ Key options:
 - `--pause-price`: When `direction` is 'buy', pause trading when price >= pause-price and resume trading when price falls back below pause-price; 'sell' logic is opposite (default: -1, no price-based pausing). The purpose of this parameter is to prevent orders from being placed at "high points for long positions or low points for short positions that you consider".
 - `--boost`: Enable Boost mode for volume boosting on Aster and Backpack exchanges (only available for 'aster' and 'backpack')
   Boost trading logic: Place maker orders to open positions, immediately close with taker orders after fill, repeat this cycle. Wear consists of one maker order, one taker order fees, and slippage.
+- `--coordinator-url` / `--coordinator-vps-id`: Enable the generic grid-bot coordinator. See [docs/grid_bot_coordinator.md](docs/grid_bot_coordinator.md) for deployment and authentication.
 
 ## Logging
 

@@ -68,6 +68,8 @@ Standard 与 Premium 的费用和延迟不同。当前官方表中 Standard 的 
 
 程序不会根据成交量自动切换账户档位，也不会把积分或成交量奖励放入收益目标。任何自成交、关联账户互刷、spoofing、layering、quote stuffing 或以刷分为主的循环都不属于本策略的允许用途。
 
+启用现有 `--coordinator-url` 后，RB 策略会上报带方向的 Lighter 仓位、仓位名义价值、活动平仓量，以及相对启动基线的库存恢复预览。Linux 服务也可在受限权限的 Robinhood 环境文件中设置 `HEDGE_COORDINATOR_URL`、`HEDGE_COORDINATOR_AGENT`、`HEDGE_COORDINATOR_USERNAME` 和 `HEDGE_COORDINATOR_PASSWORD`，避免密码出现在命令行和进程列表中。预览只给出残余量和建议买卖方向，不会从仪表板直接触发交易；实际回仓继续使用策略内置、限次且可核验的 IOC 恢复流程。
+
 出现以下任一情况时停止新增循环并人工核对：
 
 - WebSocket nonce 不连续并反复重建盘口；

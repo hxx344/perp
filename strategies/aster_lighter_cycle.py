@@ -2486,6 +2486,11 @@ class HedgingCycleExecutor:
         position = self._last_reported_position
         available_balance: Optional[Decimal] = None
         total_account_value: Optional[Decimal] = None
+        position_symbol: Optional[str] = self.config.lighter_ticker
+        position_value: Optional[Decimal] = None
+        position_direction = "flat"
+        active_close_amount = Decimal("0")
+        manual_balance_preview: Optional[Dict[str, Any]] = None
         instrument_label = f"{self.config.aster_ticker.upper()} / {self.config.lighter_ticker}".strip()
         depth_snapshot = {
             "maker": int(self._aster_maker_depth_level),
@@ -2494,12 +2499,23 @@ class HedgingCycleExecutor:
         }
         if self.lighter_client and not self._coordinator_paused:
             try:
-                raw_position = await self.lighter_client.get_account_positions()
-                if isinstance(raw_position, Decimal):
-                    position = raw_position
+                snapshot_method = getattr(self.lighter_client, "get_position_snapshot", None)
+                position_snapshot = await snapshot_method() if callable(snapshot_method) else None
+                if isinstance(position_snapshot, dict):
+                    raw_position = position_snapshot.get("size")
+                    if raw_position is not None:
+                        position = Decimal(str(raw_position))
+                        self._last_reported_position = position
+                    raw_symbol = position_snapshot.get("symbol")
+                    if raw_symbol:
+                        position_symbol = str(raw_symbol)
+                    raw_value = position_snapshot.get("value")
+                    if raw_value is not None:
+                        position_value = Decimal(str(raw_value))
                 else:
+                    raw_position = await self.lighter_client.get_account_positions()
                     position = Decimal(str(raw_position))
-                self._last_reported_position = position
+                    self._last_reported_position = position
             except (InvalidOperation, ValueError, TypeError) as exc:
                 self.logger.log(
                     f"Unexpected Lighter position payload for coordinator report: {exc}",
@@ -2544,6 +2560,53 @@ class HedgingCycleExecutor:
                             "WARNING",
                         )
 
+                    if position_value is None:
+                        try:
+                            value_candidate = account_snapshot.get("position_value")
+                            if value_candidate is not None:
+                                position_value = Decimal(str(value_candidate))
+                        except (InvalidOperation, ValueError, TypeError):
+                            position_value = None
+
+            if position > 0:
+                position_direction = "long"
+            elif position < 0:
+                position_direction = "short"
+            else:
+                position_direction = "flat"
+
+            target_position = self._baseline_lighter_position or Decimal("0")
+            residual = position - target_position
+            if residual > 0:
+                suggested_action = "sell"
+            elif residual < 0:
+                suggested_action = "buy"
+            else:
+                suggested_action = "none"
+            manual_balance_preview = {
+                "current_position": str(position),
+                "target_position": str(target_position),
+                "residual": str(residual),
+                "suggested_action": suggested_action,
+            }
+
+        if position > 0:
+            position_direction = "long"
+        elif position < 0:
+            position_direction = "short"
+        else:
+            position_direction = "flat"
+
+        if manual_balance_preview is None:
+            target_position = self._baseline_lighter_position or Decimal("0")
+            residual = position - target_position
+            manual_balance_preview = {
+                "current_position": str(position),
+                "target_position": str(target_position),
+                "residual": str(residual),
+                "suggested_action": "sell" if residual > 0 else "buy" if residual < 0 else "none",
+            }
+
         try:
             runtime_seconds = max(0.0, time.time() - self._run_started_at)
             await self._metrics_reporter.report(
@@ -2557,6 +2620,11 @@ class HedgingCycleExecutor:
                 instrument=instrument_label,
                 depths=depth_snapshot,
                 runtime_seconds=runtime_seconds,
+                position_symbol=position_symbol,
+                position_value=position_value,
+                position_direction=position_direction,
+                active_close_amount=active_close_amount,
+                manual_balance_preview=manual_balance_preview,
             )
         except Exception as exc:
             self.logger.log(
@@ -5588,6 +5656,47 @@ def _resolve_instance_lock_path(
     return PROJECT_ROOT / "logs" / f"aster_lighter_cycle_{environment}_account_{account}.lock"
 
 
+def _resolve_hedge_coordinator_settings(
+    args: argparse.Namespace,
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    settings = (
+        getattr(args, "coordinator_url", None) or os.getenv("HEDGE_COORDINATOR_URL"),
+        getattr(args, "coordinator_agent", None) or os.getenv("HEDGE_COORDINATOR_AGENT"),
+        getattr(args, "coordinator_username", None)
+        or os.getenv("HEDGE_COORDINATOR_USERNAME"),
+        getattr(args, "coordinator_password", None)
+        or os.getenv("HEDGE_COORDINATOR_PASSWORD"),
+    )
+    if bool(settings[2]) != bool(settings[3]):
+        raise ValueError(
+            "Hedge coordinator username and password must be configured together"
+        )
+    coordinator_url, coordinator_agent, username, password = settings
+    if not coordinator_url:
+        if coordinator_agent or username or password:
+            raise ValueError(
+                "Hedge coordinator agent and credentials require a coordinator URL"
+            )
+        return settings
+
+    parsed = urlparse(coordinator_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Hedge coordinator URL must be an absolute HTTP(S) URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(
+            "Hedge coordinator URL must not contain embedded credentials"
+        )
+    if (
+        (username or password)
+        and parsed.scheme != "https"
+        and parsed.hostname.casefold() not in {"localhost", "127.0.0.1", "::1"}
+    ):
+        raise ValueError(
+            "Authenticated remote hedge coordinator connections must use HTTPS"
+        )
+    return settings
+
+
 class _GracefulSignalRelay:
     """Translate process signals into one cooperative task cancellation."""
 
@@ -5660,6 +5769,13 @@ async def _async_main(args: argparse.Namespace) -> int:
     )
     await _auto_provision_lighter_credentials(env_path, endpoint_profile)
     dotenv.load_dotenv(env_path, override=True)
+
+    (
+        coordinator_url,
+        coordinator_agent,
+        coordinator_username,
+        coordinator_password,
+    ) = _resolve_hedge_coordinator_settings(args)
 
     lighter_market_type = getattr(args, "lighter_market_type", "perp") or "perp"
     lighter_market_type = str(lighter_market_type).strip().lower()
@@ -5754,10 +5870,10 @@ async def _async_main(args: argparse.Namespace) -> int:
         delay_between_cycles=max(0.0, args.cycle_delay),
         virtual_aster_maker=args.virtual_aster_maker,
         preserve_initial_position=bool(getattr(args, "preserve_initial_position", False)),
-        coordinator_url=getattr(args, "coordinator_url", None),
-        coordinator_agent_id=getattr(args, "coordinator_agent", None),
-        coordinator_username=getattr(args, "coordinator_username", None),
-        coordinator_password=getattr(args, "coordinator_password", None),
+        coordinator_url=coordinator_url,
+        coordinator_agent_id=coordinator_agent,
+        coordinator_username=coordinator_username,
+        coordinator_password=coordinator_password,
         virtual_aster_price_source=args.virtual_maker_price_source,
         virtual_aster_reference_symbol=args.virtual_maker_symbol,
         aster_maker_depth_level=aster_maker_depth,

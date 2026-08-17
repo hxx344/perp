@@ -24,6 +24,7 @@ from decimal import Decimal, InvalidOperation, ROUND_UP
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlparse
 
 
 EXPECTED_ENDPOINTS = {
@@ -57,6 +58,8 @@ SENSITIVE_ENV_NAMES = (
     "API_KEY_PRIVATE_KEY",
     "L1_WALLET_PRIVATE_KEY",
     "LIGHTER_L1_PRIVATE_KEY",
+    "HEDGE_COORDINATOR_USERNAME",
+    "HEDGE_COORDINATOR_PASSWORD",
 )
 
 
@@ -255,6 +258,28 @@ def check_env_values(report: Report, values: Mapping[str, str | None]) -> None:
 
     if any(str(values.get(name) or "").strip() for name in ("ASTER_API_KEY", "ASTER_SECRET_KEY")):
         report.warn("Aster credentials are set but are unnecessary for virtual Aster maker mode")
+
+    coordinator_url = str(values.get("HEDGE_COORDINATOR_URL") or "").strip()
+    coordinator_username = str(values.get("HEDGE_COORDINATOR_USERNAME") or "").strip()
+    coordinator_password = str(values.get("HEDGE_COORDINATOR_PASSWORD") or "").strip()
+    if bool(coordinator_username) != bool(coordinator_password):
+        report.error("hedge coordinator username and password must be configured together")
+    if (coordinator_username or coordinator_password) and not coordinator_url:
+        report.error("hedge coordinator credentials require HEDGE_COORDINATOR_URL")
+    if coordinator_url:
+        parsed_coordinator = urlparse(coordinator_url)
+        if parsed_coordinator.scheme not in {"http", "https"} or not parsed_coordinator.hostname:
+            report.error("HEDGE_COORDINATOR_URL must be an absolute HTTP(S) URL")
+        elif parsed_coordinator.username is not None or parsed_coordinator.password is not None:
+            report.error("HEDGE_COORDINATOR_URL must not contain embedded credentials")
+        elif (
+            (coordinator_username or coordinator_password)
+            and parsed_coordinator.scheme != "https"
+            and parsed_coordinator.hostname.casefold() not in {"localhost", "127.0.0.1", "::1"}
+        ):
+            report.error("authenticated remote hedge coordinator connections must use HTTPS")
+        else:
+            report.ok("hedge coordinator settings are structurally valid")
 
 
 def check_imports_and_help(report: Report, python: Path, project_root: Path) -> None:

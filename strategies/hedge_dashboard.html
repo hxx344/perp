@@ -14609,6 +14609,24 @@
   for (const [agentId, metrics] of entries) {
           const safeId = escapeHtml(agentId);
           const position = numberFormatter.format(toNumber(metrics.position));
+          const positionDirection = ['long', 'short', 'flat'].includes(String(metrics.position_direction || '').toLowerCase())
+            ? String(metrics.position_direction).toUpperCase()
+            : '';
+          const positionDisplay = positionDirection ? `${position} ${positionDirection}` : position;
+          const positionValue = metrics.position_value == null
+            ? '--'
+            : numberFormatter.format(toNumber(metrics.position_value));
+          const activeCloseAmount = numberFormatter.format(toNumber(metrics.active_close_amount));
+          const positionSymbol = metrics.position_symbol ? escapeHtml(metrics.position_symbol) : '--';
+          const recoveryPreview = metrics.manual_balance_preview && typeof metrics.manual_balance_preview === 'object'
+            ? metrics.manual_balance_preview
+            : {};
+          const recoveryResidual = recoveryPreview.residual == null
+            ? '--'
+            : numberFormatter.format(toNumber(recoveryPreview.residual));
+          const recoveryAction = recoveryPreview.suggested_action
+            ? String(recoveryPreview.suggested_action).toUpperCase()
+            : '--';
           const pnl = numberFormatter.format(toNumber(metrics.cumulative_pnl));
           const volume = numberFormatter.format(toNumber(metrics.cumulative_volume));
           const available = numberFormatter.format(
@@ -14696,7 +14714,11 @@
               </span>
             </header>
             <dl class="agent-metrics">
-              <div><dt>Position</dt><dd>${position}</dd></div>
+              <div><dt>Position</dt><dd>${positionDisplay}</dd></div>
+              <div><dt>Position Symbol</dt><dd>${positionSymbol}</dd></div>
+              <div><dt>Position Value</dt><dd>${positionValue}</dd></div>
+              <div><dt>Active Close</dt><dd>${activeCloseAmount}</dd></div>
+              <div><dt>Recovery Residual</dt><dd>${recoveryResidual} ${escapeHtml(recoveryAction)}</dd></div>
               <div><dt>Total Cycles</dt><dd>${cycles}</dd></div>
               <div><dt>Runtime</dt><dd>${runtimeDisplay}</dd></div>
               <div><dt>Cumulative PnL</dt><dd>${pnl}</dd></div>

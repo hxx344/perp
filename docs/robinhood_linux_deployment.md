@@ -141,6 +141,20 @@ LIGHTER_CHAIN_ID=466324
 - 不要填写 `L1_WALLET_PRIVATE_KEY` 或 `LIGHTER_L1_PRIVATE_KEY`；
 - 虚拟 Aster 模式不需要 `ASTER_API_KEY` 和 `ASTER_SECRET_KEY`。
 
+可选的协调机遥测也只能写入这个受限文件：
+
+```dotenv
+HEDGE_COORDINATOR_URL=https://coordinator.example
+HEDGE_COORDINATOR_AGENT=rh-btc-01
+HEDGE_COORDINATOR_USERNAME=agent
+HEDGE_COORDINATOR_PASSWORD=REPLACE_IN_PROTECTED_FILE
+```
+
+用户名和密码必须成对配置；带认证的远程协调机必须使用 HTTPS。本部署 runner
+不会把这些值转换为 `--coordinator-*` 命令行参数，因此密码不会出现在进程列表。
+不要把用户名或密码嵌入 `HEDGE_COORDINATOR_URL`，预检和策略都会拒绝这种配置。
+`/etc/perp/robinhood-service.env` 中禁止出现任何 `HEDGE_COORDINATOR_*` 项。
+
 不要在命令行、shell history、systemd unit、聊天或日志中粘贴私钥。预检只会
 报告密钥结构是否正确，不会回显密钥。
 

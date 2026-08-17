@@ -6,12 +6,17 @@ Modular Trading Bot - Supports multiple exchanges
 import argparse
 import asyncio
 import logging
+import os
 from pathlib import Path
 import sys
-import dotenv
 from decimal import Decimal
 from trading_bot import TradingBot, TradingConfig
 from exchanges import ExchangeFactory
+
+try:
+    import dotenv  # type: ignore
+except ImportError:  # pragma: no cover - runtime dependency guard
+    dotenv = None  # type: ignore
 
 
 def parse_arguments():
@@ -49,6 +54,21 @@ def parse_arguments():
                         'Sell: pause if price <= pause-price. (default: -1, no pause)')
     parser.add_argument('--boost', action='store_true',
                         help='Use the Boost mode for volume boosting')
+
+    parser.add_argument('--coordinator-url', type=str, default=None,
+                        help='Optional coordinator base URL (or COORDINATOR_URL)')
+    parser.add_argument('--coordinator-vps-id', type=str, default=None,
+                        help='Unique coordinator node ID (or COORDINATOR_VPS_ID)')
+    parser.add_argument('--coordinator-alias', type=str, default=None,
+                        help='Dashboard display name (or COORDINATOR_ALIAS)')
+    parser.add_argument('--coordinator-user', type=str, default=None,
+                        help='Coordinator basic auth username (or COORDINATOR_USER)')
+    parser.add_argument('--coordinator-password', type=str, default=None,
+                        help='Coordinator basic auth password (or COORDINATOR_PASSWORD)')
+    parser.add_argument('--coordinator-poll-interval', type=float, default=None,
+                        help='Seconds between command polls')
+    parser.add_argument('--coordinator-metrics-interval', type=float, default=None,
+                        help='Seconds between metrics pushes')
 
     return parser.parse_args()
 
@@ -100,7 +120,42 @@ async def main():
     if not env_path.exists():
         print(f"Env file not find: {env_path.resolve()}")
         sys.exit(1)
+    if dotenv is None:
+        print("Error: python-dotenv is required. Install project requirements first.")
+        sys.exit(1)
     dotenv.load_dotenv(args.env_file)
+
+    coordinator_url = args.coordinator_url or os.getenv("COORDINATOR_URL")
+    coordinator_vps_id = args.coordinator_vps_id or os.getenv("COORDINATOR_VPS_ID")
+    coordinator_alias = args.coordinator_alias or os.getenv("COORDINATOR_ALIAS")
+    coordinator_user = args.coordinator_user or os.getenv("COORDINATOR_USER")
+    coordinator_password = args.coordinator_password or os.getenv("COORDINATOR_PASSWORD")
+
+    if bool(coordinator_url) != bool(coordinator_vps_id):
+        print("Error: coordinator URL and VPS ID must be configured together")
+        sys.exit(1)
+    if bool(coordinator_user) != bool(coordinator_password):
+        print("Error: coordinator username and password must be configured together")
+        sys.exit(1)
+
+    default_poll_interval = TradingConfig.__dataclass_fields__["coordinator_poll_interval"].default
+    default_metrics_interval = TradingConfig.__dataclass_fields__["coordinator_metrics_interval"].default
+
+    poll_interval = args.coordinator_poll_interval
+    if poll_interval is None:
+        try:
+            poll_interval = float(os.getenv("COORDINATOR_POLL_INTERVAL", default_poll_interval))
+        except (TypeError, ValueError):
+            print("Warning: invalid COORDINATOR_POLL_INTERVAL; using default")
+            poll_interval = default_poll_interval
+
+    metrics_interval = args.coordinator_metrics_interval
+    if metrics_interval is None:
+        try:
+            metrics_interval = float(os.getenv("COORDINATOR_METRICS_INTERVAL", default_metrics_interval))
+        except (TypeError, ValueError):
+            print("Warning: invalid COORDINATOR_METRICS_INTERVAL; using default")
+            metrics_interval = default_metrics_interval
 
     # Create configuration
     config = TradingConfig(
@@ -116,7 +171,14 @@ async def main():
         grid_step=Decimal(args.grid_step),
         stop_price=Decimal(args.stop_price),
         pause_price=Decimal(args.pause_price),
-        boost_mode=args.boost
+        boost_mode=args.boost,
+        coordinator_url=coordinator_url,
+        coordinator_vps_id=coordinator_vps_id,
+        coordinator_alias=coordinator_alias,
+        coordinator_user=coordinator_user,
+        coordinator_password=coordinator_password,
+        coordinator_poll_interval=poll_interval,
+        coordinator_metrics_interval=metrics_interval,
     )
 
     # Create and run the bot

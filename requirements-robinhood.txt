@@ -1,4 +1,4 @@
-# Robinhood Lighter + Aster virtual-maker runtime (Python 3.11).
+# Robinhood Lighter + Aster virtual-maker runtime (Python >=3.11).
 # Keep optional exchange SDKs out of this deployment path.
 python-dotenv==1.1.1
 pytz==2025.2

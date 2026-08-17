@@ -118,6 +118,10 @@ class BaseExchangeClient(ABC):
         """Get account positions."""
         pass
 
+    async def get_position_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return optional detailed position metadata for monitoring."""
+        return None
+
     @abstractmethod
     def setup_order_update_handler(self, handler) -> None:
         """Setup order update handler for WebSocket."""

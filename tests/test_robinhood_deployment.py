@@ -36,6 +36,38 @@ def test_preflight_rejects_core_key_and_maker_reserved_index():
     assert report.errors == 2
 
 
+def test_preflight_rejects_incomplete_or_cleartext_remote_coordinator_auth():
+    missing_password = _valid_env_values()
+    missing_password.update(
+        {
+            "HEDGE_COORDINATOR_URL": "https://coordinator.example",
+            "HEDGE_COORDINATOR_USERNAME": "agent",
+        }
+    )
+    missing_report = preflight.Report()
+    preflight.check_env_values(missing_report, missing_password)
+
+    cleartext = _valid_env_values()
+    cleartext.update(
+        {
+            "HEDGE_COORDINATOR_URL": "http://coordinator.example",
+            "HEDGE_COORDINATOR_USERNAME": "agent",
+            "HEDGE_COORDINATOR_PASSWORD": "secret",
+        }
+    )
+    cleartext_report = preflight.Report()
+    preflight.check_env_values(cleartext_report, cleartext)
+
+    embedded = _valid_env_values()
+    embedded["HEDGE_COORDINATOR_URL"] = "https://agent:secret@coordinator.example"
+    embedded_report = preflight.Report()
+    preflight.check_env_values(embedded_report, embedded)
+
+    assert missing_report.errors == 1
+    assert cleartext_report.errors == 1
+    assert embedded_report.errors == 1
+
+
 def test_preflight_rejects_credential_symlink(tmp_path):
     target = tmp_path / "credentials.env"
     target.write_text("LIGHTER_ENVIRONMENT=robinhood\n", encoding="utf-8")
@@ -82,6 +114,22 @@ def test_quickstart_keeps_install_read_only_until_explicit_live_flags():
     assert "git pull" not in quickstart
     assert "--run-canary requires --confirm-live" in quickstart
     assert "install -d -o root" in quickstart
+    assert "credential env path must match /etc/perp/<basename>.env" in quickstart
+
+
+def test_coordinator_password_stays_in_protected_env_and_off_command_line():
+    runner = (PROJECT_ROOT / "deploy/robinhood/run.sh").read_text(encoding="utf-8")
+    installer = (PROJECT_ROOT / "deploy/robinhood/install.sh").read_text(
+        encoding="utf-8"
+    )
+    protected_env = (PROJECT_ROOT / "env_robinhood_example.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert "HEDGE_COORDINATOR_PASSWORD=" in protected_env
+    assert "--coordinator-password" not in runner
+    assert "-u HEDGE_COORDINATOR_PASSWORD" in runner
+    assert "HEDGE_COORDINATOR_[A-Z_]+" in installer
 
 
 def test_install_supports_root_git_checks_and_exact_wheelhouse_manifest():

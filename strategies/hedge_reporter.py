@@ -53,6 +53,11 @@ class HedgeMetricsReporter:
         instrument: Optional[str] = None,
         depths: Optional[Dict[str, Any]] = None,
         runtime_seconds: Optional[float] = None,
+        position_symbol: Optional[str] = None,
+        position_value: Optional[Decimal] = None,
+        position_direction: Optional[str] = None,
+        active_close_amount: Optional[Decimal] = None,
+        manual_balance_preview: Optional[Dict[str, Any]] = None,
     ) -> None:
         session = await self._ensure_session()
         url = f"{self._base_url}/update"
@@ -84,6 +89,21 @@ class HedgeMetricsReporter:
                 payload["runtime_seconds"] = float(runtime_seconds)
             except (TypeError, ValueError):
                 pass
+
+        if position_symbol:
+            payload["position_symbol"] = str(position_symbol)
+
+        if position_value is not None:
+            payload["position_value"] = str(position_value)
+
+        if position_direction in {"long", "short", "flat"}:
+            payload["position_direction"] = position_direction
+
+        if active_close_amount is not None:
+            payload["active_close_amount"] = str(active_close_amount)
+
+        if isinstance(manual_balance_preview, dict):
+            payload["manual_balance_preview"] = manual_balance_preview
 
         try:
             async with session.post(url, json=payload, auth=self._basic_auth) as response:

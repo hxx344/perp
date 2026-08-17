@@ -556,6 +556,7 @@ python strategies/grvt_lighter_cycle.py \
 - `--pause-price`: 当 `direction` 是 'buy' 时，当 price >= pause-price 时暂停交易，并在价格回到 pause-price 以下时重新开始交易；'sell' 逻辑相反（默认：-1，表示不会因为价格原因停止交易），参数的目的是防止订单被挂在”你认为的开多高点或开空低点“。
 - `--boost`: 启用 Boost 模式进行交易量提升（仅适用于 aster 和 backpack 交易所）
   Boost 模式的下单逻辑：下 maker 单开仓，成交后立即用 taker 单关仓，以此循环。磨损为一单 maker，一单 taker 的手续费，以及滑点。
+- `--coordinator-url` / `--coordinator-vps-id`: 启用通用网格机器人协调器。部署和认证说明见 [docs/grid_bot_coordinator.md](docs/grid_bot_coordinator.md)。
 
 ## 日志记录
 

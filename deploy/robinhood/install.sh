@@ -261,8 +261,8 @@ if ((INSTALL_SYSTEMD)); then
     printf 'Preserved existing service configuration at %s.\n' "${SERVICE_ENV_FILE}"
   fi
 
-  if grep -Eq '^[[:space:]]*(LIGHTER_API_PRIVATE_KEYS|API_KEY_PRIVATE_KEYS|API_KEY_PRIVATE_KEY|L1_WALLET_PRIVATE_KEY|LIGHTER_L1_PRIVATE_KEY|ASTER_API_KEY|ASTER_SECRET_KEY)=' "${SERVICE_ENV_FILE}"; then
-    printf '%s\n' 'install: private exchange credentials are forbidden in the non-secret service environment file' >&2
+  if grep -Eq '^[[:space:]]*(LIGHTER_API_PRIVATE_KEYS|API_KEY_PRIVATE_KEYS|API_KEY_PRIVATE_KEY|L1_WALLET_PRIVATE_KEY|LIGHTER_L1_PRIVATE_KEY|ASTER_API_KEY|ASTER_SECRET_KEY|HEDGE_COORDINATOR_[A-Z_]+)=' "${SERVICE_ENV_FILE}"; then
+    printf '%s\n' 'install: exchange credentials and hedge coordinator settings are forbidden in the non-secret service environment file' >&2
     exit 1
   fi
 

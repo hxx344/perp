@@ -1,6 +1,7 @@
 import asyncio
 import os
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -170,3 +171,103 @@ def test_get_account_positions_returns_spot_balance(monkeypatch):
     quantity = asyncio.run(client.get_account_positions())
 
     assert quantity == Decimal("12.34")
+
+
+def test_get_position_snapshot_uses_signed_perp_position(monkeypatch):
+    client = _make_client(contract_id=7, ticker="BTC")
+    account = SimpleNamespace(
+        positions=[
+            SimpleNamespace(
+                market_id="7",
+                position="1.5",
+                sign=-1,
+                symbol="BTC",
+                position_value="94500",
+            )
+        ]
+    )
+
+    async def fake_fetch_account(**_kwargs):
+        return account
+
+    monkeypatch.setattr(client, "_fetch_account_with_retry", fake_fetch_account)
+
+    snapshot = asyncio.run(client.get_position_snapshot())
+
+    assert snapshot == {
+        "symbol": "BTC",
+        "size": Decimal("-1.5"),
+        "value": Decimal("94500"),
+    }
+
+
+def test_get_position_snapshot_returns_explicit_zero_for_missing_market(monkeypatch):
+    client = _make_client(contract_id=7, ticker="BTC")
+
+    async def fake_fetch_account(**_kwargs):
+        return SimpleNamespace(positions=[])
+
+    monkeypatch.setattr(client, "_fetch_account_with_retry", fake_fetch_account)
+
+    snapshot = asyncio.run(client.get_position_snapshot())
+
+    assert snapshot == {
+        "symbol": "BTC",
+        "size": Decimal("0"),
+        "value": Decimal("0"),
+    }
+
+
+def test_get_order_info_reads_primary_account_and_preserves_position_sign(monkeypatch):
+    client = _make_client(contract_id=7, ticker="BTC")
+    account = SimpleNamespace(
+        positions=[
+            SimpleNamespace(
+                market_id="7",
+                position="0.0002",
+                sign=-1,
+                avg_entry_price="64000.1",
+            )
+        ]
+    )
+
+    async def fake_fetch_account(**kwargs):
+        assert kwargs == {"use_cache": False}
+        return account
+
+    monkeypatch.setattr(client, "_fetch_account_with_retry", fake_fetch_account)
+
+    order = asyncio.run(client.get_order_info("order-1"))
+
+    assert order is not None
+    assert order.side == "sell"
+    assert order.size == Decimal("0.0002")
+    assert order.price == Decimal("64000.1")
+    assert order.filled_size == Decimal("0.0002")
+
+
+def test_monitoring_account_queries_reuse_short_lived_cache(monkeypatch):
+    client = _make_client(contract_id=7, ticker="BTC")
+    client.api_client = object()
+    account = SimpleNamespace(positions=[])
+    calls = 0
+
+    class FakeAccountApi:
+        def __init__(self, _api_client):
+            pass
+
+        async def account(self, *, by, value):
+            nonlocal calls
+            assert by == "index"
+            assert value == "0"
+            calls += 1
+            return SimpleNamespace(accounts=[account])
+
+    monkeypatch.setattr("exchanges.lighter.AccountApi", FakeAccountApi)
+
+    first = asyncio.run(client._fetch_account_with_retry(use_cache=True, cache_ttl=5))
+    second = asyncio.run(client._fetch_account_with_retry(use_cache=True, cache_ttl=5))
+
+    assert first is account
+    assert second is account
+    assert calls == 1

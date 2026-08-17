@@ -125,8 +125,9 @@ if ! PROJECT_ROOT="$(cd -- "${PROJECT_ROOT}" 2>/dev/null && pwd -P)"; then
   exit 1
 fi
 if [[ -n "${PERP_VENV+x}" ]]; then
+  requested_path="${VENV}"
   if ! VENV="$(absolute_path_from_project "${VENV}")"; then
-    printf 'run: virtual environment path cannot be resolved: %s\n' "${VENV}" >&2
+    printf 'run: virtual environment path cannot be resolved: %s\n' "${requested_path}" >&2
     exit 1
   fi
 else
@@ -135,15 +136,17 @@ fi
 if [[ -z "${PERP_PYTHON+x}" ]]; then
   PYTHON="${VENV}/bin/python"
 elif [[ "${PYTHON}" == */* ]]; then
+  requested_path="${PYTHON}"
   if ! PYTHON="$(absolute_path_from_project "${PYTHON}")"; then
-    printf 'run: Python path cannot be resolved: %s\n' "${PYTHON}" >&2
+    printf 'run: Python path cannot be resolved: %s\n' "${requested_path}" >&2
     exit 1
   fi
 else
   PYTHON="$(command -v "${PYTHON}" 2>/dev/null || true)"
 fi
+requested_path="${ENV_FILE}"
 if ! ENV_FILE="$(absolute_path_from_project "${ENV_FILE}")"; then
-  printf 'run: credential env path cannot be resolved: %s\n' "${ENV_FILE}" >&2
+  printf 'run: credential env path cannot be resolved: %s\n' "${requested_path}" >&2
   exit 1
 fi
 
@@ -247,6 +250,10 @@ exec env \
   -u LIGHTER_API_KEY_INDEX \
   -u L1_WALLET_PRIVATE_KEY \
   -u LIGHTER_L1_PRIVATE_KEY \
+  -u HEDGE_COORDINATOR_URL \
+  -u HEDGE_COORDINATOR_AGENT \
+  -u HEDGE_COORDINATOR_USERNAME \
+  -u HEDGE_COORDINATOR_PASSWORD \
   "${PYTHON}" -m strategies.aster_lighter_cycle \
     --env-file "${ENV_FILE}" \
     --lighter-environment robinhood \

@@ -56,6 +56,8 @@ ASSET_SYMBOL_ALIASES = {
 class LighterClient(BaseExchangeClient):
     """Lighter exchange client implementation."""
 
+    positions_are_signed = True
+
     def __init__(self, config: Dict[str, Any]):
         """Initialize Lighter client."""
         super().__init__(config)
@@ -119,6 +121,8 @@ class LighterClient(BaseExchangeClient):
         self.orders_cache = {}
         self.current_order_client_id = None
         self.current_order = None
+        self._last_account_details: Optional[Any] = None
+        self._last_account_details_time = 0.0
         self.market_detail = None
         self.market_index: Optional[int] = None
         raw_market_type = getattr(self.config, "market_type", None)
@@ -1060,8 +1064,10 @@ class LighterClient(BaseExchangeClient):
 
     def _handle_websocket_order_update(self, order_data_list: List[Dict[str, Any]]):
         """Handle order updates from WebSocket."""
+        contract_id = str(getattr(self.config, "contract_id", ""))
         for order_data in order_data_list:
-            if str(order_data.get('market_index')) != str(getattr(self.config, "contract_id", None)):
+            market_index = order_data.get('market_index')
+            if market_index is None or str(market_index) != contract_id:
                 continue
 
             side = 'sell' if order_data['is_ask'] else 'buy'
@@ -1093,16 +1099,17 @@ class LighterClient(BaseExchangeClient):
             if status == 'OPEN' and filled_size > 0:
                 status = 'PARTIALLY_FILLED'
 
-            if status == 'OPEN':
-                self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                f"{size} @ {price}", "INFO")
-            else:
-                self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                f"{filled_size} @ {price}", "INFO")
+            if self._order_update_handler is None:
+                if status == 'OPEN':
+                    self.logger.log(f"[{order_type}] [{order_id}] {status} "
+                                    f"{size} @ {price}", "INFO")
+                else:
+                    self.logger.log(f"[{order_type}] [{order_id}] {status} "
+                                    f"{filled_size} @ {price}", "INFO")
 
             if self._order_update_handler is not None:
                 update_payload = {
-                    "contract_id": getattr(self.config, "contract_id", None),
+                    "contract_id": contract_id,
                     "ticker": getattr(self.config, "ticker", None),
                     "order_id": str(order_id),
                     "status": status,
@@ -1371,7 +1378,13 @@ class LighterClient(BaseExchangeClient):
         """Place a close order with Lighter using official SDK."""
         self.current_order = None
         self.current_order_client_id = None
-        order_result = await self.place_limit_order(contract_id, quantity, price, side)
+        order_result = await self.place_limit_order(
+            contract_id,
+            quantity,
+            price,
+            side,
+            reduce_only=not self._is_spot_market(),
+        )
 
         # wait for 5 seconds to ensure order is placed
         await asyncio.sleep(5)
@@ -1431,27 +1444,31 @@ class LighterClient(BaseExchangeClient):
     async def get_order_info(self, order_id: str) -> Optional[OrderInfo]:
         """Get order information from Lighter using official SDK."""
         try:
-            # Use shared API client to get account info
-            account_api = AccountApi(self.api_client)
+            account = await self._fetch_account_with_retry(use_cache=False)
+            contract_identifier = getattr(self.config, "contract_id", None)
 
-            # Get account orders
-            account_data = await account_api.account(by="index", value=str(self.account_index))
+            for position in getattr(account, "positions", []) or []:
+                market_identifier = self._extract_mapping_value(position, "market_id")
+                if contract_identifier is None or str(market_identifier) != str(contract_identifier):
+                    continue
 
-            # Look for the specific order in account positions
-            for position in getattr(account_data, "positions", []) or []:
-                symbol_value = getattr(position, "symbol", None)
-                if symbol_value == self.config.ticker:
-                    position_amt = abs(float(getattr(position, "position", 0)))
-                    if position_amt > 0.001:  # Only include significant positions
-                        return OrderInfo(
-                            order_id=order_id,
-                            side="buy" if float(getattr(position, "position", 0)) > 0 else "sell",
-                            size=Decimal(str(position_amt)),
-                            price=Decimal(str(getattr(position, "avg_price", 0))),
-                            status="FILLED",  # Positions are filled orders
-                            filled_size=Decimal(str(position_amt)),
-                            remaining_size=Decimal('0')
-                        )
+                signed_quantity = self._signed_position_quantity(position)
+                if signed_quantity == 0:
+                    continue
+
+                average_price = self._extract_mapping_value(position, "avg_entry_price")
+                if average_price is None:
+                    average_price = self._extract_mapping_value(position, "avg_price")
+                size = abs(signed_quantity)
+                return OrderInfo(
+                    order_id=order_id,
+                    side="buy" if signed_quantity > 0 else "sell",
+                    size=size,
+                    price=self._decimal_or_zero(average_price),
+                    status="FILLED",
+                    filled_size=size,
+                    remaining_size=Decimal("0"),
+                )
 
             return None
 
@@ -1530,8 +1547,22 @@ class LighterClient(BaseExchangeClient):
         return contract_orders
 
     @query_retry(reraise=True)
-    async def _fetch_account_with_retry(self):
+    async def _fetch_account_with_retry(
+        self,
+        *,
+        use_cache: bool = False,
+        cache_ttl: float = 1.0,
+    ):
         """Get primary account details using official SDK."""
+        now = time.monotonic()
+        if (
+            use_cache
+            and cache_ttl > 0
+            and self._last_account_details is not None
+            and now - self._last_account_details_time <= cache_ttl
+        ):
+            return self._last_account_details
+
         account_api = AccountApi(self.api_client)
 
         account_data = await account_api.account(by="index", value=str(self.account_index))
@@ -1540,7 +1571,10 @@ class LighterClient(BaseExchangeClient):
             self.logger.log("Failed to get account data", "ERROR")
             raise ValueError("Failed to get account data")
 
-        return account_data.accounts[0]
+        account = account_data.accounts[0]
+        self._last_account_details = account
+        self._last_account_details_time = time.monotonic()
+        return account
 
     @query_retry(reraise=True)
     async def _fetch_positions_with_retry(self) -> List[Any]:
@@ -1613,9 +1647,50 @@ class LighterClient(BaseExchangeClient):
 
         return Decimal("0")
 
+    async def get_position_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return the configured market's signed size and notional value."""
+        account = await self._fetch_account_with_retry(use_cache=True)
+        symbol = getattr(self.config, "ticker", None)
+
+        if self._is_spot_market():
+            size = self._extract_spot_balance(account)
+            value = Decimal("0")
+            contract_identifier = getattr(self.config, "contract_id", None)
+            if contract_identifier and size:
+                try:
+                    best_bid, best_ask = await self.fetch_bbo_prices(contract_identifier)
+                except Exception:
+                    pass
+                else:
+                    value = size * ((best_bid + best_ask) / Decimal("2"))
+            return {"symbol": symbol, "size": size, "value": value}
+
+        contract_identifier = getattr(self.config, "contract_id", None)
+        for position in getattr(account, "positions", []) or []:
+            market_identifier = self._extract_mapping_value(position, "market_id")
+            if contract_identifier is None or str(market_identifier) != str(contract_identifier):
+                continue
+
+            position_symbol = self._extract_mapping_value(position, "symbol")
+            if position_symbol is not None:
+                symbol = str(position_symbol)
+            return {
+                "symbol": symbol,
+                "size": self._signed_position_quantity(position),
+                "value": self._decimal_or_zero(
+                    self._extract_mapping_value(position, "position_value")
+                ),
+            }
+
+        return {
+            "symbol": symbol,
+            "size": Decimal("0"),
+            "value": Decimal("0"),
+        }
+
     async def get_available_balance(self) -> Decimal:
         """Fetch the available balance from the primary account."""
-        account = await self._fetch_account_with_retry()
+        account = await self._fetch_account_with_retry(use_cache=True)
 
         balance_value = getattr(account, "available_balance", None)
         if balance_value is None:
@@ -1624,16 +1699,25 @@ class LighterClient(BaseExchangeClient):
             account_dict = account.to_dict() or {}
             balance_value = account_dict.get("available_balance") or account_dict.get("availableBalance")
 
-        return self._decimal_or_zero(balance_value)
+        balance = self._decimal_or_zero(balance_value)
+        if balance == 0:
+            collateral = self._decimal_or_zero(
+                self._extract_mapping_value(account, "collateral")
+            )
+            if collateral > 0:
+                balance = collateral
+        return balance
 
-    async def get_account_metrics(self) -> Dict[str, Decimal]:
+    async def get_account_metrics(self) -> Dict[str, Any]:
         """Aggregate key metrics for the configured market and account."""
-        account = await self._fetch_account_with_retry()
+        account = await self._fetch_account_with_retry(use_cache=True)
 
-        metrics: Dict[str, Decimal] = {
+        metrics: Dict[str, Any] = {
             "available_balance": self._decimal_or_zero(self._extract_mapping_value(account, "available_balance")),
             "collateral": self._decimal_or_zero(self._extract_mapping_value(account, "collateral")),
             "total_asset_value": self._decimal_or_zero(self._extract_mapping_value(account, "total_asset_value")),
+            "cross_asset_value": self._decimal_or_zero(self._extract_mapping_value(account, "cross_asset_value")),
+            "position_symbol": getattr(self.config, "ticker", None),
             "daily_volume": Decimal("0"),
             "weekly_volume": Decimal("0"),
             "monthly_volume": Decimal("0"),
@@ -1643,6 +1727,9 @@ class LighterClient(BaseExchangeClient):
             "unrealized_pnl": Decimal("0"),
             "realized_pnl": Decimal("0"),
         }
+        if metrics["available_balance"] == 0 and metrics["collateral"] > 0:
+            metrics["available_balance"] = metrics["collateral"]
+        metrics["total_account_value"] = metrics["total_asset_value"]
 
         trade_stats = self._extract_mapping_value(account, "trade_stats")
         for key in ("daily_volume", "weekly_volume", "monthly_volume", "total_volume"):
@@ -1668,6 +1755,9 @@ class LighterClient(BaseExchangeClient):
                 break
 
         if target_position is not None:
+            position_symbol = self._extract_mapping_value(target_position, "symbol")
+            if position_symbol is not None:
+                metrics["position_symbol"] = str(position_symbol)
             metrics["position_size"] = self._signed_position_quantity(target_position)
             metrics["position_value"] = self._decimal_or_zero(self._extract_mapping_value(target_position, "position_value"))
             metrics["unrealized_pnl"] = self._decimal_or_zero(self._extract_mapping_value(target_position, "unrealized_pnl"))

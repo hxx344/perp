@@ -1038,6 +1038,11 @@ class HedgeState:
 
     agent_id: Optional[str] = None
     position: Decimal = Decimal("0")
+    position_symbol: Optional[str] = None
+    position_value: Optional[Decimal] = None
+    position_direction: str = "flat"
+    active_close_amount: Decimal = Decimal("0")
+    manual_balance_preview: Optional[Dict[str, Any]] = None
     total_cycles: int = 0
     cumulative_pnl: Decimal = Decimal("0")
     cumulative_volume: Decimal = Decimal("0")
@@ -1053,6 +1058,11 @@ class HedgeState:
 
     def update_from_payload(self, payload: Dict[str, Any]) -> None:
         position_raw = payload.get("position")
+        position_symbol_raw = payload.get("position_symbol")
+        position_value_raw = payload.get("position_value")
+        position_direction_raw = payload.get("position_direction")
+        active_close_amount_raw = payload.get("active_close_amount")
+        manual_balance_preview_raw = payload.get("manual_balance_preview")
         cycles_raw = payload.get("total_cycles")
         pnl_raw = payload.get("cumulative_pnl")
         volume_raw = payload.get("cumulative_volume")
@@ -1073,6 +1083,39 @@ class HedgeState:
                 self.position = Decimal(str(position_raw))
             except Exception:
                 LOGGER.warning("Invalid position payload: %s", position_raw)
+
+        if position_symbol_raw is not None:
+            normalized_symbol = str(position_symbol_raw).strip()
+            self.position_symbol = normalized_symbol or None
+
+        if position_value_raw is not None:
+            try:
+                self.position_value = Decimal(str(position_value_raw))
+            except Exception:
+                LOGGER.warning("Invalid position value payload: %s", position_value_raw)
+
+        normalized_direction = str(position_direction_raw or "").strip().lower()
+        if normalized_direction in {"long", "short", "flat"}:
+            self.position_direction = normalized_direction
+        elif self.position > 0:
+            self.position_direction = "long"
+        elif self.position < 0:
+            self.position_direction = "short"
+        else:
+            self.position_direction = "flat"
+
+        if active_close_amount_raw is not None:
+            try:
+                parsed_close_amount = Decimal(str(active_close_amount_raw))
+                self.active_close_amount = max(parsed_close_amount, Decimal("0"))
+            except Exception:
+                LOGGER.warning("Invalid active close amount payload: %s", active_close_amount_raw)
+
+        self.manual_balance_preview = (
+            copy.deepcopy(manual_balance_preview_raw)
+            if isinstance(manual_balance_preview_raw, dict)
+            else None
+        )
 
         if cycles_raw is not None:
             try:
@@ -1165,6 +1208,11 @@ class HedgeState:
     def serialize(self) -> Dict[str, Any]:
         payload = {
             "position": str(self.position),
+            "position_symbol": self.position_symbol,
+            "position_value": str(self.position_value) if self.position_value is not None else None,
+            "position_direction": self.position_direction,
+            "active_close_amount": str(self.active_close_amount),
+            "manual_balance_preview": copy.deepcopy(self.manual_balance_preview),
             "total_cycles": self.total_cycles,
             "cumulative_pnl": str(self.cumulative_pnl),
             "cumulative_volume": str(self.cumulative_volume),
@@ -1190,8 +1238,17 @@ class HedgeState:
         aggregate = cls(agent_id="aggregate")
         aggregate.last_update_ts = 0.0
         instruments: set[str] = set()
+        position_symbols: set[str] = set()
+        has_position_value = False
+        position_value_total = Decimal("0")
         for state in states.values():
             aggregate.position += state.position
+            aggregate.active_close_amount += state.active_close_amount
+            if state.position_value is not None:
+                position_value_total += state.position_value
+                has_position_value = True
+            if state.position_symbol:
+                position_symbols.add(state.position_symbol)
             aggregate.total_cycles += int(state.total_cycles)
             aggregate.cumulative_pnl += state.cumulative_pnl
             aggregate.cumulative_volume += state.cumulative_volume
@@ -1206,6 +1263,16 @@ class HedgeState:
 
         if instruments:
             aggregate.instrument = ", ".join(sorted(instruments))
+
+        if position_symbols:
+            aggregate.position_symbol = ", ".join(sorted(position_symbols))
+        aggregate.position_value = position_value_total if has_position_value else None
+        if aggregate.position > 0:
+            aggregate.position_direction = "long"
+        elif aggregate.position < 0:
+            aggregate.position_direction = "short"
+        else:
+            aggregate.position_direction = "flat"
 
         if aggregate.last_update_ts == 0.0:
             aggregate.last_update_ts = time.time()
@@ -6539,6 +6606,7 @@ class CoordinatorApp:
         raise web.HTTPBadGateway(text="failed to download price history")
 
     async def handle_update(self, request: web.Request) -> web.Response:
+        self._enforce_dashboard_auth(request)
         try:
             body = await request.json()
         except Exception:
