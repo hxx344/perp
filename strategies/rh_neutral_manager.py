@@ -54,6 +54,10 @@ USDC_ASSET_ID = USDG_ASSET_ID
 ROUTE_PERPS = 0
 DEFAULT_TRANSFER_FEE_RAW = 0
 MAX_ACTION_ID_CACHE = 512
+# RH exposes both main accounts and subaccounts as tradable internal
+# accounts.  Other account types are reserved pools/system accounts and must
+# never be selected for monitoring or signed writes.
+TRADABLE_ACCOUNT_TYPES = frozenset({0, 1})
 
 
 class LighterWriteUncertainError(RuntimeError):
@@ -784,8 +788,12 @@ class LighterAccountGateway:
             if raw_account_type is None:
                 raise RuntimeError(f"Lighter account {self.spec.account_index} did not return account type")
             try:
-                if int(raw_account_type) != 0:
-                    raise RuntimeError(f"Lighter account {self.spec.account_index} is not a normal account")
+                account_type = int(raw_account_type)
+                if account_type not in TRADABLE_ACCOUNT_TYPES:
+                    raise RuntimeError(
+                        f"Lighter account {self.spec.account_index} is not a tradable main/sub account "
+                        f"(account_type={account_type})"
+                    )
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(f"Lighter account {self.spec.account_index} returned invalid account type") from exc
             required_account_fields = {
@@ -1038,7 +1046,14 @@ class LighterAccountGateway:
             "/api/v1/accountsByL1Address",
             {"l1_address": str(l1_address).strip()},
         )
-        raw_accounts = payload.get("sub_accounts") or payload.get("subAccounts") or payload.get("accounts") or []
+        # API revisions have used either `accounts` or `sub_accounts` (and
+        # occasionally returned both). Merge all list-shaped fields so the
+        # master is not lost when the subaccount list is non-empty.
+        raw_accounts: List[Any] = []
+        for key in ("accounts", "sub_accounts", "subAccounts"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                raw_accounts.extend(value)
         if not isinstance(raw_accounts, list):
             raise RuntimeError("accountsByL1Address returned no account list")
         candidates: List[Tuple[int, int]] = []
@@ -1048,9 +1063,9 @@ class LighterAccountGateway:
                 index = int(_first(item, "index", "account_index", "accountIndex"))
             except (TypeError, ValueError):
                 continue
-            # RH has returned both numeric 0 and 1 for an active account in
-            # different API revisions.  Keep both legacy values, but never
-            # fall back to reserved account types just to get two indexes.
+            # RH has returned both numeric 0 (main) and 1 (subaccount) for
+            # tradable accounts. Never fall back to reserved account types
+            # just to get two indexes.
             status = _first(item, "status")
             if status is None:
                 # Do not guess that an unlabelled account is active in live
@@ -1066,25 +1081,25 @@ class LighterAccountGateway:
             except (TypeError, ValueError):
                 continue
             candidates.append((index, account_type))
-        if len(candidates) < 2:
-            raise RuntimeError("fewer than two normal active accounts found for the configured L1 address")
-        # The API currently marks normal master/sub accounts with type 0 and
-        # reserves high sentinel indexes.  Lowest active index is the safest
-        # fallback when the caller did not provide explicit indexes.
-        normal = sorted(index for index, account_type in candidates if account_type == 0)
-        if len(normal) < 2:
-            raise RuntimeError("fewer than two normal active accounts found for the configured L1 address")
-        if len(normal) > 2:
+        tradable = sorted({
+            index for index, account_type in candidates
+            if account_type in TRADABLE_ACCOUNT_TYPES
+        })
+        if len(tradable) < 2:
             raise RuntimeError(
-                "more than two normal active accounts found; configure RH_NEUTRAL_MAIN_ACCOUNT_INDEX "
+                "fewer than two tradable active accounts found for the configured L1 address"
+            )
+        if len(tradable) > 2:
+            raise RuntimeError(
+                "more than two tradable active accounts found; configure RH_NEUTRAL_MAIN_ACCOUNT_INDEX "
                 "and RH_NEUTRAL_SUB_ACCOUNT_INDEX explicitly"
             )
         if exclude is not None:
-            alternatives = [index for index in normal if index != exclude]
+            alternatives = [index for index in tradable if index != exclude]
             if len(alternatives) < 1:
                 raise RuntimeError("no distinct subaccount found for the configured main account")
             return exclude, alternatives[0]
-        return normal[0], normal[1]
+        return tradable[0], tradable[1]
 
     async def fetch_market(self, market_id: int, *, force_refresh: bool = False) -> Dict[str, Any]:
         if force_refresh or market_id not in self._market_cache:

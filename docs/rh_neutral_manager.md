@@ -52,7 +52,7 @@ requested.
 
 The account indexes can be supplied explicitly. Alternatively,
 `RH_NEUTRAL_L1_ADDRESS` can be used only when that address has exactly two
-active normal accounts. If it has more, startup stops and requires explicit
+active tradable accounts (main account/subaccount). If it has more, startup stops and requires explicit
 main/sub indexes instead of guessing (explicit indexes always take precedence).
 The market IDs default to `0`, which makes the manager resolve `SPY` and `QQQ`
 from the current RH perp catalogue at startup. Set them explicitly if an

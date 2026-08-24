@@ -229,26 +229,40 @@ async def test_account_discovery_ignores_inactive_reserved_entries():
 
 
 @pytest.mark.asyncio
-async def test_account_discovery_accepts_live_status_one_but_not_reserved_fallback():
+async def test_account_discovery_accepts_main_and_subaccount_types():
     settings = _settings()
     gateway = LighterAccountGateway(settings.main, settings, session=None)  # type: ignore[arg-type]
 
     async def fake_get(path, params=None, **kwargs):
         return {"sub_accounts": [
             {"index": 6985, "account_type": 0, "status": 1},
-            {"index": 6986, "account_type": 0, "status": 1},
             {"index": 281474976710318, "account_type": 1, "status": 1},
         ]}
 
     gateway._get_json = fake_get  # type: ignore[method-assign]
-    assert await gateway.discover_account_indexes("0xmaster") == (6985, 6986)
+    assert await gateway.discover_account_indexes("0xmaster") == (6985, 281474976710318)
 
     async def only_reserved(path, params=None, **kwargs):
-        return {"sub_accounts": [{"index": 281474976710318, "account_type": 1, "status": 1}]}
+        return {"sub_accounts": [{"index": 281474976710318, "account_type": 3, "status": 1}]}
 
     gateway._get_json = only_reserved  # type: ignore[method-assign]
-    with pytest.raises(RuntimeError, match="normal active accounts"):
+    with pytest.raises(RuntimeError, match="tradable active accounts"):
         await gateway.discover_account_indexes("0xmaster")
+
+
+@pytest.mark.asyncio
+async def test_account_discovery_merges_accounts_and_subaccounts_fields():
+    settings = _settings()
+    gateway = LighterAccountGateway(settings.main, settings, session=None)  # type: ignore[arg-type]
+
+    async def fake_get(path, params=None, **kwargs):
+        return {
+            "accounts": [{"index": 6985, "account_type": 0, "status": "active"}],
+            "sub_accounts": [{"index": 281474976710314, "account_type": 1, "status": "active"}],
+        }
+
+    gateway._get_json = fake_get  # type: ignore[method-assign]
+    assert await gateway.discover_account_indexes("0xmaster") == (6985, 281474976710314)
 
 
 @pytest.mark.asyncio
