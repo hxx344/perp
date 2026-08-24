@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Lighter Neutral Position Dashboard</title>
+  <title>Lighter 中性账户监控</title>
   <style>
     :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101317; color: #e8edf2; }
     body { margin: 0; padding: 24px; max-width: 1280px; margin-inline: auto; }
@@ -32,29 +32,29 @@
   </style>
 </head>
 <body>
-  <h1>Lighter Neutral Position Dashboard</h1>
-  <div class="muted">Two-account SPY/QQQ monitor. Actions are reduce-only and are revalidated by the manager. Pair and flatten actions submit independent legs; review each result.</div>
+  <h1>Lighter 中性账户监控</h1>
+  <div class="muted">监控主账户与子账户的 SPY/QQQ 四腿仓位。所有平仓操作都是只减仓，并由后端重新校验。双腿和全部平仓分别提交，请逐项确认结果。</div>
   <div class="toolbar">
-    <button id="refresh" type="button">Refresh</button>
-    <button id="rebalance" type="button">Rebalance margin</button>
-    <button id="flatten" class="danger" type="button">Flatten all four legs</button>
+    <button id="refresh" type="button">刷新</button>
+    <button id="rebalance" type="button">平衡可用保证金</button>
+    <button id="flatten" class="danger" type="button">平仓全部四条腿</button>
     <span id="status" class="status" role="status"></span>
   </div>
   <section id="accounts" class="grid" aria-live="polite"></section>
   <section class="panel" style="margin-top:14px">
-    <h2>Risk balance</h2>
+    <h2>风险与余额平衡</h2>
     <div id="risk" class="metrics" aria-live="polite"></div>
   </section>
   <section class="panel" style="margin-top:14px">
-    <h2>Positions and partial close</h2>
-    <div class="muted">Enter an absolute quantity or use the current position size. The server derives the closing side.</div>
+    <h2>账户仓位与部分平仓</h2>
+    <div class="muted">输入要平的绝对数量；留空则平掉该仓位。平仓方向由服务器根据当前仓位自动决定。</div>
     <table>
-      <thead><tr><th>Account</th><th>Symbol</th><th>Size</th><th>Notional</th><th>Direction</th><th>Action</th></tr></thead>
+      <thead><tr><th>账户</th><th>标的</th><th>仓位</th><th>名义价值</th><th>方向</th><th>操作</th></tr></thead>
       <tbody id="positions"></tbody>
     </table>
   </section>
   <section class="panel" style="margin-top:14px">
-    <h2>Close both legs for a symbol</h2>
+    <h2>同时平掉某个标的的两条腿</h2>
     <div id="pairs" class="actions"></div>
   </section>
 
@@ -76,6 +76,14 @@
       if (value === null || value === undefined || value === '') return '-';
       return String(value);
     }
+    function accountText(value) {
+      const name = String(value || '').toLowerCase();
+      return name === 'main' ? '主账户' : name === 'sub' ? '子账户' : text(value);
+    }
+    function sideText(value) {
+      const side = String(value || '').toLowerCase();
+      return side === 'long' ? '多' : side === 'short' ? '空' : side === 'flat' ? '空仓' : text(value);
+    }
     function setStatus(message, error) {
       statusEl.textContent = message || '';
       statusEl.className = 'status' + (error ? ' error' : message ? ' ok' : '');
@@ -96,9 +104,23 @@
       return box;
     }
     function normaliseAccounts(data) {
-      if (data && data.accounts && !Array.isArray(data.accounts)) return Object.entries(data.accounts).map(([name, value]) => ({ name, ...(value || {}) }));
-      if (Array.isArray(data && data.accounts)) return data.accounts;
-      return [];
+      const raw = data && data.accounts;
+      const entries = raw && !Array.isArray(raw)
+        ? Object.entries(raw).map(([name, value]) => ({ name, ...(value || {}) }))
+        : Array.isArray(raw) ? raw : [];
+      const byName = new Map(entries.map(account => [String(account.name || account.account || '').toLowerCase(), account]));
+      // Always render both configured accounts. A missing/stale sub snapshot
+      // must be visible instead of silently removing the subaccount card.
+      return ['main', 'sub'].map(name => byName.get(name) || {
+        name,
+        error: '尚未读取到账户数据',
+        available_balance: null,
+        equity: null,
+        maintenance_margin_requirement: null,
+        maintenance_ratio: null,
+        initial_ratio: null,
+        positions: [],
+      });
     }
     function normalisePositions(data, accounts) {
       if (Array.isArray(data && data.legs)) return data.legs;
@@ -114,16 +136,24 @@
         const panel = document.createElement('article');
         panel.className = 'panel';
         const title = document.createElement('h2');
-        title.textContent = text(account.name || account.account);
+        const accountName = String(account.name || account.account || '').toLowerCase();
+        title.textContent = accountText(accountName);
         const metrics = document.createElement('div');
         metrics.className = 'metrics';
         metrics.append(
-          metric('Available balance', account.available_balance ?? account.availableBalance),
-          metric('Account value', account.equity ?? account.total_asset_value ?? account.totalAccountValue),
-          metric('Maintenance margin', account.maintenance_margin_requirement ?? account.maintenanceMargin),
-          metric('Maintenance ratio', account.maintenance_ratio ?? account.margin_ratio ?? account.marginRatio),
-          metric('Initial ratio', account.initial_ratio ?? account.initialRatio)
+          metric('账户索引', account.account_index ?? account.accountIndex),
+          metric('可用保证金', account.available_balance ?? account.availableBalance),
+          metric('账户权益', account.equity ?? account.total_asset_value ?? account.totalAccountValue),
+          metric('维护保证金', account.maintenance_margin_requirement ?? account.maintenanceMargin),
+          metric('维护保证金率', account.maintenance_ratio ?? account.margin_ratio ?? account.marginRatio),
+          metric('初始保证金率', account.initial_ratio ?? account.initialRatio)
         );
+        if (account.error) {
+          const error = document.createElement('div');
+          error.className = 'status error';
+          error.textContent = '读取失败：' + account.error;
+          panel.append(error);
+        }
         panel.append(title, metrics);
         accountsEl.append(panel);
       });
@@ -132,19 +162,19 @@
       const aggregate = data.aggregate || {};
       const plan = data.transfer_plan;
       riskEl.append(
-        metric('SPY net size', aggregate.net_spy),
-        metric('QQQ net size', aggregate.net_qqq),
-        metric('SPY net notional', aggregate.net_spy_value),
-        metric('QQQ net notional', aggregate.net_qqq_value),
-        metric('Margin ratio delta', aggregate.margin_ratio_delta),
-        metric('Unrealized PnL', aggregate.unrealized_pnl),
-        metric('Realized PnL', aggregate.realized_pnl),
-        metric('Transfer plan', plan ? `${plan.source} -> ${plan.destination}: ${plan.amount}` : 'none')
+        metric('SPY 净仓位', aggregate.net_spy),
+        metric('QQQ 净仓位', aggregate.net_qqq),
+        metric('SPY 净名义价值', aggregate.net_spy_value),
+        metric('QQQ 净名义价值', aggregate.net_qqq_value),
+        metric('维护保证金率差', aggregate.margin_ratio_delta),
+        metric('未实现盈亏', aggregate.unrealized_pnl),
+        metric('已实现盈亏', aggregate.realized_pnl),
+        metric('转账计划', plan ? `${plan.source === 'main' ? '主账户' : '子账户'} -> ${plan.destination === 'main' ? '主账户' : '子账户'}：${plan.amount}` : '无')
       );
       if (data.pair_error) {
         const warning = document.createElement('div');
         warning.className = 'status error';
-        warning.textContent = 'Pair safety: ' + data.pair_error;
+        warning.textContent = '账户安全校验：' + data.pair_error;
         riskEl.append(warning);
       }
       if (data.transfer_block_reason) {
@@ -158,13 +188,13 @@
       positionsEl.replaceChildren();
       const symbols = new Set();
       positions.forEach(position => {
-        const account = text(position.account || position.account_name);
+        const account = accountText(position.account || position.account_name);
         const symbol = text(position.symbol || position.ticker);
         const size = position.signed_size ?? position.size ?? position.position ?? position.quantity;
         if (symbol !== '-') symbols.add(symbol.toUpperCase());
         const row = document.createElement('tr');
         [account, symbol, number(size), number(position.position_value ?? position.margin ?? position.allocated_margin),
-          text(position.actual_side) + ' / ' + text(position.expected_side)].forEach(value => {
+          `${sideText(position.actual_side)} / ${sideText(position.expected_side)}`].forEach(value => {
           const cell = document.createElement('td');
           cell.textContent = value;
           row.append(cell);
@@ -176,10 +206,10 @@
         quantity.type = 'text';
         quantity.inputMode = 'decimal';
         quantity.value = size && Number(size) !== 0 ? String(Math.abs(Number(size))) : '';
-        quantity.setAttribute('aria-label', 'close quantity');
+        quantity.setAttribute('aria-label', '平仓数量');
         const close = document.createElement('button');
         close.type = 'button';
-        close.textContent = 'Close';
+        close.textContent = '平仓';
         close.disabled = account === '-' || symbol === '-' || !size || Number(size) === 0;
         close.addEventListener('click', () => closePosition(account, symbol, quantity.value, close));
         actions.append(quantity, close);
@@ -193,11 +223,11 @@
         const quantity = document.createElement('input');
         quantity.type = 'text';
         quantity.inputMode = 'decimal';
-        quantity.placeholder = 'quantity';
-        quantity.setAttribute('aria-label', symbol + ' pair close quantity');
+        quantity.placeholder = '数量（留空为全部）';
+        quantity.setAttribute('aria-label', symbol + ' 双腿平仓数量');
         const button = document.createElement('button');
         button.type = 'button';
-        button.textContent = 'Close both ' + symbol + ' legs';
+        button.textContent = '同时平 ' + symbol + ' 两腿';
         button.addEventListener('click', () => closePair(symbol, quantity.value, button));
         pairsEl.append(quantity, button);
       });
@@ -207,7 +237,7 @@
         const response = await fetch('/api/snapshot', { cache: 'no-store' });
         if (!response.ok) throw new Error('snapshot HTTP ' + response.status);
         render(await response.json());
-        setStatus('Updated ' + new Date().toLocaleTimeString(), false);
+        setStatus('已更新：' + new Date().toLocaleTimeString(), false);
       } catch (error) { setStatus(String(error.message || error), true); }
     }
     async function action(path, body, button) {
@@ -220,31 +250,31 @@
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok || payload.ok === false) throw new Error(payload.error || 'action HTTP ' + response.status);
-        setStatus('Action accepted', false);
+        setStatus('操作已提交', false);
         await load();
       } catch (error) { setStatus(String(error.message || error), true); }
       finally { if (button) button.disabled = false; }
     }
     function closePosition(account, symbol, quantity, button) {
-      if (quantity && Number(quantity) <= 0) { setStatus('Enter a positive quantity or leave blank for full close', true); return; }
+      if (quantity && Number(quantity) <= 0) { setStatus('请输入正数，或留空表示全部平仓', true); return; }
       const body = { account, symbol };
       if (quantity) body.quantity = quantity;
       action('/api/actions/close-position', body, button);
     }
     function closePair(symbol, quantity, button) {
-      if (quantity && Number(quantity) <= 0) { setStatus('Enter a positive quantity or leave blank for full close', true); return; }
+      if (quantity && Number(quantity) <= 0) { setStatus('请输入正数，或留空表示全部平仓', true); return; }
       const body = { symbol };
       if (quantity) body.quantity = quantity;
-      if (window.confirm('Close both ' + symbol + ' legs?')) action('/api/actions/close-pair', body, button);
+      if (window.confirm('确定同时平掉 ' + symbol + ' 的主账户和子账户仓位吗？')) action('/api/actions/close-pair', body, button);
     }
     refreshBtn.addEventListener('click', load);
     rebalanceBtn.addEventListener('click', () => {
-      if (window.confirm('Recalculate the margin transfer plan and execute only if the manager allows it?')) {
+      if (window.confirm('重新计算可用保证金平衡转账计划，并仅在后端允许时执行？')) {
         action('/api/actions/rebalance', {}, rebalanceBtn);
       }
     });
     flattenBtn.addEventListener('click', () => {
-      if (window.confirm('This will close all four configured legs. Continue?')) {
+      if (window.confirm('这会平掉配置中的全部四条腿，确定继续吗？')) {
         action('/api/actions/flatten-all', { confirm: 'FLATTEN_ALL' }, flattenBtn);
       }
     });
