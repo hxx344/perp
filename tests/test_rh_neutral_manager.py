@@ -54,7 +54,7 @@ def _account(name, equity, mmr, available, *, error=None):
     )
 
 
-def test_margin_ratio_and_transfer_plan_use_hysteresis_and_source_reserve():
+def test_transfer_plan_equalizes_available_balance_with_hysteresis():
     settings = _settings()
     first = _account("main", 100, 60, 120)
     second = _account("sub", 500, 100, 500)
@@ -63,11 +63,11 @@ def test_margin_ratio_and_transfer_plan_use_hysteresis_and_source_reserve():
     assert plan is not None
     assert plan.source == "sub"
     assert plan.destination == "main"
-    assert plan.amount == Decimal("70")
+    assert plan.amount == Decimal("190")
     assert plan.urgent is False
 
     # A small deficit below hysteresis must not cause churn.
-    near = _account("main", 166, 60, 200)
+    near = _account("main", 166, 60, 490)
     assert build_transfer_plan(near, second, settings) is None
 
 
@@ -81,7 +81,7 @@ def test_transfer_plan_can_reverse_from_main_to_sub():
     assert plan is not None
     assert plan.source == "main"
     assert plan.destination == "sub"
-    assert plan.amount == Decimal("70")
+    assert plan.amount == Decimal("190")
 
 
 def test_transfer_memo_is_fixed_length_hex_and_does_not_leak_reason():

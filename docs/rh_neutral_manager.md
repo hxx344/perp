@@ -125,22 +125,21 @@ positions, margin and PnL.
 
 ## Transfer policy
 
-For each account the manager computes:
+For each account the manager compares the two fresh `available_balance`
+values. If their difference is larger than
+`RH_NEUTRAL_TRANSFER_HYSTERESIS_USDC`, it transfers half of the difference,
+bounded by `RH_NEUTRAL_MIN_TRANSFER_USDC` and
+`RH_NEUTRAL_MAX_TRANSFER_USDC`. This makes the post-transfer available
+balances converge toward the same midpoint. The direction is bidirectional:
+the manager can transfer `main -> sub` when the main account has more
+available balance, or `sub -> main` when the subaccount has more. The transfer
+fee is queried immediately before signing; a live transfer is refused if the
+fee cannot be read. A position marked isolated is fail-closed because an
+account-level transfer does not add collateral to that isolated position.
 
-```text
-maintenance_ratio = account_value / maintenance_margin_requirement
-required_equity = maintenance_requirement * target_ratio + reserve
-```
-
-It transfers only the smaller of the recipient deficit, source surplus and
-`RH_NEUTRAL_MAX_TRANSFER_USDC`, after hysteresis and cooldown checks. The
-direction is bidirectional: the manager can transfer `main -> sub` when the
-subaccount is deficient, or `sub -> main` when the main account is deficient.
-The source keeps its reserve and the configured minimum transfer amount is one
-USDG by default. The transfer fee is queried immediately before signing; a
-live transfer is refused if the fee cannot be read. A position marked isolated
-is fail-closed because an account-level transfer does not add collateral to
-that isolated position.
+The legacy `RH_NEUTRAL_MIN_MARGIN_RATIO`,
+`RH_NEUTRAL_TARGET_MARGIN_RATIO`, and `RH_NEUTRAL_RESERVE_USDC` values remain
+accepted for old env files but are not used to size transfers in balance mode.
 
 Before any transfer, all four legs must be present with the configured signs.
 For each symbol, the manager also compares the absolute main/sub position

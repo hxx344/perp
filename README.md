@@ -360,10 +360,13 @@ bash scripts/run_rh_neutral.sh --live
 bash scripts/run_rh_neutral.sh --live --auto-transfer
 ```
 
-转账是主账户和子账户之间的双向同主账户转账：保证金不足的一侧为
-接收方，另一侧为发送方。程序会保留安全余额、使用滞回和冷却时间，
-并在交易状态过期、四腿缺失、方向错误、L1 不一致或写入状态未知时
-停止转账。真实转账需要分别配置主账户和子账户的 Lighter API 私钥；
+转账是主账户和子账户之间的双向同主账户转账：程序比较两边的
+`available_balance`，从余额较多的一侧向余额较少的一侧转出两边差额的
+一半，使两边趋向可用余额相等。`RH_NEUTRAL_TRANSFER_HYSTERESIS_USDC`
+控制最小差额，`RH_NEUTRAL_MIN_TRANSFER_USDC` 和
+`RH_NEUTRAL_MAX_TRANSFER_USDC` 控制单笔上下限，冷却时间防止重复转账。
+交易状态过期、四腿缺失、方向错误、L1 不一致或写入状态未知时会停止
+转账。真实转账需要分别配置主账户和子账户的 Lighter API 私钥；
 不要把私钥放入 README 或命令行参数。
 
 dashboard 默认只监听 `127.0.0.1:8790`。服务器上查看可以使用 SSH

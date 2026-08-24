@@ -366,6 +366,8 @@ class NeutralSettings:
     main_long_symbol: str = "SPY"
     l1_address: str = ""
     poll_seconds: float = 5.0
+    # Retained for configuration/backward compatibility.  Balance mode does
+    # not use margin-ratio targets or an equity reserve to size transfers.
     min_margin_ratio: Decimal = Decimal("1.50")
     target_margin_ratio: Decimal = Decimal("2.00")
     reserve_usdc: Decimal = Decimal("50")
@@ -654,20 +656,16 @@ def margin_ratio(equity: Decimal, maintenance_requirement: Decimal) -> Optional[
     return None if maintenance_requirement <= 0 else equity / maintenance_requirement
 
 
-def _required_equity(account: AccountSnapshot, settings: NeutralSettings) -> Decimal:
-    return account.maintenance_margin_requirement * settings.target_margin_ratio + settings.reserve_usdc
-
-
 def build_transfer_plan(
     first: AccountSnapshot,
     second: AccountSnapshot,
     settings: NeutralSettings,
 ) -> Optional[TransferPlan]:
-    """Build one hysteresis-protected transfer plan.
+    """Build a plan that equalizes the two accounts' available balances.
 
-    The source must retain both the configured reserve and the target margin
-    ratio. The recipient is funded only up to the same target, preventing the
-    two accounts from oscillating around an equality threshold.
+    The target is the midpoint of the two fresh ``available_balance`` values.
+    This intentionally does not use maintenance-margin targets: the manager is
+    a simple collateral balancer for the already-opposite four-leg position.
     """
 
     if first.error or second.error:
@@ -681,45 +679,25 @@ def build_transfer_plan(
     # dedicated update-margin action after reviewing the isolated leg.
     if first.has_isolated_positions or second.has_isolated_positions:
         return None
-    accounts = {first.name: first, second.name: second}
-    if len(accounts) != 2:
+    if first.name == second.name:
         return None
 
-    deficits: Dict[str, Decimal] = {}
-    surpluses: Dict[str, Decimal] = {}
-    for account in (first, second):
-        required = _required_equity(account, settings)
-        deficits[account.name] = max(Decimal("0"), required - account.equity)
-        surpluses[account.name] = max(
-            Decimal("0"),
-            min(account.equity - required, account.available_balance - settings.reserve_usdc),
-        )
-
-    recipient_name = max(deficits, key=deficits.get)
-    source_name = second.name if recipient_name == first.name else first.name
-    deficit = deficits[recipient_name]
-    surplus = surpluses[source_name]
-    recipient = accounts[recipient_name]
-    urgent = (
-        recipient.maintenance_ratio is not None
-        and recipient.maintenance_ratio < settings.min_margin_ratio
-    )
-    if deficit <= 0:
+    balance_delta = first.available_balance - second.available_balance
+    if abs(balance_delta) <= settings.transfer_hysteresis_usdc:
         return None
-    if not urgent and deficit <= settings.transfer_hysteresis_usdc:
-        return None
-    amount = min(deficit, surplus, settings.max_transfer_usdc)
+    source_name = first.name if balance_delta > 0 else second.name
+    recipient_name = second.name if balance_delta > 0 else first.name
+    amount = min(abs(balance_delta) / Decimal("2"), settings.max_transfer_usdc)
     # USDG uses six decimal places.  Flooring avoids accidentally asking the
     # signer to transfer more than the source-side safety calculation allows.
     amount = amount.quantize(Decimal("0.000001"), rounding=ROUND_DOWN)
     if amount < getattr(settings, "min_transfer_usdc", Decimal("1")):
         return None
     reason = (
-        f"{recipient_name} margin ratio {recipient.maintenance_ratio} is below minimum"
-        if urgent
-        else f"{recipient_name} requires {deficit} USDC to reach target margin buffer"
+        f"available balance imbalance: {first.name}={first.available_balance} USDC, "
+        f"{second.name}={second.available_balance} USDC"
     )
-    return TransferPlan(source_name, recipient_name, amount, reason, urgent)
+    return TransferPlan(source_name, recipient_name, amount, reason, False)
 
 
 class LighterAccountGateway:
