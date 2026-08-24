@@ -14,6 +14,11 @@
     button:hover { background: #273544; }
     button.danger { border-color: #b34747; background: #542528; }
     button:disabled { opacity: .5; cursor: wait; }
+    .confirm-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(0, 0, 0, .72); }
+    .confirm-backdrop[hidden] { display: none; }
+    .confirm-dialog { width: min(440px, 100%); border: 1px solid #8f4141; border-radius: 8px; padding: 18px; background: #151c23; box-shadow: 0 12px 40px rgba(0, 0, 0, .45); }
+    .confirm-dialog p { margin: 0 0 16px; line-height: 1.5; }
+    .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
     input { width: 100px; border: 1px solid #3b4754; border-radius: 5px; background: #11181f; color: inherit; padding: 7px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
     .panel { border: 1px solid #2d3945; border-radius: 8px; padding: 14px; background: #151c23; }
@@ -39,6 +44,15 @@
     <button id="rebalance" type="button">平衡可用保证金</button>
     <button id="flatten" class="danger" type="button">平仓全部四条腿</button>
     <span id="status" class="status" role="status"></span>
+  </div>
+  <div id="confirmOverlay" class="confirm-backdrop" hidden>
+    <div class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="confirmMessage">
+      <p id="confirmMessage"></p>
+      <div class="confirm-actions">
+        <button id="confirmCancel" type="button">取消</button>
+        <button id="confirmProceed" class="danger" type="button">确认平仓</button>
+      </div>
+    </div>
   </div>
   <section id="accounts" class="grid" aria-live="polite"></section>
   <section class="panel" style="margin-top:14px">
@@ -67,6 +81,11 @@
     const refreshBtn = document.getElementById('refresh');
     const rebalanceBtn = document.getElementById('rebalance');
     const flattenBtn = document.getElementById('flatten');
+    const confirmOverlay = document.getElementById('confirmOverlay');
+    const confirmMessage = document.getElementById('confirmMessage');
+    const confirmCancel = document.getElementById('confirmCancel');
+    const confirmProceed = document.getElementById('confirmProceed');
+    let pendingConfirmation = null;
 
     function id() {
       if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
@@ -87,6 +106,16 @@
     function setStatus(message, error) {
       statusEl.textContent = message || '';
       statusEl.className = 'status' + (error ? ' error' : message ? ' ok' : '');
+    }
+    function askConfirmation(message, callback) {
+      pendingConfirmation = callback;
+      confirmMessage.textContent = message;
+      confirmOverlay.hidden = false;
+      confirmProceed.focus();
+    }
+    function closeConfirmation() {
+      pendingConfirmation = null;
+      confirmOverlay.hidden = true;
     }
     function number(value) {
       const n = Number(value);
@@ -277,18 +306,27 @@
     }
     function closePosition(account, symbol, quantity, button) {
       const amountText = quantity ? ('数量 ' + quantity) : '全部仓位';
-      if (!window.confirm('二次确认：确定平仓 ' + accountText(account) + ' 的 ' + symbol + '（' + amountText + '）吗？')) return;
       if (quantity && Number(quantity) <= 0) { setStatus('请输入正数，或留空表示全部平仓', true); return; }
       const body = { account, symbol };
       if (quantity) body.quantity = quantity;
-      action('/api/actions/close-position', body, button);
+      askConfirmation('二次确认：确定平仓 ' + accountText(account) + ' 的 ' + symbol + '（' + amountText + '）吗？', () => {
+        action('/api/actions/close-position', body, button);
+      });
     }
     function closePair(symbol, quantity, button) {
       if (quantity && Number(quantity) <= 0) { setStatus('请输入正数，或留空表示全部平仓', true); return; }
       const body = { symbol };
       if (quantity) body.quantity = quantity;
-      if (window.confirm('确定同时平掉 ' + symbol + ' 的主账户和子账户仓位吗？')) action('/api/actions/close-pair', body, button);
+      askConfirmation('二次确认：确定同时平掉 ' + symbol + ' 的主账户和子账户仓位吗？', () => {
+        action('/api/actions/close-pair', body, button);
+      });
     }
+    confirmCancel.addEventListener('click', closeConfirmation);
+    confirmProceed.addEventListener('click', () => {
+      const callback = pendingConfirmation;
+      closeConfirmation();
+      if (callback) callback();
+    });
     refreshBtn.addEventListener('click', load);
     rebalanceBtn.addEventListener('click', () => {
       if (window.confirm('重新计算可用保证金平衡转账计划，并仅在后端允许时执行？')) {
@@ -296,9 +334,9 @@
       }
     });
     flattenBtn.addEventListener('click', () => {
-      if (window.confirm('这会平掉配置中的全部四条腿，确定继续吗？')) {
+      askConfirmation('二次确认：这会平掉配置中的全部四条腿，确定继续吗？', () => {
         action('/api/actions/flatten-all', { confirm: 'FLATTEN_ALL' }, flattenBtn);
-      }
+      });
     });
     load();
     window.setInterval(load, 2000);
