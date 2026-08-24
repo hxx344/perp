@@ -224,6 +224,11 @@
         riskEl.append(note);
       }
 
+      // Do not replace either table while an operator is editing a quantity.
+      // The next poll after blur will rebuild it with the saved draft value.
+      const activeElement = document.activeElement;
+      if (activeElement && (positionsEl.contains(activeElement) || pairsEl.contains(activeElement))) return;
+
       const positions = normalisePositions(data, accounts);
       positionsEl.replaceChildren();
       const symbols = new Set();
