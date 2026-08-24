@@ -314,6 +314,69 @@ python runbot.py --exchange grvt --ticker BTC --quantity 0.05 --take-profit 0.02
 
 Robinhood Lighter 可以在当前目录直接运行，不需要复制代码、创建系统用户或安装 systemd：`python -m strategies.robinhood_lighter_cycle --quantity 0.00020 --randomize-direction --slippage 0.3 --max-wait 3`。该入口复用原策略，优先读取已有的 `/etc/perp/robinhood.env`，并自动补齐 Robinhood 端点、Binance 虚拟行情和 2 倍杠杆。
 
+双账户 SPY/QQQ 风险监控和保证金管理使用独立模块
+`strategies.rh_neutral_manager`，配置与运行步骤见
+[`docs/rh_neutral_manager.md`](docs/rh_neutral_manager.md)。它默认只读；
+只有显式 `--live` 才会允许 reduce-only 平仓或同主账户转账，
+`--auto-transfer` 还需要额外开启自动转账。
+
+### Robinhood Lighter SPY/QQQ 双账户中性管理器
+
+该模块用于监控 Robinhood Chain Lighter 的一个主账户和一个子账户，
+并维持四腿相反方向的组合。主账户做多哪一个标的可以配置，子账户会
+自动使用相反方向：
+
+| `RH_NEUTRAL_MAIN_LONG_SYMBOL` | 主账户 | 子账户 |
+| --- | --- | --- |
+| `SPY` | 多 SPY、空 QQQ | 空 SPY、多 QQQ |
+| `QQQ` | 空 SPY、多 QQQ | 多 SPY、空 QQQ |
+
+Linux 上的最简安装和启动步骤：
+
+```bash
+cd /root/code/perp
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-robinhood.txt
+sudo install -d -m 700 /etc/perp
+sudo install -m 600 env_rh_neutral_example.txt /etc/perp/rh-neutral.env
+sudoedit /etc/perp/rh-neutral.env
+bash scripts/run_rh_neutral.sh
+```
+
+在 `/etc/perp/rh-neutral.env` 中至少填写两个账户的索引、L1 地址和
+只读所需的市场配置；`RH_NEUTRAL_MAIN_LONG_SYMBOL` 默认是 `SPY`，如果
+主账户要做多 QQQ，改为：
+
+```env
+RH_NEUTRAL_MAIN_LONG_SYMBOL=QQQ
+```
+
+先保持默认只读模式运行。确认两个账户、四条仓位、权益和保证金率都
+正确后，再分别启用真实操作和自动转账：
+
+```bash
+bash scripts/run_rh_neutral.sh --live
+bash scripts/run_rh_neutral.sh --live --auto-transfer
+```
+
+转账是主账户和子账户之间的双向同主账户转账：保证金不足的一侧为
+接收方，另一侧为发送方。程序会保留安全余额、使用滞回和冷却时间，
+并在交易状态过期、四腿缺失、方向错误、L1 不一致或写入状态未知时
+停止转账。真实转账需要分别配置主账户和子账户的 Lighter API 私钥；
+不要把私钥放入 README 或命令行参数。
+
+dashboard 默认只监听 `127.0.0.1:8790`。服务器上查看可以使用 SSH
+隧道：
+
+```bash
+ssh -N -L 8790:127.0.0.1:8790 user@server
+```
+
+然后在本地浏览器打开 `http://127.0.0.1:8790`。完整配置、手动部分
+平仓、双账户反向平仓和公网 HTTPS 部署说明见
+[`docs/rh_neutral_manager.md`](docs/rh_neutral_manager.md)。
+
 ```bash
 python strategies/aster_lighter_cycle.py \
    --aster-ticker ETH \

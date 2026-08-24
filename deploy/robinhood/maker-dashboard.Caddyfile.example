@@ -1,0 +1,24 @@
+# Public read-only dashboard proxy.
+# Replace the hostname, username, and bcrypt hash before installing as
+# /etc/caddy/Caddyfile. Keep the Python dashboard on 127.0.0.1:8788.
+maker.example.com {
+    encode zstd gzip
+
+    basic_auth {
+        operator $2a$14$REPLACE_WITH_CADDY_BCRYPT_HASH
+    }
+
+    reverse_proxy 127.0.0.1:8788 {
+        # Proxy authentication is for Caddy only, never the Python process.
+        header_up -Authorization
+    }
+
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), geolocation=(), microphone=(), payment=(), usb=()"
+    }
+}

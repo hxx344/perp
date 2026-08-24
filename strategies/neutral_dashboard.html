@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lighter Neutral Position Dashboard</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101317; color: #e8edf2; }
+    body { margin: 0; padding: 24px; max-width: 1280px; margin-inline: auto; }
+    h1 { margin: 0 0 6px; font-size: 1.45rem; }
+    .muted { color: #9aa6b2; font-size: .86rem; }
+    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 18px 0; }
+    button { border: 1px solid #3b4754; border-radius: 6px; background: #1c2630; color: #edf3f8; padding: 8px 12px; cursor: pointer; }
+    button:hover { background: #273544; }
+    button.danger { border-color: #b34747; background: #542528; }
+    button:disabled { opacity: .5; cursor: wait; }
+    input { width: 100px; border: 1px solid #3b4754; border-radius: 5px; background: #11181f; color: inherit; padding: 7px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+    .panel { border: 1px solid #2d3945; border-radius: 8px; padding: 14px; background: #151c23; }
+    .panel h2 { margin: 0 0 10px; font-size: 1rem; }
+    .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .metric { background: #11181f; border-radius: 5px; padding: 8px; }
+    .metric b { display: block; margin-top: 3px; overflow-wrap: anywhere; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td { text-align: left; border-bottom: 1px solid #29333d; padding: 9px 6px; vertical-align: middle; }
+    th { color: #9aa6b2; font-size: .78rem; font-weight: 600; }
+    .actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .status { min-height: 1.3em; color: #9aa6b2; }
+    .status.error { color: #ff9b9b; }
+    .status.ok { color: #86e1ab; }
+    @media (max-width: 700px) { body { padding: 14px; } th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { display: none; } }
+  </style>
+</head>
+<body>
+  <h1>Lighter Neutral Position Dashboard</h1>
+  <div class="muted">Two-account SPY/QQQ monitor. Actions are reduce-only and are revalidated by the manager. Pair and flatten actions submit independent legs; review each result.</div>
+  <div class="toolbar">
+    <button id="refresh" type="button">Refresh</button>
+    <button id="rebalance" type="button">Rebalance margin</button>
+    <button id="flatten" class="danger" type="button">Flatten all four legs</button>
+    <span id="status" class="status" role="status"></span>
+  </div>
+  <section id="accounts" class="grid" aria-live="polite"></section>
+  <section class="panel" style="margin-top:14px">
+    <h2>Risk balance</h2>
+    <div id="risk" class="metrics" aria-live="polite"></div>
+  </section>
+  <section class="panel" style="margin-top:14px">
+    <h2>Positions and partial close</h2>
+    <div class="muted">Enter an absolute quantity or use the current position size. The server derives the closing side.</div>
+    <table>
+      <thead><tr><th>Account</th><th>Symbol</th><th>Size</th><th>Notional</th><th>Direction</th><th>Action</th></tr></thead>
+      <tbody id="positions"></tbody>
+    </table>
+  </section>
+  <section class="panel" style="margin-top:14px">
+    <h2>Close both legs for a symbol</h2>
+    <div id="pairs" class="actions"></div>
+  </section>
+
+  <script>
+    const accountsEl = document.getElementById('accounts');
+    const riskEl = document.getElementById('risk');
+    const positionsEl = document.getElementById('positions');
+    const pairsEl = document.getElementById('pairs');
+    const statusEl = document.getElementById('status');
+    const refreshBtn = document.getElementById('refresh');
+    const rebalanceBtn = document.getElementById('rebalance');
+    const flattenBtn = document.getElementById('flatten');
+
+    function id() {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+      return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    }
+    function text(value) {
+      if (value === null || value === undefined || value === '') return '-';
+      return String(value);
+    }
+    function setStatus(message, error) {
+      statusEl.textContent = message || '';
+      statusEl.className = 'status' + (error ? ' error' : message ? ' ok' : '');
+    }
+    function number(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : text(value);
+    }
+    function metric(label, value) {
+      const box = document.createElement('div');
+      box.className = 'metric';
+      const small = document.createElement('span');
+      small.className = 'muted';
+      small.textContent = label;
+      const strong = document.createElement('b');
+      strong.textContent = number(value);
+      box.append(small, strong);
+      return box;
+    }
+    function normaliseAccounts(data) {
+      if (data && data.accounts && !Array.isArray(data.accounts)) return Object.entries(data.accounts).map(([name, value]) => ({ name, ...(value || {}) }));
+      if (Array.isArray(data && data.accounts)) return data.accounts;
+      return [];
+    }
+    function normalisePositions(data, accounts) {
+      if (Array.isArray(data && data.legs)) return data.legs;
+      if (Array.isArray(data && data.positions)) return data.positions;
+      const result = [];
+      accounts.forEach(account => (account.positions || []).forEach(position => result.push({ account: account.name || account.account, ...position })));
+      return result;
+    }
+    function render(data) {
+      const accounts = normaliseAccounts(data);
+      accountsEl.replaceChildren();
+      accounts.forEach(account => {
+        const panel = document.createElement('article');
+        panel.className = 'panel';
+        const title = document.createElement('h2');
+        title.textContent = text(account.name || account.account);
+        const metrics = document.createElement('div');
+        metrics.className = 'metrics';
+        metrics.append(
+          metric('Available balance', account.available_balance ?? account.availableBalance),
+          metric('Account value', account.equity ?? account.total_asset_value ?? account.totalAccountValue),
+          metric('Maintenance margin', account.maintenance_margin_requirement ?? account.maintenanceMargin),
+          metric('Maintenance ratio', account.maintenance_ratio ?? account.margin_ratio ?? account.marginRatio),
+          metric('Initial ratio', account.initial_ratio ?? account.initialRatio)
+        );
+        panel.append(title, metrics);
+        accountsEl.append(panel);
+      });
+
+      riskEl.replaceChildren();
+      const aggregate = data.aggregate || {};
+      const plan = data.transfer_plan;
+      riskEl.append(
+        metric('SPY net size', aggregate.net_spy),
+        metric('QQQ net size', aggregate.net_qqq),
+        metric('SPY net notional', aggregate.net_spy_value),
+        metric('QQQ net notional', aggregate.net_qqq_value),
+        metric('Margin ratio delta', aggregate.margin_ratio_delta),
+        metric('Unrealized PnL', aggregate.unrealized_pnl),
+        metric('Realized PnL', aggregate.realized_pnl),
+        metric('Transfer plan', plan ? `${plan.source} -> ${plan.destination}: ${plan.amount}` : 'none')
+      );
+      if (data.pair_error) {
+        const warning = document.createElement('div');
+        warning.className = 'status error';
+        warning.textContent = 'Pair safety: ' + data.pair_error;
+        riskEl.append(warning);
+      }
+      if (data.transfer_block_reason) {
+        const note = document.createElement('div');
+        note.className = 'status';
+        note.textContent = data.transfer_block_reason;
+        riskEl.append(note);
+      }
+
+      const positions = normalisePositions(data, accounts);
+      positionsEl.replaceChildren();
+      const symbols = new Set();
+      positions.forEach(position => {
+        const account = text(position.account || position.account_name);
+        const symbol = text(position.symbol || position.ticker);
+        const size = position.signed_size ?? position.size ?? position.position ?? position.quantity;
+        if (symbol !== '-') symbols.add(symbol.toUpperCase());
+        const row = document.createElement('tr');
+        [account, symbol, number(size), number(position.position_value ?? position.margin ?? position.allocated_margin),
+          text(position.actual_side) + ' / ' + text(position.expected_side)].forEach(value => {
+          const cell = document.createElement('td');
+          cell.textContent = value;
+          row.append(cell);
+        });
+        const actionCell = document.createElement('td');
+        const actions = document.createElement('div');
+        actions.className = 'actions';
+        const quantity = document.createElement('input');
+        quantity.type = 'text';
+        quantity.inputMode = 'decimal';
+        quantity.value = size && Number(size) !== 0 ? String(Math.abs(Number(size))) : '';
+        quantity.setAttribute('aria-label', 'close quantity');
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.textContent = 'Close';
+        close.disabled = account === '-' || symbol === '-' || !size || Number(size) === 0;
+        close.addEventListener('click', () => closePosition(account, symbol, quantity.value, close));
+        actions.append(quantity, close);
+        actionCell.append(actions);
+        row.append(actionCell);
+        positionsEl.append(row);
+      });
+
+      pairsEl.replaceChildren();
+      [...symbols].sort().forEach(symbol => {
+        const quantity = document.createElement('input');
+        quantity.type = 'text';
+        quantity.inputMode = 'decimal';
+        quantity.placeholder = 'quantity';
+        quantity.setAttribute('aria-label', symbol + ' pair close quantity');
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = 'Close both ' + symbol + ' legs';
+        button.addEventListener('click', () => closePair(symbol, quantity.value, button));
+        pairsEl.append(quantity, button);
+      });
+    }
+    async function load() {
+      try {
+        const response = await fetch('/api/snapshot', { cache: 'no-store' });
+        if (!response.ok) throw new Error('snapshot HTTP ' + response.status);
+        render(await response.json());
+        setStatus('Updated ' + new Date().toLocaleTimeString(), false);
+      } catch (error) { setStatus(String(error.message || error), true); }
+    }
+    async function action(path, body, button) {
+      if (button) button.disabled = true;
+      try {
+        const response = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Neutral-Action': 'dashboard' },
+          body: JSON.stringify({ ...body, request_id: id() })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.ok === false) throw new Error(payload.error || 'action HTTP ' + response.status);
+        setStatus('Action accepted', false);
+        await load();
+      } catch (error) { setStatus(String(error.message || error), true); }
+      finally { if (button) button.disabled = false; }
+    }
+    function closePosition(account, symbol, quantity, button) {
+      if (quantity && Number(quantity) <= 0) { setStatus('Enter a positive quantity or leave blank for full close', true); return; }
+      const body = { account, symbol };
+      if (quantity) body.quantity = quantity;
+      action('/api/actions/close-position', body, button);
+    }
+    function closePair(symbol, quantity, button) {
+      if (quantity && Number(quantity) <= 0) { setStatus('Enter a positive quantity or leave blank for full close', true); return; }
+      const body = { symbol };
+      if (quantity) body.quantity = quantity;
+      if (window.confirm('Close both ' + symbol + ' legs?')) action('/api/actions/close-pair', body, button);
+    }
+    refreshBtn.addEventListener('click', load);
+    rebalanceBtn.addEventListener('click', () => {
+      if (window.confirm('Recalculate the margin transfer plan and execute only if the manager allows it?')) {
+        action('/api/actions/rebalance', {}, rebalanceBtn);
+      }
+    });
+    flattenBtn.addEventListener('click', () => {
+      if (window.confirm('This will close all four configured legs. Continue?')) {
+        action('/api/actions/flatten-all', { confirm: 'FLATTEN_ALL' }, flattenBtn);
+      }
+    });
+    load();
+    window.setInterval(load, 2000);
+  </script>
+</body>
+</html>

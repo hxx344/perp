@@ -73,8 +73,10 @@ python lighter_simple_market_maker.py --lighter-ticker ETH-PERP --binance-symbol
 | `--hedge-threshold` | 净仓位超过该值即对冲 |
 | `--hedge-buffer` | 扣除的缓冲量，避免过度对冲 |
 | `--inventory-limit` | 库存软上限，超过时暂停对应方向挂单（默认等同对冲阈值） |
-| `--loop-sleep` | 主循环间隔（秒） |
-| `--order-refresh-ticks` | 价格偏离多少个 tick 时撤单重挂 |
+| `--loop-sleep` | 心跳间隔（秒）；Lighter WS 的 BBO 变化会提前唤醒主循环，默认 `2` |
+| `--order-refresh-ticks` | 价格偏离超过多少个 tick 时撤单重挂，默认 `1` |
+| `--order-refresh-bps` | 可选的 bps 替换阈值，默认 `0`（只按 tick 判断） |
+| `--bbo-debounce-seconds` | WS BBO 连续变化时的合并窗口，默认 `1` 秒；认证刷新之间仍保留至少 `1` 秒安全间隔 |
 | `--config-path` | 热更新 JSON 文件路径或 URL |
 | `--env-file` | 指定要加载的 `.env` 文件路径，默认读取项目根目录下的 `.env` |
 | `--metrics-interval` | 监控日志输出的间隔（秒），默认 30 秒 |

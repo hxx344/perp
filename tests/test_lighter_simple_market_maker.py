@@ -243,6 +243,9 @@ def test_market_maker_defaults_are_robinhood_and_no_binance_trading():
     assert settings.binance_depth_levels == 10
     assert settings.binance_imbalance_max_bps == Decimal("3")
     assert settings.bbo_max_distance_ticks == 1
+    assert settings.order_refresh_ticks == 1
+    assert settings.order_refresh_bps == Decimal("0")
+    assert settings.bbo_debounce_seconds == 1.0
     assert SimpleMakerSettings(
         lighter_ticker="BTC",
         binance_symbol="BTCUSDT",
@@ -256,6 +259,10 @@ def test_bbo_distance_zero_quotes_exactly_at_depth_one():
     assert _parse_args(["--bbo-max-distance-ticks", "0"]).bbo_max_distance_ticks == 0
 
 
+def test_bbo_debounce_can_be_tuned():
+    assert _parse_args(["--bbo-debounce-seconds", "0.25"]).bbo_debounce_seconds == 0.25
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -265,6 +272,7 @@ def test_bbo_distance_zero_quotes_exactly_at_depth_one():
         ["--binance-imbalance-max-bps", "-1"],
         ["--bbo-max-distance-ticks", "-1"],
         ["--order-ack-timeout-seconds", "0"],
+        ["--bbo-debounce-seconds", "-0.1"],
     ],
 )
 def test_dangerous_numeric_options_are_rejected(argv):
@@ -526,7 +534,7 @@ def test_terminal_ws_update_before_send_response_is_not_resurrected():
     assert "buy" not in maker._tracked_orders
 
 
-def test_sync_side_keeps_recent_owned_quote_inside_emergency_threshold():
+def test_sync_side_keeps_recent_owned_quote_inside_configured_threshold():
     settings = SimpleMakerSettings(
         lighter_ticker="TEST",
         binance_symbol="TESTUSDT",
@@ -579,13 +587,41 @@ def test_sync_side_keeps_recent_owned_quote_inside_emergency_threshold():
     asyncio.run(
         maker._sync_side(
             "buy",
-            Decimal("100.02"),
+            Decimal("100.01"),
             True,
             active_orders=[active],
         )
     )
 
     assert maker._tracked_orders["buy"].order_id == "99"
+
+
+def test_maker_bbo_wait_uses_ws_wakeup_with_heartbeat_fallback():
+    settings = SimpleMakerSettings(
+        lighter_ticker="TEST",
+        binance_symbol="TESTUSDT",
+        order_quantity=Decimal("0.1"),
+        base_spread_bps=Decimal("5"),
+        hedge_threshold=Decimal("1"),
+        loop_sleep_seconds=0.25,
+        bbo_debounce_seconds=0,
+        log_to_console=False,
+    )
+    maker = SimpleMarketMaker(settings)
+    calls = []
+
+    class StubLighter:
+        def get_bbo_version(self):
+            return 7
+
+        async def wait_for_bbo_change(self, previous_version, timeout):
+            calls.append((previous_version, timeout))
+            return 8
+
+    maker._lighter_client = StubLighter()  # type: ignore[assignment]
+    asyncio.run(maker._wait_for_next_quote_trigger(6))
+
+    assert calls == [(6, 0.25)]
 
 
 def test_unmanaged_active_order_blocks_duplicate_and_is_not_cancelled():

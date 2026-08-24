@@ -1,0 +1,66 @@
+# Robinhood Chain Lighter two-account neutral manager.
+# Copy to a file outside git (for example /etc/perp/rh-neutral.env) and chmod 600.
+# Leave private-key maps empty for read-only monitoring.  Live transfers/closes
+# require a separate API key map for each account; never reuse a key map blindly.
+
+LIGHTER_BASE_URL=https://api.rh.lighter.xyz
+LIGHTER_WS_URL=wss://api.rh.lighter.xyz/stream
+LIGHTER_CHAIN_ID=466324
+
+# The master and subaccount indexes are required and must be different.
+# Alternatively set RH_NEUTRAL_L1_ADDRESS and leave one or both indexes blank;
+# discovery is allowed only when exactly two normal active accounts exist.
+RH_NEUTRAL_L1_ADDRESS=
+RH_NEUTRAL_MAIN_ACCOUNT_INDEX=
+RH_NEUTRAL_SUB_ACCOUNT_INDEX=
+
+# API key indexes are conservatively limited to 4..254.  Keys may have an
+# optional 0x prefix and must contain 64 or 80 hexadecimal characters.
+RH_NEUTRAL_MAIN_API_KEY_INDEX=4
+RH_NEUTRAL_SUB_API_KEY_INDEX=4
+# Example format (replace the placeholder; do not include spaces/newlines):
+# RH_NEUTRAL_MAIN_API_PRIVATE_KEYS={"4":"0x<64-or-80-hex-private-key>"}
+# RH_NEUTRAL_SUB_API_PRIVATE_KEYS={"4":"0x<64-or-80-hex-private-key>"}
+RH_NEUTRAL_MAIN_API_PRIVATE_KEYS=
+RH_NEUTRAL_SUB_API_PRIVATE_KEYS=
+
+# 0 means discover SPY/QQQ from the live RH perp catalogue at startup.
+RH_NEUTRAL_SPY_MARKET_ID=0
+RH_NEUTRAL_QQQ_MARKET_ID=0
+# Choose which symbol is long on the master account. The subaccount is
+# automatically configured with the opposite signs for both symbols.
+# Allowed values: SPY (master SPY long / QQQ short) or
+#                 QQQ (master QQQ long / SPY short)
+RH_NEUTRAL_MAIN_LONG_SYMBOL=SPY
+
+RH_NEUTRAL_POLL_SECONDS=5
+RH_NEUTRAL_MIN_MARGIN_RATIO=1.50
+RH_NEUTRAL_TARGET_MARGIN_RATIO=2.00
+RH_NEUTRAL_RESERVE_USDC=50
+RH_NEUTRAL_TRANSFER_HYSTERESIS_USDC=10
+RH_NEUTRAL_MIN_TRANSFER_USDC=1
+RH_NEUTRAL_MAX_TRANSFER_USDC=1000
+RH_NEUTRAL_TRANSFER_COOLDOWN_SECONDS=30
+RH_NEUTRAL_CLOSE_SLIPPAGE_BPS=50
+# Pause transfer plans when the two opposite legs of one symbol differ by
+# more than this relative notional (0.50 = 50%).
+RH_NEUTRAL_NOTIONAL_TOLERANCE=0.50
+RH_NEUTRAL_REQUEST_TIMEOUT_SECONDS=10
+RH_NEUTRAL_ACTION_TIMEOUT_SECONDS=20
+# After an accepted write, re-read account state this many times before
+# leaving it blocked for manual reconciliation. Unknown transport/timeouts
+# are never auto-acknowledged.
+RH_NEUTRAL_CONFIRMATION_ATTEMPTS=3
+RH_NEUTRAL_CONFIRMATION_POLL_SECONDS=0.5
+
+# Safe defaults: read-only monitor, no automatic transfer, loopback dashboard.
+RH_NEUTRAL_LIVE=false
+RH_NEUTRAL_AUTO_TRANSFER=false
+RH_NEUTRAL_DASHBOARD_HOST=127.0.0.1
+RH_NEUTRAL_DASHBOARD_PORT=8790
+RH_NEUTRAL_DASHBOARD_USERNAME=operator
+# Required for dashboard write actions. Generate with: openssl rand -hex 32
+RH_NEUTRAL_DASHBOARD_TOKEN=
+# Only set true when a TLS/authenticated network boundary is already in place.
+RH_NEUTRAL_DASHBOARD_ALLOW_PUBLIC=false
+RH_NEUTRAL_STATE_PATH=logs/rh_neutral_manager_state.json

@@ -2,7 +2,9 @@
 
 The dashboard deliberately has no mutation endpoints.  It is a small aiohttp
 server that exposes the maker's already-assembled telemetry snapshot and a
-static operational view for an operator on the same host.
+static operational view for an operator on the same host.  Keep it bound to
+loopback and put an authenticated HTTPS reverse proxy in front of it when
+remote access is required; this process must never serve trading credentials.
 """
 from __future__ import annotations
 
@@ -14,6 +16,36 @@ from aiohttp import web
 
 
 SnapshotFactory = Callable[[], Dict[str, Any]]
+
+
+# These headers are applied to every response, including framework-generated
+# errors.  TLS and authentication belong at the public reverse proxy (see the
+# dashboard deployment guide), while the local listener remains HTTP/loopback.
+_SECURITY_HEADERS = {
+    "Cache-Control": "no-store, max-age=0",
+    "Pragma": "no-cache",
+    "Content-Security-Policy": (
+        "default-src 'none'; base-uri 'none'; object-src 'none'; "
+        "frame-ancestors 'none'; form-action 'none'; "
+        "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+        "connect-src 'self'; img-src 'self' data:; font-src 'self'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+    "Cross-Origin-Resource-Policy": "same-origin",
+}
+
+
+async def _add_security_headers(
+    _request: web.Request,
+    response: web.StreamResponse,
+) -> None:
+    """Apply defense-in-depth headers without changing proxy TLS ownership."""
+
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
 
 
 class MarketMakerDashboard:
@@ -42,7 +74,15 @@ class MarketMakerDashboard:
         if self.running:
             return
 
+        if self.host.strip().casefold() not in {"127.0.0.1", "::1"}:
+            raise RuntimeError(
+                "The dashboard only serves loopback HTTP; use an authenticated "
+                "HTTPS reverse proxy for remote access"
+            )
+
         app = web.Application()
+        # on_response_prepare also covers aiohttp's generated 4xx/5xx pages.
+        app.on_response_prepare.append(_add_security_headers)
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/dashboard", self._handle_index)
         app.router.add_get("/api/snapshot", self._handle_snapshot)
@@ -82,7 +122,6 @@ class MarketMakerDashboard:
         return web.Response(
             text=html,
             content_type="text/html",
-            headers={"Cache-Control": "no-store"},
         )
 
     async def _handle_snapshot(self, _request: web.Request) -> web.Response:
@@ -91,20 +130,17 @@ class MarketMakerDashboard:
             # Serialize here so an accidental Decimal/enum in a future field
             # cannot produce a half-valid HTTP response.
             body = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
-        except Exception as exc:  # pragma: no cover - defensive HTTP boundary
+        except Exception:  # pragma: no cover - defensive HTTP boundary
             return web.json_response(
-                {"ok": False, "error": str(exc)},
+                {"ok": False, "error": "dashboard snapshot unavailable"},
                 status=503,
-                headers={"Cache-Control": "no-store"},
             )
         return web.Response(
             text=body,
             content_type="application/json",
-            headers={"Cache-Control": "no-store"},
         )
 
     async def _handle_health(self, _request: web.Request) -> web.Response:
         return web.json_response(
             {"ok": True, "dashboard": "running"},
-            headers={"Cache-Control": "no-store"},
         )

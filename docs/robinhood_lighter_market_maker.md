@@ -11,6 +11,9 @@ The default policy is deliberately small and conservative:
 - Lighter orders are explicitly `post_only`; the relative Binance signal may
   shift the local center but quotes remain at least one tick from the opposite
   Lighter side.
+- Lighter depth-1 bid/ask comes from the `order_book` WebSocket stream. A BBO
+  price change wakes quote evaluation immediately; `--loop-sleep` remains the
+  heartbeat fallback during quiet markets or a stream reconnect.
 - Binance trading is disabled by default. A hedge is only attempted after the
   combined inventory crosses `--hedge-threshold` and only when the operator
   explicitly enables it.
@@ -74,11 +77,12 @@ python3 -m strategies.robinhood_lighter_market_maker --env-file robinhood.env
 | `--hedge-cooldown-seconds` | `30` | Minimum interval between explicit cross-venue attempts. |
 | `--max-hedge-quantity` | threshold | Maximum size of one Binance hedge attempt. |
 | `--lighter-leverage` | `2` | Lighter leverage. Must not exceed live market maximum. |
-| `--loop-sleep` | `2` | Seconds between quote refreshes. |
+| `--loop-sleep` | `2` | Heartbeat seconds; a Lighter WS BBO change wakes the loop sooner. |
 | `--cycles` | `0` | Stop after N successful quote iterations; `0` runs continuously. |
-| `--order-refresh-ticks` | `2` | Price movement in Lighter ticks before replacing a quote. |
-| `--order-refresh-bps` | `1` | Minimum reference move before a normal replacement. |
-| `--min-quote-lifetime-seconds` | `5` | Minimum resting time, except for risk withdrawal or a large move. |
+| `--order-refresh-ticks` | `1` | More-than-this many Lighter ticks before replacing a quote. |
+| `--order-refresh-bps` | `0` | Optional bps threshold; `0` keeps the replacement decision tick-based. |
+| `--bbo-debounce-seconds` | `1` | Coalesces rapid WS BBO changes; a hard 1-second floor remains between authenticated refreshes. |
+| `--min-quote-lifetime-seconds` | `5` | Minimum resting time, except for risk withdrawal or twice the configured replacement threshold. |
 | `--order-ack-timeout-seconds` | `5` | Maximum wait for private/REST confirmation; no duplicate is placed while waiting. |
 | `--binance-reference-timeout-seconds` | `1` | Timeout for one Binance depth request; a failure uses a neutral signal and the Lighter midpoint. |
 | `--fill-cooldown-seconds` | `5` | Minimum delay after a fill on the same side. |

@@ -33,6 +33,16 @@ class LighterCustomWebSocketManager:
         self.order_book_nonce = None
         self.order_book_sequence_gap = False
         self.order_book_lock = asyncio.Lock()
+        # A monotonically increasing version lets consumers react to a BBO
+        # change without polling the book.  The event is only a wake-up hint;
+        # consumers always read the current BBO after waking.
+        self.bbo_version = 0
+        self.bbo_updated_at: Optional[float] = None
+        # Monotonic timestamp of the last successfully received WS frame.
+        # This is separate from bbo_updated_at: a quiet book can be healthy
+        # even when its best prices have not changed for a long time.
+        self.last_ws_message_at: Optional[float] = None
+        self._bbo_event = asyncio.Event()
         # Hard caps and housekeeping
         self.max_levels = 50  # keep top-N levels per side to bound memory
         self._cleanup_every_messages = 200  # aggressive periodic trim
@@ -289,6 +299,52 @@ class LighterCustomWebSocketManager:
         except asyncio.TimeoutError:
             return False
 
+    def get_bbo_version(self) -> int:
+        """Return the current WS book version for change detection."""
+
+        return int(self.bbo_version)
+
+    async def wait_for_bbo_change(self, previous_version: int, timeout: float) -> int:
+        """Wait until the WS BBO changes, or until the heartbeat timeout.
+
+        Clearing the event before re-checking the version closes the small
+        race where an update arrives between the initial check and the wait.
+        The version remains authoritative if several updates arrive while a
+        consumer is busy processing the previous quote.
+        """
+
+        version = int(previous_version)
+        if self.bbo_version != version:
+            return int(self.bbo_version)
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout))
+        while self.bbo_version == version:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            self._bbo_event.clear()
+            if self.bbo_version != version:
+                break
+            try:
+                await asyncio.wait_for(self._bbo_event.wait(), remaining)
+            except asyncio.TimeoutError:
+                break
+        return int(self.bbo_version)
+
+    def _publish_bbo_change(
+        self,
+        previous_bid: Optional[float],
+        previous_ask: Optional[float],
+    ) -> None:
+        """Publish a wake-up when either depth-1 price changes."""
+
+        if self.best_bid == previous_bid and self.best_ask == previous_ask:
+            return
+        self.bbo_version += 1
+        self.bbo_updated_at = time.monotonic()
+        self._bbo_event.set()
+
     def _trim_side_inplace(self, side: str) -> None:
         """Trim a single side to max_levels keeping best prices."""
         try:
@@ -322,6 +378,8 @@ class LighterCustomWebSocketManager:
     async def reset_order_book(self):
         """Reset the order book state when reconnecting."""
         async with self.order_book_lock:
+            previous_bid = self.best_bid
+            previous_ask = self.best_ask
             self.order_book["bids"].clear()
             self.order_book["asks"].clear()
             self.snapshot_loaded = False
@@ -331,6 +389,9 @@ class LighterCustomWebSocketManager:
             self.order_book_nonce = None
             self.order_book_sequence_gap = False
             self.ready_event.clear()
+            self.bbo_updated_at = None
+            self.last_ws_message_at = None
+            self._publish_bbo_change(previous_bid, previous_ask)
 
     def handle_order_update(self, order_data_list: List[Dict[str, Any]]):
         """Handle order update from WebSocket."""
@@ -488,6 +549,7 @@ class LighterCustomWebSocketManager:
                     while self.running:
                         try:
                             msg = await asyncio.wait_for(self.ws.recv(), timeout=1)
+                            self.last_ws_message_at = time.monotonic()
 
                             try:
                                 data = json.loads(msg)
@@ -500,6 +562,8 @@ class LighterCustomWebSocketManager:
 
                             async with self.order_book_lock:
                                 if data.get("type") == "subscribed/order_book":
+                                    previous_bid = self.best_bid
+                                    previous_ask = self.best_ask
                                     # Initial snapshot - clear and populate the order book
                                     self.order_book["bids"].clear()
                                     self.order_book["asks"].clear()
@@ -531,8 +595,11 @@ class LighterCustomWebSocketManager:
                                         self.best_ask = None
                                     if self.best_bid is not None and self.best_ask is not None:
                                         self.ready_event.set()
+                                    self._publish_bbo_change(previous_bid, previous_ask)
 
                                 elif data.get("type") == "update/order_book" and self.snapshot_loaded:
+                                    previous_bid = self.best_bid
+                                    previous_ask = self.best_ask
                                     # Check for cutoff/incomplete updates first
                                     if not self.handle_order_book_cutoff(data):
                                         self._log("Skipping incomplete order book update", "WARNING")
@@ -578,6 +645,7 @@ class LighterCustomWebSocketManager:
                                     # ready when both sides present
                                     if self.best_bid is not None and self.best_ask is not None:
                                         self.ready_event.set()
+                                    self._publish_bbo_change(previous_bid, previous_ask)
 
                                 elif data.get("type") == "ping":
                                     # Respond to ping with pong

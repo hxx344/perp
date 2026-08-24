@@ -83,6 +83,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 .pytest-*/
+test_artifacts/pytest/
 cover/
 
 # Local one-off tests (not part of upstream suite)

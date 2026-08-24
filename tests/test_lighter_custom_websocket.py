@@ -142,3 +142,40 @@ def test_reset_order_book_clears_nonce_and_offset_state():
     assert manager.order_book_sequence_gap is False
     assert manager.order_book == {"bids": {}, "asks": {}}
     assert manager.ready_event.is_set() is False
+
+
+def test_bbo_version_changes_only_when_depth_one_price_changes():
+    manager = _make_manager(market_index=1)
+
+    assert manager.get_bbo_version() == 0
+    manager.best_bid = 100.0
+    manager.best_ask = 101.0
+    manager._publish_bbo_change(None, None)
+    first_version = manager.get_bbo_version()
+    assert first_version == 1
+
+    # A size-only update does not represent a BBO price change.
+    manager._publish_bbo_change(100.0, 101.0)
+    assert manager.get_bbo_version() == first_version
+
+    manager.best_bid = 100.1
+    manager._publish_bbo_change(100.0, 101.0)
+    assert manager.get_bbo_version() == first_version + 1
+
+
+def test_wait_for_bbo_change_wakes_on_event_and_times_out_cleanly():
+    manager = _make_manager(market_index=1)
+
+    async def scenario():
+        previous = manager.get_bbo_version()
+        waiter = asyncio.create_task(manager.wait_for_bbo_change(previous, 1.0))
+        await asyncio.sleep(0)
+        manager.best_bid = 100.0
+        manager.best_ask = 101.0
+        manager._publish_bbo_change(None, None)
+        assert await waiter == previous + 1
+
+        current = manager.get_bbo_version()
+        assert await manager.wait_for_bbo_change(current, 0.001) == current
+
+    asyncio.run(scenario())

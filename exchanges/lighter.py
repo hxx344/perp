@@ -1033,6 +1033,28 @@ class LighterClient(BaseExchangeClient):
             return await self.ws_manager.wait_until_ready(timeout)
         return False
 
+    def get_bbo_version(self) -> int:
+        """Return the current WebSocket BBO version, or zero when unavailable."""
+
+        manager = getattr(self, "ws_manager", None)
+        getter = getattr(manager, "get_bbo_version", None)
+        if callable(getter):
+            try:
+                return int(getter())
+            except (TypeError, ValueError):
+                return 0
+        return 0
+
+    async def wait_for_bbo_change(self, previous_version: int, timeout: float) -> int:
+        """Wait for a WebSocket BBO update while retaining a heartbeat timeout."""
+
+        manager = getattr(self, "ws_manager", None)
+        waiter = getattr(manager, "wait_for_bbo_change", None)
+        if callable(waiter):
+            return int(await waiter(previous_version, timeout))
+        await asyncio.sleep(max(0.0, float(timeout)))
+        return self.get_bbo_version()
+
     async def _ensure_websocket_manager(self) -> None:
         """Start or update the websocket manager after contract metadata is known."""
         created = False
@@ -1214,6 +1236,17 @@ class LighterClient(BaseExchangeClient):
             raise ValueError("WebSocket not running. No bid/ask prices available")
 
         for _ in range(20):
+            # Do not expose a stale depth-one price while the custom WS
+            # manager is rebuilding after a nonce gap or reconnect.
+            if (
+                (
+                    hasattr(self.ws_manager, "snapshot_loaded")
+                    and not getattr(self.ws_manager, "snapshot_loaded")
+                )
+                or getattr(self.ws_manager, "order_book_sequence_gap", False)
+            ):
+                await asyncio.sleep(0.25)
+                continue
             best_bid_raw = getattr(self.ws_manager, 'best_bid', None)
             best_ask_raw = getattr(self.ws_manager, 'best_ask', None)
             if best_bid_raw and best_ask_raw:

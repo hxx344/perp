@@ -112,7 +112,7 @@ curl http://COORDINATOR_HOST:8080/status
 | `--config-path` | 热更新 JSON 路径，默认 `configs/hot_update.json` |
 | `--env-file` | 自定义 `.env` 路径 |
 | `--loop-sleep` | 主循环休眠秒数，默认 `3.0` |
-| `--order-refresh-ticks` | 价格偏离多少 tick 时替换订单，默认 `2` |
+| `--order-refresh-ticks` | 价格偏离超过多少 tick 时替换订单，默认 `1`；Lighter WS BBO 变化会提前唤醒主循环 |
 | `--fill-cooldown-seconds` | 挂单全部成交后等待多少秒再重新挂单，默认 `10` |
 | `--metrics-interval` | 账户指标打印间隔（秒），默认 `30`，最低 `5` |
 | `--no-console-log` | 关闭控制台日志输出 |

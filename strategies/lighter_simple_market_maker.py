@@ -45,6 +45,10 @@ DEFAULT_ENV_CANDIDATES: tuple[str, ...] = (
     ".env.robinhood",
     ".env",
 )
+# A full iteration includes authenticated order reconciliation and can issue
+# cancels/creates. Keep a hard one-second floor between successful iterations
+# even if an operator sets the optional debounce to zero.
+MIN_BBO_REFRESH_INTERVAL_SECONDS = 1.0
 LIGHTER_ENDPOINT_ENV_KEYS: tuple[str, ...] = (
     "LIGHTER_ENVIRONMENT",
     "LIGHTER_ENDPOINT_PROFILE",
@@ -98,8 +102,12 @@ class SimpleMakerSettings:
     lighter_environment: str = "robinhood"
     lighter_leverage: Optional[int] = 2
     loop_sleep_seconds: float = 3.0
-    order_refresh_ticks: int = 2
-    order_refresh_bps: Decimal = Decimal("1")
+    # Quote replacement follows the local tick grid by default.  A bps
+    # threshold is still available as an explicit risk/traffic control, but a
+    # one-bps floor is too coarse for BTC at the current price scale.
+    order_refresh_ticks: int = 1
+    order_refresh_bps: Decimal = Decimal("0")
+    bbo_debounce_seconds: float = 1.0
     min_quote_lifetime_seconds: float = 5.0
     order_ack_timeout_seconds: float = 5.0
     shutdown_timeout_seconds: float = 10.0
@@ -623,6 +631,8 @@ class SimpleMarketMaker:
         self._last_unmanaged_order_total = 0
         self._last_next_action = "starting"
         self._completed_iterations = 0
+        self._bbo_wait_fallback_logged = False
+        self._last_iteration_completed_at = 0.0
 
     async def __aenter__(self) -> "SimpleMarketMaker":
         try:
@@ -1391,6 +1401,11 @@ class SimpleMarketMaker:
         self._completed_iterations = 0
         try:
             while self._running:
+                # Capture the version before doing any REST/account work.  If
+                # the book moves while this iteration is running, the wait
+                # below returns immediately and the next iteration consumes the
+                # latest WS BBO instead of sleeping for the full heartbeat.
+                bbo_version = self._get_bbo_version()
                 try:
                     await self._iteration()
                 except Exception as exc:  # noqa: BLE001
@@ -1414,6 +1429,7 @@ class SimpleMarketMaker:
                     continue
 
                 self._reset_rate_limit_backoff()
+                self._last_iteration_completed_at = time.monotonic()
                 completed_iterations += 1
                 self._completed_iterations = completed_iterations
                 if self.settings.max_cycles > 0 and completed_iterations >= self.settings.max_cycles:
@@ -1422,11 +1438,73 @@ class SimpleMarketMaker:
                         "INFO",
                     )
                     break
-                await asyncio.sleep(self.settings.loop_sleep_seconds)
+                await self._wait_for_next_quote_trigger(bbo_version)
         except asyncio.CancelledError:  # pragma: no cover - shutdown path
             self.logger.log("Maker loop cancelled", "WARNING")
         finally:
             await self.stop()
+
+    def _get_bbo_version(self) -> int:
+        """Read the Lighter WS BBO version, with a polling-compatible fallback."""
+
+        client = self._lighter_client
+        getter = getattr(client, "get_bbo_version", None)
+        if not callable(getter):
+            return 0
+        try:
+            return int(getter())
+        except (TypeError, ValueError):
+            return 0
+
+    async def _wait_for_next_quote_trigger(self, previous_bbo_version: int) -> None:
+        """Wake on a WS BBO change, or on the normal loop heartbeat.
+
+        The strategy still performs its authenticated state reconciliation in
+        each iteration.  The websocket is only the low-latency wake-up source;
+        a missing/disconnected websocket cannot stall the maker because the
+        configured heartbeat remains the fallback path.
+        """
+
+        timeout = max(0.0, float(self.settings.loop_sleep_seconds))
+        configured_debounce = max(0.0, float(self.settings.bbo_debounce_seconds))
+        minimum_interval = max(
+            MIN_BBO_REFRESH_INTERVAL_SECONDS,
+            configured_debounce,
+        )
+        if self._last_iteration_completed_at > 0:
+            remaining_interval = minimum_interval - (
+                time.monotonic() - self._last_iteration_completed_at
+            )
+            if remaining_interval > 0:
+                await asyncio.sleep(remaining_interval)
+        client = self._lighter_client
+        waiter = getattr(client, "wait_for_bbo_change", None)
+        if callable(waiter):
+            try:
+                new_version = await waiter(previous_bbo_version, timeout)
+                self._bbo_wait_fallback_logged = False
+                try:
+                    bbo_changed = int(new_version) != int(previous_bbo_version)
+                except (TypeError, ValueError):
+                    bbo_changed = False
+                if bbo_changed:
+                    # Coalesce rapid depth-one moves so each wake-up does not
+                    # turn into an authenticated active-order read.  This is
+                    # deliberately separate from the quote replacement
+                    # threshold: WS remains the trigger, while this protects
+                    # API/rate-limit and volume-quota budgets.
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # pragma: no cover - transport dependent
+                if not self._bbo_wait_fallback_logged:
+                    self.logger.log(
+                        f"Lighter BBO wake-up unavailable; falling back to {timeout:.2f}s heartbeat: {exc}",
+                        "WARNING",
+                    )
+                    self._bbo_wait_fallback_logged = True
+
+        await asyncio.sleep(timeout)
 
     async def _iteration(self) -> None:
         async with self._quote_operation_lock:
@@ -1737,10 +1815,11 @@ class SimpleMarketMaker:
             created_at = previous.created_at if same_order else time.monotonic()
             quote_age = max(0.0, time.monotonic() - created_at)
             in_minimum_lifetime = quote_age < self.settings.min_quote_lifetime_seconds
-            emergency_threshold = max(
-                replace_threshold,
-                abs(target_price) * Decimal("2") / Decimal("10000"),
-            )
+            # Preserve a short anti-churn band during the minimum lifetime,
+            # but derive it from the configured tick/bps replacement threshold.
+            # The former hard-coded 2 bps band kept BTC quotes stale by dollars;
+            # the default is now two local ticks.
+            emergency_threshold = replace_threshold * Decimal("2")
             keep_for_lifetime = in_minimum_lifetime and price_diff < emergency_threshold
             keep = enabled and idx == 0 and (
                 price_diff <= replace_threshold or keep_for_lifetime
@@ -3073,6 +3152,32 @@ class SimpleMarketMaker:
             if self._lighter_config is not None
             else Decimal("0")
         )
+        ws_manager = getattr(self._lighter_client, "ws_manager", None)
+        bbo_version = 0
+        try:
+            bbo_version = int(getattr(ws_manager, "bbo_version", 0) or 0)
+        except (TypeError, ValueError):
+            bbo_version = 0
+        bbo_updated_at = getattr(ws_manager, "bbo_updated_at", None)
+        ws_message_at = getattr(ws_manager, "last_ws_message_at", None)
+        bbo_age = None
+        ws_age = None
+        try:
+            if bbo_updated_at is not None:
+                bbo_age = round(
+                    max(0.0, time.monotonic() - float(bbo_updated_at)),
+                    3,
+                )
+        except (TypeError, ValueError):
+            bbo_age = None
+        try:
+            if ws_message_at is not None:
+                ws_age = round(
+                    max(0.0, time.monotonic() - float(ws_message_at)),
+                    3,
+                )
+        except (TypeError, ValueError):
+            ws_age = None
 
         tracked_orders = []
         for side in ("buy", "sell"):
@@ -3155,9 +3260,18 @@ class SimpleMarketMaker:
                 "target_buy": number(self._last_target_prices.get("buy", 0), 6),
                 "target_sell": number(self._last_target_prices.get("sell", 0), 6),
                 "tick_size": number(tick_size, 8),
+                "bbo_source": "lighter_ws_order_book",
+                "bbo_version": bbo_version,
+                "bbo_age_seconds": bbo_age,
+                "ws_message_age_seconds": ws_age,
                 "leverage": self.settings.lighter_leverage,
                 "spread_bps": number(self.settings.base_spread_bps, 4),
                 "bbo_distance_ticks": self.settings.bbo_max_distance_ticks,
+                "bbo_debounce_seconds": round(
+                    max(0.0, float(self.settings.bbo_debounce_seconds)),
+                    3,
+                ),
+                "bbo_refresh_floor_seconds": MIN_BBO_REFRESH_INTERVAL_SECONDS,
                 "last_market_data_age": age(self._last_market_data_time),
                 "last_quote_update_age": age(self._last_quote_update_time),
             },
@@ -3375,18 +3489,29 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         type=int,
         help="Stop and cancel own quotes after N successful iterations (0 = run continuously)",
     )
-    parser.add_argument("--order-refresh-ticks", default=2, type=int, help="Price difference in ticks before replacing orders")
+    parser.add_argument(
+        "--order-refresh-ticks",
+        default=1,
+        type=int,
+        help="Replace when price differs by more than this many ticks (default: 1)",
+    )
     parser.add_argument(
         "--order-refresh-bps",
-        default="1",
+        default="0",
         type=_decimal,
-        help="Minimum price movement in basis points before replacing quotes (default: 1)",
+        help="Optional minimum price movement in basis points before replacing quotes (default: 0; tick threshold applies)",
+    )
+    parser.add_argument(
+        "--bbo-debounce-seconds",
+        default=1.0,
+        type=float,
+        help="Minimum delay after a WS BBO-triggered refresh (default: 1 second)",
     )
     parser.add_argument(
         "--min-quote-lifetime-seconds",
         default=5.0,
         type=float,
-        help="Minimum quote lifetime unless inventory or a 2 bps move requires cancellation",
+        help="Minimum quote lifetime unless inventory or twice the configured replacement threshold requires cancellation",
     )
     parser.add_argument(
         "--order-ack-timeout-seconds",
@@ -3499,6 +3624,8 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         parser.error("--order-refresh-ticks must be positive")
     if args.order_refresh_bps < 0:
         parser.error("--order-refresh-bps must not be negative")
+    if args.bbo_debounce_seconds < 0:
+        parser.error("--bbo-debounce-seconds must not be negative")
     if args.min_quote_lifetime_seconds < 0:
         parser.error("--min-quote-lifetime-seconds must not be negative")
     if args.order_ack_timeout_seconds <= 0:
@@ -3509,6 +3636,15 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         parser.error("--fill-cooldown-seconds must not be negative")
     if not str(args.dashboard_host).strip():
         parser.error("--dashboard-host must not be empty")
+    dashboard_host = str(args.dashboard_host).strip()
+    if not args.no_dashboard and dashboard_host.casefold() not in {
+        "127.0.0.1",
+        "::1",
+    }:
+        parser.error(
+            "--dashboard-host must be loopback while the dashboard has no TLS/auth; "
+            "use 127.0.0.1 with an authenticated HTTPS reverse proxy"
+        )
     if args.dashboard_port < 0 or args.dashboard_port > 65535:
         parser.error("--dashboard-port must be between 0 and 65535")
     if args.order_quantity_min is not None and args.order_quantity_min <= 0:
@@ -3546,6 +3682,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         max_cycles=args.cycles,
         order_refresh_ticks=args.order_refresh_ticks,
         order_refresh_bps=args.order_refresh_bps,
+        bbo_debounce_seconds=args.bbo_debounce_seconds,
         min_quote_lifetime_seconds=args.min_quote_lifetime_seconds,
         order_ack_timeout_seconds=args.order_ack_timeout_seconds,
         binance_reference_timeout_seconds=args.binance_reference_timeout_seconds,
@@ -3563,7 +3700,7 @@ def _parse_args(argv: Optional[Iterable[str]] = None) -> SimpleMakerSettings:
         ownership_state_path=args.ownership_state_file,
         allow_existing_binance_position=args.allow_existing_binance_position,
         dashboard_enabled=not args.no_dashboard,
-        dashboard_host=str(args.dashboard_host).strip(),
+        dashboard_host=dashboard_host,
         dashboard_port=args.dashboard_port,
     )
 

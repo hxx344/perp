@@ -512,6 +512,9 @@
           ask: num(pick(market, ["best_ask", "ask", "lighter_best_ask"], pick(s, ["best_ask", "lighter_best_ask"], null))),
           mid: num(pick(market, ["mid", "mid_price", "lighter_mid"], null)),
           tick: num(pick(market, ["tick_size", "tick"], pick(s, ["tick_size"], null))),
+          bboSource: text(pick(market, ["bbo_source", "source"], "Lighter WS")),
+          bboAge: num(pick(market, ["bbo_age_seconds", "bbo_age"], null)),
+          wsAge: num(pick(market, ["ws_message_age_seconds", "ws_age"], null)),
           leverage: pick(market, ["leverage"], pick(s, ["leverage", "target_leverage"], null)),
           lighterInv: num(pick(inventory, ["lighter", "lighter_position", "lighter_net_position", "net_position"], pick(s, ["lighter_inventory", "lighter_position"], null))),
           binanceInv: num(pick(inventory, ["binance", "binance_position", "binance_net_position"], pick(s, ["binance_inventory", "binance_position"], null))),
@@ -618,7 +621,7 @@
 
         setText("pnl-total", signed(pnl)); setPolarity("pnl-total", pnl); setText("pnl-lighter", signed(data.lighterPnl)); setPolarity("pnl-lighter", data.lighterPnl); setText("pnl-binance", signed(data.binancePnl)); setPolarity("pnl-binance", data.binancePnl); setText("pnl-unrealized", signed(data.unrealized)); setPolarity("pnl-unrealized", data.unrealized); setText("pnl-fees", data.fees === null ? "--" : signed(-Math.abs(data.fees))); setPolarity("pnl-fees", data.fees === null ? null : -Math.abs(data.fees));
         setText("volume-quote", fmt(data.volumeQuote)); setText("volume-base", fmtQty(data.volumeBase)); setText("volume-trades", data.trades === null ? "--" : fmt(data.trades, 0)); setText("volume-lighter", fmt(data.lighterVolume)); setText("volume-binance", fmt(data.binanceVolume));
-        setText("market-bid", fmt(data.bid)); setText("market-ask", fmt(data.ask)); setText("market-mid", fmt(mid)); setText("market-spread", spread === null ? "--" : fmt(spread, 2)); setText("market-config", text(data.tick === null ? null : fmt(data.tick, 4)) + (data.leverage === null ? "" : " · " + text(data.leverage) + "x"));
+        setText("market-bid", fmt(data.bid)); setText("market-ask", fmt(data.ask)); setText("market-mid", fmt(mid)); setText("market-spread", spread === null ? "--" : fmt(spread, 2)); setText("market-config", text(data.tick === null ? null : fmt(data.tick, 4)) + (data.leverage === null ? "" : " · " + text(data.leverage) + "x") + " · " + data.bboSource + (data.wsAge === null ? "" : " / WS " + fmt(data.wsAge, 1) + "s"));
         setText("quote-mode", text(pick(data.raw, ["quote_mode", "mode", "status.quote_mode"], null))); setText("market-time", data.updated ? "更新 " + age(data.updated) + " 前" : "--");
       }
 
