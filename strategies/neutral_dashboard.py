@@ -285,7 +285,14 @@ class NeutralDashboard:
         # credentials are configured every route is authenticated.
         if not self.credentials_configured:
             if request.path.startswith("/api/actions/"):
-                raise web.HTTPServiceUnavailable(text="dashboard actions are disabled")
+                raise web.HTTPServiceUnavailable(
+                    text=json.dumps({
+                        "ok": False,
+                        "status": "actions_disabled",
+                        "error": "dashboard actions are disabled; configure RH_NEUTRAL_DASHBOARD_TOKEN",
+                    }, ensure_ascii=False),
+                    content_type="application/json",
+                )
             return
         header = request.headers.get("Authorization", "")
         if not header.startswith("Basic "):

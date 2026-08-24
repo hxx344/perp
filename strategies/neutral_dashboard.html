@@ -66,6 +66,14 @@
     <div id="risk" class="metrics" aria-live="polite"></div>
   </section>
   <section class="panel" style="margin-top:14px">
+    <h2>转账历史</h2>
+    <div class="muted">记录本程序执行的主账户与子账户之间的 USDG 转账，最新记录显示在最上方。</div>
+    <table>
+      <thead><tr><th>时间</th><th>方向</th><th>金额（USDG）</th><th>状态</th><th>原因</th></tr></thead>
+      <tbody id="transferHistory"></tbody>
+    </table>
+  </section>
+  <section class="panel" style="margin-top:14px">
     <h2>账户仓位与部分平仓</h2>
     <div class="muted">输入要平的绝对数量；留空则平掉该仓位。平仓方向由服务器根据当前仓位自动决定。</div>
     <table>
@@ -81,6 +89,7 @@
   <script>
     const accountsEl = document.getElementById('accounts');
     const riskEl = document.getElementById('risk');
+    const transferHistoryEl = document.getElementById('transferHistory');
     const positionsEl = document.getElementById('positions');
     const pairsEl = document.getElementById('pairs');
     const statusEl = document.getElementById('status');
@@ -196,6 +205,49 @@
       accounts.forEach(account => (account.positions || []).forEach(position => result.push({ account: account.name || account.account, ...position })));
       return result;
     }
+    function transferStatusText(value) {
+      const status = String(value || '').toLowerCase();
+      const labels = {
+        acknowledged: '已确认',
+        completed: '已完成',
+        accepted_pending_confirmation: '等待确认',
+        unknown_pending: '状态未知，禁止重试',
+        unknown_journal: '日志异常，禁止重试',
+        dry_run: '模拟',
+      };
+      return labels[status] || text(value);
+    }
+    function renderTransferHistory(data) {
+      transferHistoryEl.replaceChildren();
+      const history = Array.isArray(data && data.transfer_history) ? data.transfer_history : [];
+      if (!history.length) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 5;
+        cell.className = 'muted';
+        cell.textContent = '暂无转账记录';
+        row.append(cell);
+        transferHistoryEl.append(row);
+        return;
+      }
+      history.forEach(item => {
+        const row = document.createElement('tr');
+        const timestamp = Number(item.timestamp);
+        const values = [
+          Number.isFinite(timestamp) ? new Date(timestamp * 1000).toLocaleString() : '-',
+          accountText(item.source) + ' → ' + accountText(item.destination),
+          number(item.amount),
+          transferStatusText(item.status),
+          text(item.reason),
+        ];
+        values.forEach(value => {
+          const cell = document.createElement('td');
+          cell.textContent = value;
+          row.append(cell);
+        });
+        transferHistoryEl.append(row);
+      });
+    }
     function render(data) {
       // Polling rebuilds the tables. Preserve operator-entered quantities so
       // a refresh cannot overwrite an input while it is being edited.
@@ -208,7 +260,17 @@
         pairInputValues.set(input.dataset.pairSymbol, input.value);
       });
       const accounts = normaliseAccounts(data);
+      if (data.dashboard_actions_enabled === false) {
+        showOperation(
+          data.live === false ? '当前为只读模式，平仓已禁用' : '平仓已禁用：dashboard token 未配置',
+          data.live === false
+            ? '启动参数需要包含 --live；同时配置 RH_NEUTRAL_DASHBOARD_TOKEN 后才能执行真实平仓。'
+            : '请配置 RH_NEUTRAL_DASHBOARD_TOKEN 并重启管理器。',
+          true,
+        );
+      }
       accountsEl.replaceChildren();
+      renderTransferHistory(data);
       accounts.forEach(account => {
         const panel = document.createElement('article');
         panel.className = 'panel';
@@ -341,7 +403,10 @@
           headers: { 'Content-Type': 'application/json', 'X-Neutral-Action': 'dashboard' },
           body: JSON.stringify({ ...body, request_id: id() })
         });
-        const payload = await response.json().catch(() => ({}));
+        const payload = await response.json().catch(async () => {
+          const text = await response.text().catch(() => '');
+          return text ? { error: text } : {};
+        });
         const details = actionDetails(payload.result || payload);
         const pendingStatus = ['accepted_pending_confirmation', 'unknown_pending', 'unknown_journal', 'completed_after_timeout', 'failed_after_timeout', 'cancelled_after_timeout'];
         const pending = response.status === 202 || pendingStatus.includes(String(payload.status || '').toLowerCase());

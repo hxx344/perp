@@ -111,6 +111,47 @@ def test_snapshot_exposes_available_balance_net_delta():
     assert payload["aggregate"]["available_balance_delta"] == "100"
 
 
+def test_snapshot_exposes_persistent_transfer_history_newest_first():
+    settings = _settings()
+    manager = NeutralPositionManager(settings)
+    manager.action_history = [
+        {
+            "type": "transfer",
+            "timestamp": 100,
+            "plan": {"source": "main", "destination": "sub", "amount": "25", "reason": "balance"},
+            "result": {"status": "acknowledged"},
+        },
+        {"type": "close", "timestamp": 150, "result": {"status": "acknowledged"}},
+        {
+            "type": "transfer",
+            "timestamp": 200,
+            "plan": {"source": "sub", "destination": "main", "amount": "10", "reason": "balance"},
+            "result": {"status": "accepted_pending_confirmation"},
+        },
+    ]
+
+    history = manager.snapshot_payload()["transfer_history"]
+
+    assert history == [
+        {
+            "timestamp": 200,
+            "source": "sub",
+            "destination": "main",
+            "amount": "10",
+            "status": "accepted_pending_confirmation",
+            "reason": "balance",
+        },
+        {
+            "timestamp": 100,
+            "source": "main",
+            "destination": "sub",
+            "amount": "25",
+            "status": "acknowledged",
+            "reason": "balance",
+        },
+    ]
+
+
 def test_transfer_memo_is_fixed_length_hex_and_does_not_leak_reason():
     memo = LighterAccountGateway._transfer_memo("main requires 12.5 USDG")
     assert len(memo) == 66

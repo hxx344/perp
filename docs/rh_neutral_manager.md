@@ -160,6 +160,8 @@ The authenticated dashboard provides:
 
 - account equity, available balance, maintenance requirement and ratio;
 - all four configured legs and aggregate signed/gross notional;
+- persistent transfer history with timestamp, direction, USDG amount, status,
+  and balancing reason (newest 50 records);
 - a calculated transfer plan and manual rebalance button;
 - quantity or fraction close for one account/symbol;
 - paired close for both accounts on one symbol;

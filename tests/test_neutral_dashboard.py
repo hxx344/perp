@@ -293,5 +293,8 @@ async def test_unconfigured_loopback_dashboard_is_read_only():
                 json={"request_id": "x", "account": "parent", "symbol": "SPY", "quantity": "1"},
             ) as response:
                 assert response.status == 503
+                body = await response.json()
+                assert body["status"] == "actions_disabled"
+                assert "RH_NEUTRAL_DASHBOARD_TOKEN" in body["error"]
     finally:
         await dashboard.stop()

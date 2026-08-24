@@ -2921,12 +2921,34 @@ class NeutralPositionManager:
             and neutral_layout["ready"]
             and not pending_writes
         )
+        transfer_history: List[Dict[str, Any]] = []
+        for record in reversed(self.action_history):
+            if str(record.get("type", "")).casefold() != "transfer":
+                continue
+            plan = record.get("plan") if isinstance(record.get("plan"), Mapping) else {}
+            result = record.get("result")
+            status = None
+            if isinstance(result, Mapping):
+                status = result.get("status")
+            if not status:
+                status = self._unconfirmed_status(result) or "completed"
+            transfer_history.append({
+                "timestamp": record.get("timestamp"),
+                "source": plan.get("source"),
+                "destination": plan.get("destination"),
+                "amount": plan.get("amount"),
+                "status": status,
+                "reason": plan.get("reason"),
+            })
+            if len(transfer_history) >= 50:
+                break
         return _json_value({
             "ok": healthy,
             "state": "healthy" if healthy else "degraded",
             "endpoint": self.settings.rest_url,
             "chain_id": self.settings.chain_id,
             "live": self.settings.live,
+            "dashboard_actions_enabled": bool(self.settings.live and self.settings.dashboard_token),
             "auto_transfer": self.settings.auto_transfer,
             "pair_error": self._pair_error,
             "last_refresh_error": self._last_refresh_error,
@@ -2949,6 +2971,7 @@ class NeutralPositionManager:
             "transfer_plan": self.last_plan.as_payload() if self.last_plan else None,
             "account_indexes": {name: snapshot.account_index for name, snapshot in self.snapshots.items()},
             "last_transfer": self.last_transfer,
+            "transfer_history": transfer_history,
             "pending_writes": self._pending_unknown_records,
             "writes_blocked": pending_writes,
             "action_history": self.action_history[-20:],
