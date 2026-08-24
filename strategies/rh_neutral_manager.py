@@ -2899,8 +2899,13 @@ class NeutralPositionManager:
         first = self.snapshots.get("main")
         second = self.snapshots.get("sub")
         margin_delta = None
+        available_balance_delta = None
         if first and second and first.maintenance_ratio is not None and second.maintenance_ratio is not None:
             margin_delta = first.maintenance_ratio - second.maintenance_ratio
+        if first and second:
+            # Positive means main has more available collateral; negative
+            # means sub has more. This is the transfer-balancing signal.
+            available_balance_delta = first.available_balance - second.available_balance
         neutral_layout = self._neutral_layout_report() if first and second else {
             "ready": False,
             "reason": "both account snapshots are required",
@@ -2939,6 +2944,7 @@ class NeutralPositionManager:
                 "unrealized_pnl": unrealized_pnl,
                 "realized_pnl": realized_pnl,
                 "margin_ratio_delta": margin_delta,
+                "available_balance_delta": available_balance_delta,
             },
             "transfer_plan": self.last_plan.as_payload() if self.last_plan else None,
             "account_indexes": {name: snapshot.account_index for name, snapshot in self.snapshots.items()},

@@ -130,6 +130,16 @@
       return result;
     }
     function render(data) {
+      // Polling rebuilds the tables. Preserve operator-entered quantities so
+      // a refresh cannot overwrite an input while it is being edited.
+      const positionInputValues = new Map();
+      positionsEl.querySelectorAll('input[data-position-key]').forEach(input => {
+        positionInputValues.set(input.dataset.positionKey, input.value);
+      });
+      const pairInputValues = new Map();
+      pairsEl.querySelectorAll('input[data-pair-symbol]').forEach(input => {
+        pairInputValues.set(input.dataset.pairSymbol, input.value);
+      });
       const accounts = normaliseAccounts(data);
       accountsEl.replaceChildren();
       accounts.forEach(account => {
@@ -162,6 +172,7 @@
       const aggregate = data.aggregate || {};
       const plan = data.transfer_plan;
       riskEl.append(
+        metric('可用保证金净差值（主账户 - 子账户）', aggregate.available_balance_delta),
         metric('SPY 净仓位', aggregate.net_spy),
         metric('QQQ 净仓位', aggregate.net_qqq),
         metric('SPY 净名义价值', aggregate.net_spy_value),
@@ -188,7 +199,8 @@
       positionsEl.replaceChildren();
       const symbols = new Set();
       positions.forEach(position => {
-        const account = accountText(position.account || position.account_name);
+        const accountKey = String(position.account || position.account_name || '').toLowerCase();
+        const account = accountText(accountKey);
         const symbol = text(position.symbol || position.ticker);
         const size = position.signed_size ?? position.size ?? position.position ?? position.quantity;
         if (symbol !== '-') symbols.add(symbol.toUpperCase());
@@ -205,7 +217,11 @@
         const quantity = document.createElement('input');
         quantity.type = 'text';
         quantity.inputMode = 'decimal';
-        quantity.value = size && Number(size) !== 0 ? String(Math.abs(Number(size))) : '';
+        const positionKey = accountKey + '|' + symbol.toUpperCase();
+        quantity.dataset.positionKey = positionKey;
+        quantity.value = positionInputValues.has(positionKey)
+          ? positionInputValues.get(positionKey)
+          : (size && Number(size) !== 0 ? String(Math.abs(Number(size))) : '');
         quantity.setAttribute('aria-label', '平仓数量');
         const close = document.createElement('button');
         close.type = 'button';
@@ -223,6 +239,10 @@
         const quantity = document.createElement('input');
         quantity.type = 'text';
         quantity.inputMode = 'decimal';
+        quantity.dataset.pairSymbol = symbol.toUpperCase();
+        if (pairInputValues.has(symbol.toUpperCase())) {
+          quantity.value = pairInputValues.get(symbol.toUpperCase());
+        }
         quantity.placeholder = '数量（留空为全部）';
         quantity.setAttribute('aria-label', symbol + ' 双腿平仓数量');
         const button = document.createElement('button');
@@ -256,6 +276,8 @@
       finally { if (button) button.disabled = false; }
     }
     function closePosition(account, symbol, quantity, button) {
+      const amountText = quantity ? ('数量 ' + quantity) : '全部仓位';
+      if (!window.confirm('二次确认：确定平仓 ' + accountText(account) + ' 的 ' + symbol + '（' + amountText + '）吗？')) return;
       if (quantity && Number(quantity) <= 0) { setStatus('请输入正数，或留空表示全部平仓', true); return; }
       const body = { account, symbol };
       if (quantity) body.quantity = quantity;

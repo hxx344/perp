@@ -84,6 +84,33 @@ def test_transfer_plan_can_reverse_from_main_to_sub():
     assert plan.amount == Decimal("190")
 
 
+def test_transfer_plan_ignores_maintenance_margin_values():
+    """Balance mode must use available collateral, not the maintenance ratio."""
+    settings = _settings()
+    main = _account("main", 500, 1, 200)
+    sub = _account("sub", 100, 999, 100)
+
+    plan = build_transfer_plan(main, sub, settings)
+
+    assert plan is not None
+    assert plan.source == "main"
+    assert plan.destination == "sub"
+    assert plan.amount == Decimal("50")
+
+
+def test_snapshot_exposes_available_balance_net_delta():
+    settings = _settings()
+    manager = NeutralPositionManager(settings)
+    manager.snapshots = {
+        "main": _account("main", 500, 999, 200),
+        "sub": _account("sub", 100, 1, 100),
+    }
+
+    payload = manager.snapshot_payload()
+
+    assert payload["aggregate"]["available_balance_delta"] == "100"
+
+
 def test_transfer_memo_is_fixed_length_hex_and_does_not_leak_reason():
     memo = LighterAccountGateway._transfer_memo("main requires 12.5 USDG")
     assert len(memo) == 66
