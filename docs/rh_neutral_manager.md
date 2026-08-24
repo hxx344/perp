@@ -137,6 +137,15 @@ fee is queried immediately before signing; a live transfer is refused if the
 fee cannot be read. A position marked isolated is fail-closed because an
 account-level transfer does not add collateral to that isolated position.
 
+Transfers use a fail-closed circuit breaker. If either account cannot be read,
+the REST refresh fails, a snapshot is older than
+`RH_NEUTRAL_TRANSFER_SNAPSHOT_MAX_AGE_SECONDS` (default 15 seconds), or a
+previous write has unknown status, all automatic and manual transfers are
+blocked. After recovery, the manager requires
+`RH_NEUTRAL_TRANSFER_RECOVERY_SUCCESSES` (default 3) consecutive complete
+account snapshots before allowing a transfer again. The dashboard exposes the
+state, reason, snapshot ages, and recovery progress.
+
 The legacy `RH_NEUTRAL_MIN_MARGIN_RATIO`,
 `RH_NEUTRAL_TARGET_MARGIN_RATIO`, and `RH_NEUTRAL_RESERVE_USDC` values remain
 accepted for old env files but are not used to size transfers in balance mode.

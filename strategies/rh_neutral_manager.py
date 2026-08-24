@@ -370,6 +370,8 @@ class NeutralSettings:
     main_long_symbol: str = "SPY"
     l1_address: str = ""
     poll_seconds: float = 5.0
+    transfer_snapshot_max_age_seconds: float = 15.0
+    transfer_recovery_successes_required: int = 3
     # Retained for configuration/backward compatibility.  Balance mode does
     # not use margin-ratio targets or an equity reserve to size transfers.
     min_margin_ratio: Decimal = Decimal("1.50")
@@ -455,6 +457,13 @@ class NeutralSettings:
             raise ValueError("SPY and QQQ market ids must be different")
         if not math.isfinite(self.poll_seconds) or self.poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
+        if (
+            not math.isfinite(self.transfer_snapshot_max_age_seconds)
+            or self.transfer_snapshot_max_age_seconds <= 0
+        ):
+            raise ValueError("transfer snapshot max age must be positive")
+        if self.transfer_recovery_successes_required <= 0:
+            raise ValueError("transfer recovery successes required must be positive")
         if self.min_margin_ratio <= 1:
             raise ValueError("min_margin_ratio must be greater than 1")
         if self.target_margin_ratio < self.min_margin_ratio:
@@ -1646,6 +1655,7 @@ class NeutralPositionManager:
         self._pair_error: Optional[str] = None
         self._last_refresh_error: Optional[str] = None
         self._transfer_block_reason: Optional[str] = None
+        self._transfer_recovery_successes = 0
         self._pending_unknown_records: List[Dict[str, Any]] = []
         self._pending_tasks: Dict[str, asyncio.Future[Any]] = {}
         self._load_state()
@@ -2440,7 +2450,84 @@ class NeutralPositionManager:
             else:
                 self.snapshots[name] = result
         self._validate_master_pair()
+        snapshots_ok = (
+            len(self.snapshots) == len(self.settings.accounts)
+            and not self._last_refresh_error
+            and not self._pair_error
+            and all(not snapshot.error for snapshot in self.snapshots.values())
+        )
+        self._transfer_recovery_successes = (
+            min(self._transfer_recovery_successes + 1, self.settings.transfer_recovery_successes_required)
+            if snapshots_ok else 0
+        )
         return self.snapshot_payload()
+
+    def _transfer_health(self) -> Dict[str, Any]:
+        """Return the fail-closed transfer circuit state and its reason."""
+
+        required = self.settings.transfer_recovery_successes_required
+        ages: Dict[str, Optional[float]] = {}
+        for name in ("main", "sub"):
+            snapshot = self.snapshots.get(name)
+            if snapshot is None:
+                ages[name] = None
+            else:
+                ages[name] = max(0.0, time.time() - float(snapshot.observed_at))
+        if self._pending_write_reason():
+            reason = self._pending_write_reason() or "unconfirmed write is blocking transfers"
+            state = "blocked"
+        elif self._last_refresh_error:
+            reason = f"account refresh failed: {self._last_refresh_error}"
+            state = "blocked"
+        elif len(self.snapshots) != len(self.settings.accounts):
+            reason = "both account snapshots are required before transfers"
+            state = "blocked"
+        elif any(snapshot.error for snapshot in self.snapshots.values()):
+            failed = next((snapshot for snapshot in self.snapshots.values() if snapshot.error), None)
+            reason = f"account snapshot failed: {failed.name if failed else 'unknown'}: {failed.error if failed else 'unknown'}"
+            state = "blocked"
+        elif self._pair_error:
+            reason = self._pair_error
+            state = "blocked"
+        elif self.settings.live and any(
+            age is None or age > self.settings.transfer_snapshot_max_age_seconds for age in ages.values()
+        ):
+            stale = [
+                f"{name}={age:.1f}s" if age is not None else f"{name}=missing"
+                for name, age in ages.items()
+                if age is None or age > self.settings.transfer_snapshot_max_age_seconds
+            ]
+            reason = (
+                "account snapshot is stale; transfers blocked "
+                f"({', '.join(stale)}, max={self.settings.transfer_snapshot_max_age_seconds:.1f}s)"
+            )
+            state = "blocked"
+        elif self.settings.live and self._transfer_recovery_successes < required:
+            reason = (
+                "waiting for consecutive healthy account snapshots before transfers "
+                f"({self._transfer_recovery_successes}/{required})"
+            )
+            state = "recovering"
+        elif not self.settings.live:
+            reason = "live mode is disabled; transfers are read-only"
+            state = "read_only"
+        else:
+            reason = None
+            state = "ready"
+        return {
+            "state": state,
+            "reason": reason,
+            "allowed": state == "ready",
+            "snapshot_ages": ages,
+            "recovery_successes": self._transfer_recovery_successes,
+            "recovery_required": required,
+        }
+
+    def _ensure_transfer_write(self) -> None:
+        self._ensure_live_write()
+        health = self._transfer_health()
+        if health["state"] != "ready":
+            raise RuntimeError(str(health["reason"] or "transfers are currently blocked"))
 
     def _ensure_live_write(self) -> None:
         if not self.settings.live:
@@ -2539,6 +2626,10 @@ class NeutralPositionManager:
 
     async def calculate_transfer_plan(self) -> Optional[TransferPlan]:
         self.last_plan = None
+        health = self._transfer_health()
+        if health["state"] in {"blocked", "recovering"}:
+            self._transfer_block_reason = str(health["reason"] or "transfers are currently blocked")
+            return None
         first = self.snapshots.get("main")
         second = self.snapshots.get("sub")
         if not first or not second:
@@ -2590,6 +2681,7 @@ class NeutralPositionManager:
             self._ensure_transfer_cooldown()
             action_id = self._claim_action_id(request_id)
             await self.refresh_once()
+            self._ensure_transfer_write()
             fresh_plan = await self.calculate_transfer_plan()
             if fresh_plan is None:
                 return {"status": "balanced", "plan": None}
@@ -2616,6 +2708,8 @@ class NeutralPositionManager:
                 self._ensure_transfer_cooldown()
             action_id = self._claim_action_id(request_id)
             await self.refresh_once()
+            if self.settings.live:
+                self._ensure_transfer_write()
             plan = await self.calculate_transfer_plan()
             if plan is None:
                 return {"status": "balanced", "plan": None}
@@ -2912,6 +3006,8 @@ class NeutralPositionManager:
             "symbols": {},
             "tolerance": self.settings.neutral_notional_tolerance,
         }
+        transfer_health = self._transfer_health()
+        transfer_allowed = bool(self.settings.live and transfer_health["allowed"])
         ready = len(self.snapshots) == len(self.settings.accounts)
         pending_writes = bool(self._pending_write_reason())
         healthy = (
@@ -2920,6 +3016,7 @@ class NeutralPositionManager:
             and not self._pair_error
             and neutral_layout["ready"]
             and not pending_writes
+            and transfer_health["state"] in {"ready", "read_only"}
         )
         transfer_history: List[Dict[str, Any]] = []
         for record in reversed(self.action_history):
@@ -2953,6 +3050,9 @@ class NeutralPositionManager:
             "pair_error": self._pair_error,
             "last_refresh_error": self._last_refresh_error,
             "transfer_block_reason": self._transfer_block_reason,
+            "transfer_state": transfer_health["state"],
+            "transfer_allowed": transfer_allowed,
+            "transfer_health": transfer_health,
             "accounts": {name: snapshot.as_payload() for name, snapshot in self.snapshots.items()},
             "legs": leg_status,
             "neutral_layout": neutral_layout,
@@ -3087,6 +3187,10 @@ def settings_from_env(env_file: Optional[str] = None) -> NeutralSettings:
         main_long_symbol=str(get("RH_NEUTRAL_MAIN_LONG_SYMBOL", "SPY") or "SPY"),
         l1_address=str(get("RH_NEUTRAL_L1_ADDRESS", "") or "").strip(),
         poll_seconds=float(get("RH_NEUTRAL_POLL_SECONDS", "5")),
+        transfer_snapshot_max_age_seconds=float(get("RH_NEUTRAL_TRANSFER_SNAPSHOT_MAX_AGE_SECONDS", "15")),
+        transfer_recovery_successes_required=_env_int(
+            "RH_NEUTRAL_TRANSFER_RECOVERY_SUCCESSES", 3, effective_env
+        ),
         min_margin_ratio=_decimal(get("RH_NEUTRAL_MIN_MARGIN_RATIO", "1.5")),
         target_margin_ratio=_decimal(get("RH_NEUTRAL_TARGET_MARGIN_RATIO", "2.0")),
         reserve_usdc=_decimal(get("RH_NEUTRAL_RESERVE_USDC", "50")),
@@ -3137,6 +3241,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dashboard-token")
     parser.add_argument("--dashboard-username")
     parser.add_argument("--poll-seconds", type=float)
+    parser.add_argument("--transfer-snapshot-max-age-seconds", type=float)
+    parser.add_argument("--transfer-recovery-successes", type=int)
     parser.add_argument("--notional-tolerance", dest="neutral_notional_tolerance", type=Decimal)
     parser.add_argument("--confirmation-attempts", type=int)
     parser.add_argument("--confirmation-poll-seconds", type=float)
@@ -3205,6 +3311,10 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         settings.dashboard_username = args.dashboard_username
     if args.poll_seconds is not None:
         settings.poll_seconds = args.poll_seconds
+    if args.transfer_snapshot_max_age_seconds is not None:
+        settings.transfer_snapshot_max_age_seconds = args.transfer_snapshot_max_age_seconds
+    if args.transfer_recovery_successes is not None:
+        settings.transfer_recovery_successes_required = args.transfer_recovery_successes
     if args.neutral_notional_tolerance is not None:
         settings.neutral_notional_tolerance = args.neutral_notional_tolerance
     if args.confirmation_attempts is not None:

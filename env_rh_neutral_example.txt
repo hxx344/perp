@@ -34,6 +34,10 @@ RH_NEUTRAL_QQQ_MARKET_ID=0
 RH_NEUTRAL_MAIN_LONG_SYMBOL=SPY
 
 RH_NEUTRAL_POLL_SECONDS=5
+# Transfer circuit breaker: live transfers require fresh snapshots and
+# this many consecutive successful reads after a failure.
+RH_NEUTRAL_TRANSFER_SNAPSHOT_MAX_AGE_SECONDS=15
+RH_NEUTRAL_TRANSFER_RECOVERY_SUCCESSES=3
 # Transfer balance mode: equalize available_balance between main and sub.
 # These three legacy settings are accepted for old env files but ignored.
 # RH_NEUTRAL_MIN_MARGIN_RATIO=1.50

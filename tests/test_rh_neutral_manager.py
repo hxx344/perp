@@ -111,6 +111,50 @@ def test_snapshot_exposes_available_balance_net_delta():
     assert payload["aggregate"]["available_balance_delta"] == "100"
 
 
+def test_live_transfer_health_blocks_stale_account_snapshots_and_exposes_reason():
+    settings = _settings(live=True)
+    settings.transfer_snapshot_max_age_seconds = 1
+    manager = NeutralPositionManager(settings)
+    manager.snapshots = {
+        "main": _account("main", 100, 20, 80),
+        "sub": _account("sub", 100, 20, 80),
+    }
+
+    health = manager.snapshot_payload()["transfer_health"]
+
+    assert health["state"] == "blocked"
+    assert health["allowed"] is False
+    assert "stale" in health["reason"]
+    payload = manager.snapshot_payload()
+    assert payload["transfer_allowed"] is False
+    assert payload["ok"] is False
+
+
+def test_live_transfer_health_requires_consecutive_recovery_snapshots():
+    settings = _settings(live=True)
+    settings.transfer_recovery_successes_required = 2
+    manager = NeutralPositionManager(settings)
+    now = time.time()
+    manager.snapshots = {
+        "main": _account("main", 100, 20, 80),
+        "sub": _account("sub", 100, 20, 80),
+    }
+    for snapshot in manager.snapshots.values():
+        snapshot.observed_at = now
+    manager._transfer_recovery_successes = 1
+
+    health = manager.snapshot_payload()["transfer_health"]
+
+    assert health["state"] == "recovering"
+    assert health["allowed"] is False
+    assert health["recovery_successes"] == 1
+    assert health["recovery_required"] == 2
+
+    manager._transfer_recovery_successes = 2
+    assert manager.snapshot_payload()["transfer_health"]["state"] == "ready"
+    assert manager.snapshot_payload()["transfer_allowed"] is True
+
+
 def test_snapshot_exposes_persistent_transfer_history_newest_first():
     settings = _settings()
     manager = NeutralPositionManager(settings)

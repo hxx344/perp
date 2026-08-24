@@ -217,6 +217,15 @@
       };
       return labels[status] || text(value);
     }
+    function transferStateText(value) {
+      const labels = {
+        ready: '可转账',
+        blocked: '已阻断',
+        recovering: '恢复中',
+        read_only: '只读模式',
+      };
+      return labels[String(value || '').toLowerCase()] || text(value);
+    }
     function renderTransferHistory(data) {
       transferHistoryEl.replaceChildren();
       const history = Array.isArray(data && data.transfer_history) ? data.transfer_history : [];
@@ -300,8 +309,15 @@
       riskEl.replaceChildren();
       const aggregate = data.aggregate || {};
       const plan = data.transfer_plan;
+      const transferHealth = data.transfer_health || {};
+      const snapshotAges = transferHealth.snapshot_ages || {};
       riskEl.append(
         metric('可用保证金净差值（主账户 - 子账户）', aggregate.available_balance_delta),
+        metric('转账状态', transferStateText(data.transfer_state)),
+        metric('转账权限', data.transfer_allowed ? '允许' : '禁止'),
+        metric('恢复进度', `${transferHealth.recovery_successes ?? 0}/${transferHealth.recovery_required ?? 0}`),
+        metric('主账户快照年龄（秒）', snapshotAges.main),
+        metric('子账户快照年龄（秒）', snapshotAges.sub),
         metric('SPY 净仓位', aggregate.net_spy),
         metric('QQQ 净仓位', aggregate.net_qqq),
         metric('SPY 净名义价值', aggregate.net_spy_value),
@@ -321,6 +337,12 @@
         const note = document.createElement('div');
         note.className = 'status';
         note.textContent = data.transfer_block_reason;
+        riskEl.append(note);
+      }
+      if (transferHealth.reason && transferHealth.state !== 'ready') {
+        const note = document.createElement('div');
+        note.className = 'status error';
+        note.textContent = '转账阻断原因：' + transferHealth.reason;
         riskEl.append(note);
       }
 
