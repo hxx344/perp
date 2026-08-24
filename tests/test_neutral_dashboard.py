@@ -239,6 +239,32 @@ async def test_nested_partial_leg_error_is_visible_to_dashboard_client():
 
 
 @pytest.mark.asyncio
+async def test_action_exception_reason_is_returned_to_operator():
+    async def handler(_action):
+        raise ValueError("SPY close quantity is below market minimum")
+
+    dashboard = NeutralDashboard(lambda: {}, handler, port=0, username="u", password="p")
+    await dashboard.start()
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                **_auth("u", "p"),
+                "Content-Type": "application/json",
+                "X-Neutral-Action": "dashboard",
+            }
+            async with session.post(
+                f"http://127.0.0.1:{dashboard.bound_port}/api/actions/close-position",
+                headers=headers,
+                json={"request_id": "failure-reason-1", "account": "main", "symbol": "SPY", "quantity": "0.1"},
+            ) as response:
+                assert response.status == 502
+                body = await response.json()
+                assert body["error"] == "SPY close quantity is below market minimum"
+    finally:
+        await dashboard.stop()
+
+
+@pytest.mark.asyncio
 async def test_public_bind_requires_explicit_opt_in_and_credentials():
     dashboard = NeutralDashboard(lambda: {}, lambda _action: {}, host="0.0.0.0", port=0)
     with pytest.raises(RuntimeError, match="loopback"):

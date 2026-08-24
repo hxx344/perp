@@ -19,6 +19,7 @@
     .confirm-dialog { width: min(440px, 100%); border: 1px solid #8f4141; border-radius: 8px; padding: 18px; background: #151c23; box-shadow: 0 12px 40px rgba(0, 0, 0, .45); }
     .confirm-dialog p { margin: 0 0 16px; line-height: 1.5; }
     .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .operation-details { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #c5d0da; font: inherit; }
     input { width: 100px; border: 1px solid #3b4754; border-radius: 5px; background: #11181f; color: inherit; padding: 7px; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
     .panel { border: 1px solid #2d3945; border-radius: 8px; padding: 14px; background: #151c23; }
@@ -54,6 +55,11 @@
       </div>
     </div>
   </div>
+  <section class="panel" style="margin-top:14px">
+    <h2>最近一次平仓操作</h2>
+    <div id="operationStatus" class="status">尚未执行平仓操作</div>
+    <pre id="operationDetails" class="operation-details"></pre>
+  </section>
   <section id="accounts" class="grid" aria-live="polite"></section>
   <section class="panel" style="margin-top:14px">
     <h2>风险与余额平衡</h2>
@@ -85,6 +91,8 @@
     const confirmMessage = document.getElementById('confirmMessage');
     const confirmCancel = document.getElementById('confirmCancel');
     const confirmProceed = document.getElementById('confirmProceed');
+    const operationStatusEl = document.getElementById('operationStatus');
+    const operationDetailsEl = document.getElementById('operationDetails');
     let pendingConfirmation = null;
 
     function id() {
@@ -116,6 +124,36 @@
     function closeConfirmation() {
       pendingConfirmation = null;
       confirmOverlay.hidden = true;
+    }
+    function showOperation(status, details, error) {
+      operationStatusEl.textContent = status || '';
+      operationStatusEl.className = 'status' + (error ? ' error' : status ? ' ok' : '');
+      operationDetailsEl.textContent = details || '';
+    }
+    function actionDetails(value) {
+      const lines = [];
+      function visit(node, label) {
+        if (node === null || node === undefined) return;
+        if (Array.isArray(node)) {
+          node.forEach((child, index) => visit(child, label + '[' + index + ']'));
+          return;
+        }
+        if (typeof node !== 'object') return;
+        const status = node.status;
+        const error = node.error;
+        const pending = node.pending_id;
+        if (status || error || pending) {
+          const prefix = label || '操作';
+          lines.push(prefix + ': ' + (status || '') + (error ? ' - ' + error : '') + (pending ? '（待确认ID: ' + pending + '）' : ''));
+        }
+        Object.entries(node).forEach(([key, child]) => {
+          if (key !== 'status' && key !== 'error' && key !== 'pending_id' && (child && typeof child === 'object')) {
+            visit(child, label ? label + '.' + key : key);
+          }
+        });
+      }
+      visit(value, '');
+      return lines.slice(0, 30).join('\n');
     }
     function number(value) {
       const n = Number(value);
@@ -286,16 +324,17 @@
         pairsEl.append(quantity, button);
       });
     }
-    async function load() {
+    async function load(preserveStatus = false) {
       try {
         const response = await fetch('/api/snapshot', { cache: 'no-store' });
         if (!response.ok) throw new Error('snapshot HTTP ' + response.status);
         render(await response.json());
-        setStatus('已更新：' + new Date().toLocaleTimeString(), false);
+        if (!preserveStatus) setStatus('已更新：' + new Date().toLocaleTimeString(), false);
       } catch (error) { setStatus(String(error.message || error), true); }
     }
     async function action(path, body, button) {
       if (button) button.disabled = true;
+      showOperation('正在提交平仓请求…', '正在等待后端和 Lighter 返回结果，请不要重复点击。', false);
       try {
         const response = await fetch(path, {
           method: 'POST',
@@ -303,10 +342,30 @@
           body: JSON.stringify({ ...body, request_id: id() })
         });
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok || payload.ok === false) throw new Error(payload.error || 'action HTTP ' + response.status);
-        setStatus('操作已提交', false);
-        await load();
-      } catch (error) { setStatus(String(error.message || error), true); }
+        const details = actionDetails(payload.result || payload);
+        const pendingStatus = ['accepted_pending_confirmation', 'unknown_pending', 'unknown_journal', 'completed_after_timeout', 'failed_after_timeout', 'cancelled_after_timeout'];
+        const pending = response.status === 202 || pendingStatus.includes(String(payload.status || '').toLowerCase());
+        if (!response.ok || payload.ok === false) {
+          const reason = payload.error || details || ('action HTTP ' + response.status);
+          if (pending) {
+            showOperation('已提交，等待链上确认', details || reason, false);
+            setStatus('平仓已提交，正在等待链上确认；请勿重复点击', false);
+            await load(true);
+            return;
+          }
+          showOperation('平仓失败：' + reason, details, true);
+          setStatus('平仓失败：' + reason, true);
+          await load(true);
+          return;
+        }
+        showOperation('平仓请求已处理', details || ('状态：' + (payload.status || 'success')), false);
+        setStatus('平仓操作已处理', false);
+        await load(true);
+      } catch (error) {
+        const reason = String(error.message || error);
+        showOperation('平仓失败：' + reason, '', true);
+        setStatus('平仓失败：' + reason, true);
+      }
       finally { if (button) button.disabled = false; }
     }
     function closePosition(account, symbol, quantity, button) {

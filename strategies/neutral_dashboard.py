@@ -387,9 +387,15 @@ class NeutralDashboard:
         async with self._action_lock:
             try:
                 result = await _maybe_await(self._action_handler(action))
-            except Exception:
+            except Exception as exc:
                 LOGGER.exception("neutral dashboard action failed: %s", action.action)
-                return web.json_response({"ok": False, "error": "action failed"}, status=502)
+                # Return the operator-useful validation/exchange reason. Do
+                # not collapse all failures into an opaque generic message.
+                detail = str(exc).strip() or type(exc).__name__
+                return web.json_response(
+                    {"ok": False, "action": action.action, "status": "error", "error": detail},
+                    status=502,
+                )
         if not isinstance(result, Mapping):
             result = {"result": result}
         status, failed = _action_result_status(result)
