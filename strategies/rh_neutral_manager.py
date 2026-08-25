@@ -599,10 +599,26 @@ class AccountSnapshot:
         return self.equity / self.maintenance_margin_requirement
 
     @property
+    def maintenance_margin_usage_ratio(self) -> Optional[Decimal]:
+        """Maintenance requirement as a fraction of account equity."""
+
+        if self.equity <= 0:
+            return None
+        return self.maintenance_margin_requirement / self.equity
+
+    @property
     def initial_ratio(self) -> Optional[Decimal]:
         if self.initial_margin_requirement <= 0:
             return None
         return self.equity / self.initial_margin_requirement
+
+    @property
+    def initial_margin_usage_ratio(self) -> Optional[Decimal]:
+        """Initial requirement as a fraction of account equity."""
+
+        if self.equity <= 0:
+            return None
+        return self.initial_margin_requirement / self.equity
 
     @property
     def maintenance_buffer(self) -> Decimal:
@@ -634,7 +650,9 @@ class AccountSnapshot:
             "initial_margin_requirement": self.initial_margin_requirement,
             "maintenance_margin_requirement": self.maintenance_margin_requirement,
             "maintenance_ratio": self.maintenance_ratio,
+            "maintenance_margin_usage_ratio": self.maintenance_margin_usage_ratio,
             "initial_ratio": self.initial_ratio,
+            "initial_margin_usage_ratio": self.initial_margin_usage_ratio,
             "maintenance_buffer": self.maintenance_buffer,
             "has_isolated_positions": self.has_isolated_positions,
             "pending_order_count": self.pending_order_count,
@@ -2994,12 +3012,14 @@ class NeutralPositionManager:
         second = self.snapshots.get("sub")
         margin_delta = None
         available_balance_delta = None
+        total_equity = None
         if first and second and first.maintenance_ratio is not None and second.maintenance_ratio is not None:
             margin_delta = first.maintenance_ratio - second.maintenance_ratio
         if first and second:
             # Positive means main has more available collateral; negative
             # means sub has more. This is the transfer-balancing signal.
             available_balance_delta = first.available_balance - second.available_balance
+            total_equity = first.equity + second.equity
         neutral_layout = self._neutral_layout_report() if first and second else {
             "ready": False,
             "reason": "both account snapshots are required",
@@ -3067,6 +3087,7 @@ class NeutralPositionManager:
                 "realized_pnl": realized_pnl,
                 "margin_ratio_delta": margin_delta,
                 "available_balance_delta": available_balance_delta,
+                "total_equity": total_equity,
             },
             "transfer_plan": self.last_plan.as_payload() if self.last_plan else None,
             "account_indexes": {name: snapshot.account_index for name, snapshot in self.snapshots.items()},

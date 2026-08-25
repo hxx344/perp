@@ -157,6 +157,13 @@ notional and pauses transfers when the relative difference exceeds
 beta model; the operator remains responsible for choosing the SPY/QQQ hedge
 ratio.
 
+The dashboard displays maintenance and initial margin usage as percentages of
+account equity. The backend also retains the raw requirement fields and legacy
+ratio fields for API compatibility; those ratios are not shown in the
+operator-facing dashboard. The dashboard also shows the combined equity of
+the main and sub accounts as total account assets. These are account-health
+indicators, not the market's configured IMR/MMR fractions.
+
 The exchange does not provide an atomic transaction spanning two accounts.
 "Close both" submits two independent reduce-only IOC orders concurrently and
 reports every leg separately. A partial result must be reviewed before any

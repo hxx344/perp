@@ -168,6 +168,16 @@
       const n = Number(value);
       return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : text(value);
     }
+    function percent(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? `${(n * 100).toLocaleString(undefined, { maximumFractionDigits: 4 })}%` : text(value);
+    }
+    // Kept for compatibility with the initial metric construction below;
+    // the visible metric set is replaced before it is attached to the page.
+    function coverage(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? `${number(n)}x` : text(value);
+    }
     function metric(label, value) {
       const box = document.createElement('div');
       box.className = 'metric';
@@ -296,6 +306,28 @@
           metric('维护保证金率', account.maintenance_ratio ?? account.margin_ratio ?? account.marginRatio),
           metric('初始保证金率', account.initial_ratio ?? account.initialRatio)
         );
+        metrics.append(
+          metric('\u7ef4\u6301\u4fdd\u8bc1\u91d1\u8981\u6c42\u5360\u6743\u76ca', percent(account.maintenance_margin_usage_ratio)),
+          metric('\u521d\u59cb\u4fdd\u8bc1\u91d1\u8981\u6c42\u5360\u6743\u76ca', percent(account.initial_margin_usage_ratio))
+        );
+        const accountMetricLabels = metrics.querySelectorAll('.muted');
+        const accountMetricValues = metrics.querySelectorAll('b');
+        if (accountMetricLabels[4]) accountMetricLabels[4].textContent = '\u7ef4\u6301\u4fdd\u8bc1\u91d1\u8981\u6c42\u8986\u76d6\u500d\u6570';
+        if (accountMetricLabels[5]) accountMetricLabels[5].textContent = '\u521d\u59cb\u4fdd\u8bc1\u91d1\u8981\u6c42\u8986\u76d6\u500d\u6570';
+        if (accountMetricLabels[6]) accountMetricLabels[6].textContent = '\u7ef4\u6301\u4fdd\u8bc1\u91d1\u8981\u6c42\u5360\u6743\u76ca';
+        if (accountMetricLabels[7]) accountMetricLabels[7].textContent = '\u521d\u59cb\u4fdd\u8bc1\u91d1\u8981\u6c42\u5360\u6743\u76ca';
+        if (accountMetricValues[4]) accountMetricValues[4].textContent = coverage(account.maintenance_ratio ?? account.margin_ratio ?? account.marginRatio);
+        if (accountMetricValues[5]) accountMetricValues[5].textContent = coverage(account.initial_ratio ?? account.initialRatio);
+        // Render only requirement usage percentages; coverage multiples are
+        // intentionally omitted from the operator-facing dashboard.
+        metrics.replaceChildren(
+          metric('\u8d26\u6237\u7d22\u5f15', account.account_index ?? account.accountIndex),
+          metric('\u53ef\u7528\u4fdd\u8bc1\u91d1', account.available_balance ?? account.availableBalance),
+          metric('\u8d26\u6237\u6743\u76ca', account.equity ?? account.total_asset_value ?? account.totalAccountValue),
+          metric('\u7ef4\u6301\u4fdd\u8bc1\u91d1', account.maintenance_margin_requirement ?? account.maintenanceMargin),
+          metric('\u7ef4\u6301\u4fdd\u8bc1\u91d1\u8981\u6c42\u5360\u6743\u76ca', percent(account.maintenance_margin_usage_ratio)),
+          metric('\u521d\u59cb\u4fdd\u8bc1\u91d1\u8981\u6c42\u5360\u6743\u76ca', percent(account.initial_margin_usage_ratio))
+        );
         if (account.error) {
           const error = document.createElement('div');
           error.className = 'status error';
@@ -327,6 +359,11 @@
         metric('已实现盈亏', aggregate.realized_pnl),
         metric('转账计划', plan ? `${plan.source === 'main' ? '主账户' : '子账户'} -> ${plan.destination === 'main' ? '主账户' : '子账户'}：${plan.amount}` : '无')
       );
+      const riskMetricLabels = riskEl.querySelectorAll('.muted');
+      if (riskMetricLabels[10]) riskMetricLabels[10].textContent = '\u7ef4\u6301\u4fdd\u8bc1\u91d1\u8981\u6c42\u8986\u76d6\u500d\u6570\u5dee';
+      const riskMetricBoxes = riskEl.querySelectorAll('.metric');
+      if (riskMetricBoxes[10]) riskMetricBoxes[10].remove();
+      riskEl.append(metric('\u4e24\u8d26\u6237\u603b\u8d44\u4ea7\uff08\u8d26\u6237\u6743\u76ca\uff09', aggregate.total_equity));
       if (data.pair_error) {
         const warning = document.createElement('div');
         warning.className = 'status error';

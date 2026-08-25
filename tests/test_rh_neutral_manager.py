@@ -109,6 +109,22 @@ def test_snapshot_exposes_available_balance_net_delta():
     payload = manager.snapshot_payload()
 
     assert payload["aggregate"]["available_balance_delta"] == "100"
+    assert payload["aggregate"]["total_equity"] == "600"
+
+
+def test_account_margin_fields_distinguish_coverage_from_usage():
+    account = _account("main", 100, 20, 80)
+    account.initial_margin_requirement = Decimal("40")
+
+    assert account.maintenance_ratio == Decimal("5")
+    assert account.maintenance_margin_usage_ratio == Decimal("0.2")
+    assert account.initial_ratio == Decimal("2.5")
+    assert account.initial_margin_usage_ratio == Decimal("0.4")
+    payload = account.as_payload()
+    assert payload["maintenance_ratio"] == "5"
+    assert payload["maintenance_margin_usage_ratio"] == "0.2"
+    assert payload["initial_ratio"] == "2.5"
+    assert payload["initial_margin_usage_ratio"] == "0.4"
 
 
 def test_live_transfer_health_blocks_stale_account_snapshots_and_exposes_reason():
