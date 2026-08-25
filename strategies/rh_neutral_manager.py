@@ -3013,6 +3013,8 @@ class NeutralPositionManager:
         margin_delta = None
         available_balance_delta = None
         total_equity = None
+        total_available_balance = None
+        available_balance_to_total_equity_ratio = None
         if first and second and first.maintenance_ratio is not None and second.maintenance_ratio is not None:
             margin_delta = first.maintenance_ratio - second.maintenance_ratio
         if first and second:
@@ -3020,6 +3022,9 @@ class NeutralPositionManager:
             # means sub has more. This is the transfer-balancing signal.
             available_balance_delta = first.available_balance - second.available_balance
             total_equity = first.equity + second.equity
+            total_available_balance = first.available_balance + second.available_balance
+            if total_equity > 0:
+                available_balance_to_total_equity_ratio = total_available_balance / total_equity
         neutral_layout = self._neutral_layout_report() if first and second else {
             "ready": False,
             "reason": "both account snapshots are required",
@@ -3088,6 +3093,8 @@ class NeutralPositionManager:
                 "margin_ratio_delta": margin_delta,
                 "available_balance_delta": available_balance_delta,
                 "total_equity": total_equity,
+                "total_available_balance": total_available_balance,
+                "available_balance_to_total_equity_ratio": available_balance_to_total_equity_ratio,
             },
             "transfer_plan": self.last_plan.as_payload() if self.last_plan else None,
             "account_indexes": {name: snapshot.account_index for name, snapshot in self.snapshots.items()},

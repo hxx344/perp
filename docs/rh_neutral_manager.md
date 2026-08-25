@@ -164,6 +164,12 @@ operator-facing dashboard. The dashboard also shows the combined equity of
 the main and sub accounts as total account assets. These are account-health
 indicators, not the market's configured IMR/MMR fractions.
 
+The dashboard also displays the combined available-balance ratio:
+`(main available balance + sub available balance) / (main equity + sub
+equity)`. It is colored red below 10%, orange from 10% to 25%, yellow from
+25% to 50%, and green at or above 50%. This is an operational warning
+indicator, not a protocol liquidation threshold.
+
 The exchange does not provide an atomic transaction spanning two accounts.
 "Close both" submits two independent reduce-only IOC orders concurrently and
 reports every leg separately. A partial result must be reviewed before any

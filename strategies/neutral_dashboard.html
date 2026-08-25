@@ -34,6 +34,16 @@
     .status { min-height: 1.3em; color: #9aa6b2; }
     .status.error { color: #ff9b9b; }
     .status.ok { color: #86e1ab; }
+    .risk-chart { margin-top: 12px; padding: 10px; border: 1px solid #2d3945; border-radius: 6px; background: #11181f; }
+    .risk-chart-title { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+    .risk-chart-title strong { font-size: 1.05rem; }
+    .risk-track { height: 16px; margin-top: 10px; overflow: hidden; border-radius: 999px; background: #2b2024; }
+    .risk-fill { height: 100%; width: 0; transition: width .25s ease, background-color .25s ease; }
+    .risk-fill.danger { background: #d94b4b; }
+    .risk-fill.warning { background: #e0833c; }
+    .risk-fill.caution { background: #d5b243; }
+    .risk-fill.healthy { background: #4caf78; }
+    .risk-chart-scale { display: flex; justify-content: space-between; margin-top: 5px; color: #9aa6b2; font-size: .78rem; }
     @media (max-width: 700px) { body { padding: 14px; } th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { display: none; } }
   </style>
 </head>
@@ -64,6 +74,7 @@
   <section class="panel" style="margin-top:14px">
     <h2>风险与余额平衡</h2>
     <div id="risk" class="metrics" aria-live="polite"></div>
+    <div id="availabilityChart" class="risk-chart" aria-live="polite"></div>
   </section>
   <section class="panel" style="margin-top:14px">
     <h2>转账历史</h2>
@@ -89,6 +100,7 @@
   <script>
     const accountsEl = document.getElementById('accounts');
     const riskEl = document.getElementById('risk');
+    const availabilityChartEl = document.getElementById('availabilityChart');
     const transferHistoryEl = document.getElementById('transferHistory');
     const positionsEl = document.getElementById('positions');
     const pairsEl = document.getElementById('pairs');
@@ -171,6 +183,42 @@
     function percent(value) {
       const n = Number(value);
       return Number.isFinite(n) ? `${(n * 100).toLocaleString(undefined, { maximumFractionDigits: 4 })}%` : text(value);
+    }
+    function renderAvailabilityChart(aggregate) {
+      availabilityChartEl.replaceChildren();
+      const ratio = Number(aggregate.available_balance_to_total_equity_ratio);
+      const title = document.createElement('div');
+      title.className = 'risk-chart-title';
+      const label = document.createElement('span');
+      label.textContent = '\u4e24\u8d26\u6237\u53ef\u7528\u4fdd\u8bc1\u91d1 / \u603b\u8d44\u4ea7';
+      const value = document.createElement('strong');
+      value.textContent = Number.isFinite(ratio) ? percent(ratio) : '-';
+      title.append(label, value);
+      availabilityChartEl.append(title);
+      if (!Number.isFinite(ratio)) {
+        const note = document.createElement('div');
+        note.className = 'muted';
+        note.textContent = '\u8d26\u6237\u6570\u636e\u4e0d\u5b8c\u6574\uff0c\u6682\u65e0\u6cd5\u8ba1\u7b97';
+        availabilityChartEl.append(note);
+        return;
+      }
+      const bounded = Math.max(0, Math.min(ratio, 1));
+      const tone = ratio < 0.10 ? 'danger' : ratio < 0.25 ? 'warning' : ratio < 0.50 ? 'caution' : 'healthy';
+      const track = document.createElement('div');
+      track.className = 'risk-track';
+      const fill = document.createElement('div');
+      fill.className = `risk-fill ${tone}`;
+      fill.style.width = `${bounded * 100}%`;
+      fill.setAttribute('role', 'progressbar');
+      fill.setAttribute('aria-valuemin', '0');
+      fill.setAttribute('aria-valuemax', '100');
+      fill.setAttribute('aria-valuenow', String(Math.min(ratio * 100, 100)));
+      track.append(fill);
+      availabilityChartEl.append(track);
+      const scale = document.createElement('div');
+      scale.className = 'risk-chart-scale';
+      scale.innerHTML = '<span>0% 危险</span><span>10% 红线</span><span>25% 橙色</span><span>50% 黄色</span><span>100% 绿色</span>';
+      availabilityChartEl.append(scale);
     }
     // Kept for compatibility with the initial metric construction below;
     // the visible metric set is replaced before it is attached to the page.
@@ -364,6 +412,7 @@
       const riskMetricBoxes = riskEl.querySelectorAll('.metric');
       if (riskMetricBoxes[10]) riskMetricBoxes[10].remove();
       riskEl.append(metric('\u4e24\u8d26\u6237\u603b\u8d44\u4ea7\uff08\u8d26\u6237\u6743\u76ca\uff09', aggregate.total_equity));
+      renderAvailabilityChart(aggregate);
       if (data.pair_error) {
         const warning = document.createElement('div');
         warning.className = 'status error';

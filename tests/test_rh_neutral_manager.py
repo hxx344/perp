@@ -110,6 +110,8 @@ def test_snapshot_exposes_available_balance_net_delta():
 
     assert payload["aggregate"]["available_balance_delta"] == "100"
     assert payload["aggregate"]["total_equity"] == "600"
+    assert payload["aggregate"]["total_available_balance"] == "300"
+    assert payload["aggregate"]["available_balance_to_total_equity_ratio"] == "0.5"
 
 
 def test_account_margin_fields_distinguish_coverage_from_usage():
