@@ -170,6 +170,18 @@ equity)`. It is colored red below 10%, orange from 10% to 25%, yellow from
 25% to 50%, and green at or above 50%. This is an operational warning
 indicator, not a protocol liquidation threshold.
 
+## Feishu reports
+
+Set `RH_NEUTRAL_FEISHU_WEBHOOK_URL` to a Feishu incoming-bot webhook to send a
+text summary at startup and every 10 minutes by default. Set
+`RH_NEUTRAL_FEISHU_WEBHOOK_SECRET` when the bot has signature verification
+enabled; the manager generates Feishu's timestamp/signature fields. The
+interval is configurable with `RH_NEUTRAL_FEISHU_REPORT_INTERVAL_SECONDS`.
+Reports contain only operational account data (equity, available balance,
+positions, PnL, transfer state, and the balance delta), never private keys or
+the full environment file. Webhook failures are logged and do not change the
+transfer circuit state.
+
 The exchange does not provide an atomic transaction spanning two accounts.
 "Close both" submits two independent reduce-only IOC orders concurrently and
 reports every leg separately. A partial result must be reviewed before any

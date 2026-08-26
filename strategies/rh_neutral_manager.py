@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextlib
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -34,6 +36,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 import aiohttp
 import dotenv
@@ -397,6 +400,9 @@ class NeutralSettings:
     # blocked for operator reconciliation.
     confirmation_attempts: int = 3
     confirmation_poll_seconds: float = 0.5
+    feishu_webhook_url: str = ""
+    feishu_webhook_secret: str = ""
+    feishu_report_interval_seconds: float = 600.0
     state_path: str = "logs/rh_neutral_manager_state.json"
     # These values are resolved together.  Keeping them on the settings
     # object prevents a read client and a signer from silently using different
@@ -497,6 +503,12 @@ class NeutralSettings:
             raise ValueError("confirmation_poll_seconds must not be negative")
         if not math.isfinite(self.request_timeout_seconds) or self.request_timeout_seconds <= 0:
             raise ValueError("request timeout must be positive")
+        if not math.isfinite(self.feishu_report_interval_seconds) or self.feishu_report_interval_seconds <= 0:
+            raise ValueError("Feishu report interval must be positive")
+        if self.feishu_webhook_url:
+            parsed_feishu_url = urlparse(self.feishu_webhook_url)
+            if parsed_feishu_url.scheme != "https" or not parsed_feishu_url.netloc:
+                raise ValueError("Feishu webhook URL must use HTTPS")
         if self.dashboard_port < 0 or self.dashboard_port > 65535:
             raise ValueError("dashboard_port must be between 0 and 65535")
         if self.dashboard_host not in {"127.0.0.1", "::1"}:
@@ -1674,6 +1686,7 @@ class NeutralPositionManager:
         self._last_refresh_error: Optional[str] = None
         self._transfer_block_reason: Optional[str] = None
         self._transfer_recovery_successes = 0
+        self._next_feishu_report_at = 0.0
         self._pending_unknown_records: List[Dict[str, Any]] = []
         self._pending_tasks: Dict[str, asyncio.Future[Any]] = {}
         self._load_state()
@@ -3106,6 +3119,119 @@ class NeutralPositionManager:
             "updated_at": time.time(),
         })
 
+    @staticmethod
+    def _feishu_value(value: Any, *, digits: int = 6) -> str:
+        if value is None or value == "":
+            return "-"
+        try:
+            number = Decimal(str(value))
+            if number.is_finite():
+                return f"{number:.{digits}f}".rstrip("0").rstrip(".") or "0"
+        except (InvalidOperation, TypeError, ValueError):
+            pass
+        return str(value)
+
+    def _feishu_report_text(self) -> str:
+        """Build a compact, non-secret account summary for the Feishu bot."""
+
+        payload = self.snapshot_payload()
+        aggregate = payload.get("aggregate") if isinstance(payload.get("aggregate"), Mapping) else {}
+        health = payload.get("transfer_health") if isinstance(payload.get("transfer_health"), Mapping) else {}
+        lines = [
+            "Lighter Robinhood 中性账户报告",
+            time.strftime("时间: %Y-%m-%d %H:%M:%S %Z", time.localtime()),
+            f"服务状态: {payload.get('state', '-')} | 转账状态: {payload.get('transfer_state', '-')} | "
+            f"转账允许: {'是' if payload.get('transfer_allowed') else '否'}",
+            f"两账户总权益: {self._feishu_value(aggregate.get('total_equity'))} USDG | "
+            f"可用保证金总额: {self._feishu_value(aggregate.get('total_available_balance'))} USDG",
+            f"可用保证金差值(主-子): {self._feishu_value(aggregate.get('available_balance_delta'))} USDG | "
+            f"恢复进度: {health.get('recovery_successes', 0)}/{health.get('recovery_required', 0)}",
+        ]
+        for name, label in (("main", "主账户"), ("sub", "子账户")):
+            account = payload.get("accounts", {}).get(name, {}) if isinstance(payload.get("accounts"), Mapping) else {}
+            lines.append(
+                f"{label}: 权益 {self._feishu_value(account.get('equity'))} | "
+                f"可用 {self._feishu_value(account.get('available_balance'))} | "
+                f"维持保证金 {self._feishu_value(account.get('maintenance_margin_requirement'))}"
+            )
+            positions = account.get("positions") if isinstance(account.get("positions"), list) else []
+            position_by_symbol = {
+                str(position.get("symbol", "")).upper(): position
+                for position in positions
+                if isinstance(position, Mapping)
+            }
+            for symbol in ("SPY", "QQQ"):
+                position = position_by_symbol.get(symbol, {})
+                lines.append(
+                    f"  {symbol}: 仓位 {self._feishu_value(position.get('signed_size'))} | "
+                    f"名义 {self._feishu_value(position.get('position_value'))} | "
+                    f"未实现盈亏 {self._feishu_value(position.get('unrealized_pnl'))}"
+                )
+        if health.get("reason"):
+            lines.append(f"转账限制原因: {health['reason']}")
+        plan = payload.get("transfer_plan")
+        if isinstance(plan, Mapping):
+            lines.append(
+                f"当前转账计划: {plan.get('source', '-')} -> {plan.get('destination', '-')} "
+                f"{self._feishu_value(plan.get('amount'))} USDG"
+            )
+        return "\n".join(lines)
+
+    async def _send_feishu_report(self) -> bool:
+        """Send one report; notification errors never alter trading state."""
+
+        webhook_url = self.settings.feishu_webhook_url.strip()
+        if not webhook_url:
+            return False
+        if self._session is None:
+            LOGGER.warning("Feishu report skipped because HTTP session is not ready")
+            return False
+        body: Dict[str, Any] = {
+            "msg_type": "text",
+            "content": {"text": self._feishu_report_text()},
+        }
+        if self.settings.feishu_webhook_secret:
+            timestamp = str(int(time.time()))
+            sign_source = f"{timestamp}\n{self.settings.feishu_webhook_secret}".encode("utf-8")
+            digest = hmac.new(
+                self.settings.feishu_webhook_secret.encode("utf-8"), sign_source, hashlib.sha256
+            ).digest()
+            body.update({"timestamp": timestamp, "sign": base64.b64encode(digest).decode("ascii")})
+        timeout = aiohttp.ClientTimeout(total=min(self.settings.request_timeout_seconds, 15.0))
+        try:
+            async with self._session.post(webhook_url, json=body, timeout=timeout) as response:
+                response_text = await response.text()
+                if response.status != 200:
+                    raise RuntimeError(f"HTTP {response.status}: {response_text[:300]}")
+                try:
+                    response_payload = json.loads(response_text) if response_text else {}
+                except json.JSONDecodeError:
+                    response_payload = {}
+                if isinstance(response_payload, Mapping):
+                    response_code = response_payload.get("code")
+                    if response_code not in (None, 0, "0", 200, "200"):
+                        raise RuntimeError(
+                            f"Feishu returned code {response_code}: {response_payload.get('msg', '')}"
+                        )
+            LOGGER.info("Feishu neutral account report sent")
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.warning("Feishu neutral account report failed: %s", exc)
+            return False
+
+    async def _maybe_send_feishu_report(self) -> None:
+        if not self.settings.feishu_webhook_url:
+            return
+        now = time.monotonic()
+        if now < self._next_feishu_report_at:
+            return
+        # Reserve the next slot before awaiting network I/O. A failed webhook
+        # must not be retried every five-second account polling cycle.
+        self._next_feishu_report_at = now + self.settings.feishu_report_interval_seconds
+        await self._send_feishu_report()
+
     async def run(self) -> None:
         if not self.gateways:
             await self.start()
@@ -3125,6 +3251,7 @@ class NeutralPositionManager:
                 )
                 if plan and self.settings.auto_transfer and self.settings.live and transfer_allowed:
                     await self.execute_transfer(plan)
+                await self._maybe_send_feishu_report()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # monitor remains alive and dashboard reports stale state
@@ -3239,6 +3366,9 @@ def settings_from_env(env_file: Optional[str] = None) -> NeutralSettings:
         action_timeout_seconds=float(get("RH_NEUTRAL_ACTION_TIMEOUT_SECONDS", "20")),
         confirmation_attempts=_env_int("RH_NEUTRAL_CONFIRMATION_ATTEMPTS", 3, effective_env),
         confirmation_poll_seconds=float(get("RH_NEUTRAL_CONFIRMATION_POLL_SECONDS", "0.5")),
+        feishu_webhook_url=str(get("RH_NEUTRAL_FEISHU_WEBHOOK_URL", "") or "").strip(),
+        feishu_webhook_secret=str(get("RH_NEUTRAL_FEISHU_WEBHOOK_SECRET", "") or "").strip(),
+        feishu_report_interval_seconds=float(get("RH_NEUTRAL_FEISHU_REPORT_INTERVAL_SECONDS", "600")),
         state_path=str(get("RH_NEUTRAL_STATE_PATH", "logs/rh_neutral_manager_state.json")),
         rest_url=profile.rest_url,
         ws_url=profile.ws_url,
@@ -3274,6 +3404,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notional-tolerance", dest="neutral_notional_tolerance", type=Decimal)
     parser.add_argument("--confirmation-attempts", type=int)
     parser.add_argument("--confirmation-poll-seconds", type=float)
+    parser.add_argument("--feishu-webhook-url")
+    parser.add_argument("--feishu-webhook-secret")
+    parser.add_argument("--feishu-report-interval-seconds", type=float)
     return parser
 
 
@@ -3349,6 +3482,12 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
         settings.confirmation_attempts = args.confirmation_attempts
     if args.confirmation_poll_seconds is not None:
         settings.confirmation_poll_seconds = args.confirmation_poll_seconds
+    if args.feishu_webhook_url is not None:
+        settings.feishu_webhook_url = args.feishu_webhook_url.strip()
+    if args.feishu_webhook_secret is not None:
+        settings.feishu_webhook_secret = args.feishu_webhook_secret.strip()
+    if args.feishu_report_interval_seconds is not None:
+        settings.feishu_report_interval_seconds = args.feishu_report_interval_seconds
     settings.validate(require_market_ids=False)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:

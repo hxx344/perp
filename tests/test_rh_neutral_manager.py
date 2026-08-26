@@ -129,6 +129,74 @@ def test_account_margin_fields_distinguish_coverage_from_usage():
     assert payload["initial_margin_usage_ratio"] == "0.4"
 
 
+def test_feishu_report_contains_account_summary_without_credentials():
+    settings = _settings()
+    settings.feishu_webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/test"
+    manager = NeutralPositionManager(settings)
+    manager.snapshots = {
+        "main": _account("main", 100, 20, 80),
+        "sub": _account("sub", 90, 18, 70),
+    }
+
+    report = manager._feishu_report_text()
+
+    assert "Lighter Robinhood" in report
+    assert "主账户" in report
+    assert "子账户" in report
+    assert "可用保证金差值" in report
+    assert "private" not in report.casefold()
+
+
+@pytest.mark.asyncio
+async def test_feishu_report_posts_signed_payload_and_handles_http_failure():
+    settings = _settings()
+    settings.feishu_webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/test"
+    settings.feishu_webhook_secret = "test-secret"
+    manager = NeutralPositionManager(settings)
+    manager.snapshots = {
+        "main": _account("main", 100, 20, 80),
+        "sub": _account("sub", 90, 18, 70),
+    }
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def text(self):
+            return '{"code":0,"msg":"success"}'
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return FakeResponse()
+
+    session = FakeSession()
+    manager._session = session
+
+    assert await manager._send_feishu_report() is True
+    assert session.calls[0][0] == settings.feishu_webhook_url
+    body = session.calls[0][1]["json"]
+    assert body["msg_type"] == "text"
+    assert len(body["timestamp"]) == 10
+    assert len(body["sign"]) > 10
+    assert "主账户" in body["content"]["text"]
+
+    class FailedSession(FakeSession):
+        def post(self, url, **kwargs):
+            raise RuntimeError("webhook unavailable")
+
+    manager._session = FailedSession()
+    assert await manager._send_feishu_report() is False
+
+
 def test_live_transfer_health_blocks_stale_account_snapshots_and_exposes_reason():
     settings = _settings(live=True)
     settings.transfer_snapshot_max_age_seconds = 1

@@ -59,6 +59,13 @@ RH_NEUTRAL_ACTION_TIMEOUT_SECONDS=20
 RH_NEUTRAL_CONFIRMATION_ATTEMPTS=3
 RH_NEUTRAL_CONFIRMATION_POLL_SECONDS=0.5
 
+# Optional Feishu incoming webhook. Leave URL empty to disable reports.
+# Reports include account/equity/available balance/positions/transfer state,
+# never private keys. HTTPS is required; secret enables Feishu signature auth.
+RH_NEUTRAL_FEISHU_WEBHOOK_URL=
+RH_NEUTRAL_FEISHU_WEBHOOK_SECRET=
+RH_NEUTRAL_FEISHU_REPORT_INTERVAL_SECONDS=600
+
 # Safe defaults: read-only monitor, no automatic transfer, loopback dashboard.
 RH_NEUTRAL_LIVE=false
 RH_NEUTRAL_AUTO_TRANSFER=false
