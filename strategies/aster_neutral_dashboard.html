@@ -58,6 +58,7 @@
     const number = value => { const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : (value ?? '-'); };
     const price = value => { const n = Number(value); return Number.isFinite(n) && n > 0 ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : '未返回'; };
     const percent = value => { const n = Number(value); return Number.isFinite(n) ? `${(n * 100).toLocaleString(undefined, { maximumFractionDigits: 4 })}%` : '-'; };
+    const modeText = data => data && (data.monitor_only === true || data.live === false) ? '只读监控' : data && data.live === true ? '自动转账模式' : '未知';
     const metric = (label, value) => { const box = document.createElement('div'); box.className = 'metric'; box.innerHTML = `<span class="muted"></span><b></b>`; box.querySelector('span').textContent = label; box.querySelector('b').textContent = number(value); return box; };
     function renderTransferHistory(history) {
       transferEl.className = 'history-box';
@@ -119,6 +120,8 @@
       }
       const aggregate = data.aggregate || {}; const health = data.transfer_health || {};
       riskEl.replaceChildren(metric('两账户总权益', aggregate.total_equity), metric('两账户可用保证金总额', aggregate.total_available_balance), metric('可用保证金差值（主-子）', aggregate.available_balance_delta), metric('飞书告警阈值', data.alert_threshold), metric('运行模式', data.monitor_only ? '只读监控' : '未知'));
+      const modeValues = riskEl.querySelectorAll('b');
+      if (modeValues[4]) modeValues[4].textContent = modeText(data);
       chartEl.replaceChildren(); const ratio = Number(aggregate.available_balance_to_total_equity_ratio); const heading = document.createElement('div'); heading.innerHTML = '<span class="muted">两账户可用保证金 / 总权益</span> <b></b>'; heading.querySelector('b').textContent = percent(ratio); chartEl.append(heading);
       if (Number.isFinite(ratio)) { const track = document.createElement('div'); track.className = 'risk-track'; const fill = document.createElement('div'); fill.className = `risk-fill ${ratio < .1 ? 'danger' : ratio < .25 ? 'warning' : ratio < .5 ? 'caution' : 'healthy'}`; fill.style.width = `${Math.max(0, Math.min(ratio, 1)) * 100}%`; track.append(fill); chartEl.append(track); } else { const note = document.createElement('div'); note.className = 'muted'; note.textContent = '账户数据不完整，暂无法计算'; chartEl.append(note); }
       transferEl.textContent = Array.isArray(data.transfer_history) && data.transfer_history.length ? JSON.stringify(data.transfer_history, null, 2) : '暂无转账';

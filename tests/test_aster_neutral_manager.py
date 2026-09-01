@@ -62,6 +62,20 @@ def test_aster_transfer_plan_uses_available_balance_and_withdrawable_cap():
     assert plan.amount == Decimal("15")
 
 
+def test_aster_snapshot_returns_transfer_history_newest_first():
+    settings = _settings()
+    manager = AsterNeutralManager(settings)
+    manager.transfer_history = [
+        {"timestamp": 100, "plan": {"amount": "10"}},
+        {"timestamp": 200, "plan": {"amount": "20"}},
+        {"timestamp": 300, "plan": {"amount": "30"}},
+    ]
+
+    history = manager.snapshot_payload()["transfer_history"]
+
+    assert [item["timestamp"] for item in history] == [300, 200, 100]
+
+
 def test_aster_transfer_plan_supports_reverse_direction():
     plan = build_transfer_plan(_snapshot("main", 100, 100), _snapshot("sub", 200, 30), _settings())
 
@@ -322,3 +336,39 @@ async def test_aster_live_snapshot_rejects_missing_account_capability_fields():
     client.request = request  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="canTrade/canWithdraw"):
         await client.fetch_snapshot()
+
+
+@pytest.mark.asyncio
+async def test_aster_position_risk_fallback_fills_missing_notional_and_liquidation_price():
+    settings = _settings()
+    client = AsterAccountClient(settings.main, settings, session=None)  # type: ignore[arg-type]
+
+    async def request(_method, path, _params=None):
+        if path.endswith("positionRisk"):
+            return [{
+                "symbol": "XAUUSD1",
+                "positionAmt": "-2",
+                "markPrice": "110",
+                "entryPrice": "100",
+                "liquidationPrice": "150",
+                "unRealizedProfit": "-20",
+                "leverage": "10",
+            }]
+        return {
+            "accountAlias": "sub",
+            "availableBalance": "80",
+            "maxWithdrawAmount": "70",
+            "totalWalletBalance": "100",
+            "totalUnrealizedProfit": "-20",
+            "totalMarginBalance": "80",
+            "totalInitialMargin": "20",
+            "totalMaintMargin": "12",
+            "positions": [{"symbol": "XAUUSD1", "positionAmt": "-2"}],
+        }
+
+    client.request = request  # type: ignore[method-assign]
+    snapshot = await client.fetch_snapshot()
+
+    assert snapshot.position is not None
+    assert snapshot.position.position_value == Decimal("220")
+    assert snapshot.position.liquidation_price == Decimal("150")

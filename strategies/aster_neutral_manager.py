@@ -526,6 +526,24 @@ class AsterAccountClient:
             raise RuntimeError("Aster account response omitted canTrade/canWithdraw safety fields")
         positions = payload.get("positions") if isinstance(payload.get("positions"), list) else []
         matching = [item for item in positions if isinstance(item, Mapping) and str(item.get("symbol", "")).upper() == self.settings.symbol]
+        # Some account wrappers omit mark/notional/liquidation fields. Query
+        # the authoritative position-risk endpoint only in that case; this
+        # avoids a second request during normal polling while fixing zeroed
+        # display fields for affected accounts.
+        if matching and any(
+            _required_decimal(_first(item, "markPrice", "mark_price", "mark", default=0), "markPrice") <= 0
+            or (_decimal(_first(item, "notional", "positionValue", "position_value"), None) or Decimal("0")) <= 0
+            or _required_decimal(_first(item, "liquidationPrice", "liquidation_price", "liqPrice", default=0), "liquidation price") <= 0
+            for item in matching
+        ):
+            try:
+                risk_payload = await self.request("GET", "/fapi/v3/positionRisk", {"symbol": self.settings.symbol})
+                risk_rows = risk_payload if isinstance(risk_payload, list) else risk_payload.get("positions", []) if isinstance(risk_payload, Mapping) else []
+                risk_matching = [item for item in risk_rows if isinstance(item, Mapping) and str(item.get("symbol", "")).upper() == self.settings.symbol]
+                if risk_matching:
+                    matching = risk_matching
+            except Exception as exc:
+                LOGGER.warning("Aster positionRisk fallback failed for %s: %s", self.spec.name, exc)
         if len(matching) > 1:
             # Hedge mode can expose LONG and SHORT rows; aggregate them rather
             # than silently selecting one side.
@@ -539,7 +557,11 @@ class AsterAccountClient:
             item = next((candidate for candidate in raw_values if _required_decimal(_first(candidate, "markPrice", "mark_price", "mark", default=0), "markPrice") > 0), raw_values[0])
             mark = _required_decimal(_first(item, "markPrice", "mark_price", "mark", default=0), "markPrice")
             entry = _required_decimal(_first(item, "entryPrice", "entry_price", "avgPrice", default=0), "entryPrice")
-            direct_notional = _decimal(_first(item, "notional", "positionValue", "position_value"), None)
+            direct_notionals = [
+                abs(value) for value in (_decimal(_first(candidate, "notional", "positionValue", "position_value"), None) for candidate in raw_values)
+                if value is not None and value > 0
+            ]
+            direct_notional = sum(direct_notionals, Decimal("0")) if direct_notionals else None
             notional = abs(direct_notional) if direct_notional is not None and direct_notional > 0 else abs(raw_size * mark)
             position = AsterPositionSnapshot(
                 symbol=self.settings.symbol,
@@ -548,15 +570,18 @@ class AsterAccountClient:
                 entry_price=entry,
                 mark_price=mark,
                 unrealized_pnl=sum((_required_decimal(_first(candidate, "unRealizedProfit", "unrealizedProfit", "unrealized_pnl", default=0), "position PnL") for candidate in raw_values), Decimal("0")),
-                liquidation_price=_required_decimal(_first(item, "liquidationPrice", "liquidation_price", "liqPrice", default=0), "liquidation price"),
+                liquidation_price=next((value for value in (
+                    _required_decimal(_first(candidate, "liquidationPrice", "liquidation_price", "liqPrice", default=0), "liquidation price")
+                    for candidate in raw_values
+                ) if value > 0), Decimal("0")),
                 leverage=_required_decimal(_first(item, "leverage", "initialLeverage", default=0), "leverage"),
                 isolated=str(_first(item, "marginType", "margin_type", default="")).casefold() == "isolated" or _as_bool(_first(item, "isolated", default=False), False),
             )
             # For non-USDT settlement assets, the account-level totals may be
             # omitted or zero in older API wrappers. Prefer target-position
             # requirements when they are present.
-            position_initial = sum((_decimal(item.get("initialMargin"), Decimal("0")) or Decimal("0") for item in raw_values), Decimal("0"))
-            position_maintenance = sum((_decimal(item.get("maintMargin"), Decimal("0")) or Decimal("0") for item in raw_values), Decimal("0"))
+            position_initial = sum((_decimal(_first(item, "initialMargin", "positionInitialMargin", "initial_margin"), Decimal("0")) or Decimal("0") for item in raw_values), Decimal("0"))
+            position_maintenance = sum((_decimal(_first(item, "maintMargin", "maintenanceMargin", "maintenance_margin"), Decimal("0")) or Decimal("0") for item in raw_values), Decimal("0"))
             if position_initial > 0:
                 initial = position_initial
             if position_maintenance > 0:
@@ -897,7 +922,7 @@ class AsterNeutralManager:
             },
             "transfer_plan": self.last_plan.as_payload() if self.last_plan else None,
             "last_transfer": self.last_transfer,
-            "transfer_history": self.transfer_history[-20:],
+            "transfer_history": list(reversed(self.transfer_history[-20:])),
             "pending_transfer": self._pending_transfer,
             "updated_at": time.time(),
         })
