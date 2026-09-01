@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aster XAUUSD1 中性账户监控</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101317; color: #e8edf2; }
+    body { margin: 0 auto; padding: 22px; max-width: 1100px; }
+    h1 { margin: 0 0 6px; font-size: 1.45rem; }
+    h2 { font-size: 1rem; margin: 0 0 10px; }
+    .muted { color: #9aa6b2; font-size: .88rem; }
+    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 18px 0; }
+    button { border: 1px solid #3b4754; border-radius: 6px; background: #1c2630; color: #edf3f8; padding: 8px 12px; cursor: pointer; }
+    button:hover { background: #273544; }
+    button:disabled { opacity: .5; cursor: wait; }
+    .panel { border: 1px solid #2d3945; border-radius: 8px; padding: 14px; background: #151c23; margin-top: 14px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+    .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .metric { background: #11181f; border-radius: 5px; padding: 8px; }
+    .metric b { display: block; margin-top: 3px; overflow-wrap: anywhere; }
+    .status { min-height: 1.3em; color: #9aa6b2; }
+    .status.error { color: #ff9b9b; }
+    .status.ok { color: #86e1ab; }
+    .risk-chart { margin-top: 12px; padding: 10px; border: 1px solid #2d3945; border-radius: 6px; background: #11181f; }
+    .risk-track { height: 16px; margin-top: 10px; overflow: hidden; border-radius: 999px; background: #2b2024; }
+    .risk-fill { height: 100%; transition: width .25s ease, background-color .25s ease; }
+    .danger { background: #d94b4b; } .warning { background: #e0833c; } .caution { background: #d5b243; } .healthy { background: #4caf78; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; border-bottom: 1px solid #29333d; padding: 8px 5px; }
+    th { color: #9aa6b2; font-size: .8rem; }
+  </style>
+</head>
+<body>
+  <h1>Aster XAUUSD1 中性账户监控</h1>
+  <div class="muted">主账户多头，子账户空头；转账按官方可转出余额和账户状态执行。</div>
+  <div class="toolbar">
+    <button id="refresh" type="button">刷新</button>
+    <span id="status" class="status" role="status"></span>
+  </div>
+  <section class="panel"><h2>账户状态</h2><div id="accounts" class="grid"></div></section>
+  <section class="panel"><h2>风险与资金平衡</h2><div id="risk" class="metrics"></div><div id="chart" class="risk-chart"></div></section>
+  <section class="panel"><h2>转账历史</h2><pre id="transfer" class="muted">暂无转账</pre></section>
+  <script>
+    const accountsEl = document.getElementById('accounts');
+    const riskEl = document.getElementById('risk');
+    const chartEl = document.getElementById('chart');
+    const transferEl = document.getElementById('transfer');
+    const statusEl = document.getElementById('status');
+    const requestId = () => (window.crypto && typeof window.crypto.randomUUID === 'function') ? window.crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const number = value => { const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : (value ?? '-'); };
+    const percent = value => { const n = Number(value); return Number.isFinite(n) ? `${(n * 100).toLocaleString(undefined, { maximumFractionDigits: 4 })}%` : '-'; };
+    const metric = (label, value) => { const box = document.createElement('div'); box.className = 'metric'; box.innerHTML = `<span class="muted"></span><b></b>`; box.querySelector('span').textContent = label; box.querySelector('b').textContent = number(value); return box; };
+    async function load() {
+      try {
+        const response = await fetch('/api/snapshot', { cache: 'no-store' });
+        const data = await response.json();
+        render(data);
+        statusEl.textContent = `最近更新: ${new Date().toLocaleTimeString()}`;
+        statusEl.className = 'status ok';
+      } catch (error) { statusEl.textContent = `读取失败: ${error.message || error}`; statusEl.className = 'status error'; }
+    }
+    function render(data) {
+      accountsEl.replaceChildren();
+      for (const name of ['main', 'sub']) {
+        const account = (data.accounts || {})[name] || {};
+        const panel = document.createElement('article'); panel.className = 'panel';
+        const title = document.createElement('h2'); title.textContent = name === 'main' ? '主账户' : '子账户'; panel.append(title);
+        const metrics = document.createElement('div'); metrics.className = 'metrics';
+        metrics.append(metric('账户别名', account.account_alias), metric('可用保证金', account.available_balance), metric('官方可转出余额', account.max_withdraw_amount), metric('账户权益', account.equity), metric('维持保证金', account.maintenance_margin), metric('维持保证金占权益', percent(account.maintenance_usage_ratio)), metric('XAUUSD1 仓位', account.position && account.position.signed_size), metric('XAUUSD1 名义价值', account.position && account.position.position_value), metric('未实现盈亏', account.position && account.position.unrealized_pnl), metric('强平价格', account.position && account.position.liquidation_price));
+        panel.append(metrics);
+        if (account.error) { const error = document.createElement('div'); error.className = 'status error'; error.textContent = `读取失败: ${account.error}`; panel.append(error); }
+        accountsEl.append(panel);
+      }
+      const aggregate = data.aggregate || {}; const health = data.transfer_health || {};
+      riskEl.replaceChildren(metric('两账户总权益', aggregate.total_equity), metric('两账户可用保证金总额', aggregate.total_available_balance), metric('可用保证金差值（主-子）', aggregate.available_balance_delta), metric('飞书告警阈值', data.alert_threshold), metric('运行模式', data.monitor_only ? '只读监控' : '未知'));
+      chartEl.replaceChildren(); const ratio = Number(aggregate.available_balance_to_total_equity_ratio); const heading = document.createElement('div'); heading.innerHTML = '<span class="muted">两账户可用保证金 / 总权益</span> <b></b>'; heading.querySelector('b').textContent = percent(ratio); chartEl.append(heading);
+      if (Number.isFinite(ratio)) { const track = document.createElement('div'); track.className = 'risk-track'; const fill = document.createElement('div'); fill.className = `risk-fill ${ratio < .1 ? 'danger' : ratio < .25 ? 'warning' : ratio < .5 ? 'caution' : 'healthy'}`; fill.style.width = `${Math.max(0, Math.min(ratio, 1)) * 100}%`; track.append(fill); chartEl.append(track); } else { const note = document.createElement('div'); note.className = 'muted'; note.textContent = '账户数据不完整，暂无法计算'; chartEl.append(note); }
+      transferEl.textContent = Array.isArray(data.transfer_history) && data.transfer_history.length ? JSON.stringify(data.transfer_history, null, 2) : '暂无转账';
+      if (health.reason) { const note = document.createElement('div'); note.className = 'status error'; note.textContent = `转账限制原因: ${health.reason}`; riskEl.append(note); }
+    }
+    document.getElementById('refresh').addEventListener('click', load);
+    load(); window.setInterval(load, 5000);
+  </script>
+</body>
+</html>

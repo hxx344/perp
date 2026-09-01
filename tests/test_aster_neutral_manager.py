@@ -1,0 +1,237 @@
+from decimal import Decimal
+
+import pytest
+
+from strategies.aster_neutral_manager import (
+    AsterAccountClient,
+    AsterAccountSnapshot,
+    AsterAccountSpec,
+    AsterNeutralManager,
+    AsterNeutralSettings,
+    AsterPositionSnapshot,
+    build_transfer_plan,
+)
+from strategies.aster_neutral_manager import _AsterInstanceLock
+
+
+def _settings(*, live=False):
+    return AsterNeutralSettings(
+        main=AsterAccountSpec("main", "main-key", "main-secret", "0x" + "1" * 40),
+        sub=AsterAccountSpec("sub", "sub-key", "sub-secret", "0x" + "2" * 40),
+        live=live,
+    )
+
+
+def _snapshot(name, available, withdrawable):
+    return AsterAccountSnapshot(
+        name=name,
+        account_alias=name,
+        available_balance=Decimal(str(available)),
+        max_withdraw_amount=Decimal(str(withdrawable)),
+        wallet_balance=Decimal("100"),
+        equity=Decimal("100"),
+        unrealized_pnl=Decimal("0"),
+        initial_margin=Decimal("10"),
+        maintenance_margin=Decimal("5"),
+        can_trade=True,
+        can_withdraw=True,
+        position=AsterPositionSnapshot(
+            symbol="XAUUSD1",
+            signed_size=Decimal("1") if name == "main" else Decimal("-1"),
+            position_value=Decimal("100"),
+            entry_price=Decimal("100"),
+            mark_price=Decimal("100"),
+            unrealized_pnl=Decimal("0"),
+            liquidation_price=Decimal("50"),
+            leverage=Decimal("10"),
+            isolated=False,
+        ),
+        observed_at=1.0,
+    )
+
+
+def test_aster_transfer_plan_uses_available_balance_and_withdrawable_cap():
+    plan = build_transfer_plan(_snapshot("main", 200, 15), _snapshot("sub", 100, 100), _settings())
+
+    assert plan is not None
+    assert plan.source == "main"
+    assert plan.destination == "sub"
+    # Half of the 100 USD difference is 50, capped by Aster's official
+    # maxWithdrawAmount of the source account.
+    assert plan.amount == Decimal("15")
+
+
+def test_aster_transfer_plan_supports_reverse_direction():
+    plan = build_transfer_plan(_snapshot("main", 100, 100), _snapshot("sub", 200, 30), _settings())
+
+    assert plan is not None
+    assert (plan.source, plan.destination) == ("sub", "main")
+    assert plan.amount == Decimal("30")
+
+
+def test_aster_transfer_plan_requires_opposite_xau_position_signs():
+    main = _snapshot("main", 200, 100)
+    sub = _snapshot("sub", 100, 100)
+    sub.position.signed_size = Decimal("1")
+
+    assert build_transfer_plan(main, sub, _settings()) is None
+
+
+def test_aster_settings_reject_live_transfers_without_wallet_signer():
+    settings = _settings(live=True)
+    settings.wallet_address = ""
+    with pytest.raises(ValueError, match="master wallet address"):
+        settings.validate()
+
+
+def test_aster_settings_rejects_malformed_live_wallet_credentials():
+    settings = _settings(live=True)
+    settings.wallet_address = "0xnot-an-address"
+    settings.wallet_private_key = "deadbeef"
+    with pytest.raises(ValueError, match="wallet address"):
+        settings.validate()
+
+
+def test_aster_settings_accepts_approved_agent_signer_without_master_key():
+    settings = _settings(live=True)
+    settings.wallet_address = "0x" + "1" * 40
+    settings.transfer_signer_address = "0x" + "3" * 40
+    settings.transfer_signer_private_key = "4" * 64
+
+    settings.validate()
+
+
+def test_aster_settings_rejects_insecure_feishu_webhook():
+    settings = _settings()
+    settings.feishu_webhook_url = "http://example.test/hook"
+    with pytest.raises(ValueError, match="HTTPS"):
+        settings.validate()
+
+
+@pytest.mark.asyncio
+async def test_aster_feishu_alert_is_gated_by_balance_delta_threshold():
+    settings = _settings()
+    settings.feishu_webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/test"
+    settings.alert_threshold = Decimal("50")
+    manager = AsterNeutralManager(settings)
+    manager.snapshots = {"main": _snapshot("main", 120, 100), "sub": _snapshot("sub", 100, 100)}
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def post(self, *args, **kwargs):
+            self.calls += 1
+            raise AssertionError("Feishu must not be called below threshold")
+
+    session = FakeSession()
+    manager._session = session
+    await manager._maybe_feishu()
+    assert session.calls == 0
+
+
+def test_aster_hmac_params_have_signature_without_leaking_secret():
+    settings = _settings()
+    client = AsterAccountClient(settings.main, settings, session=None)  # type: ignore[arg-type]
+    params = client._signed_params({"symbol": "XAUUSD1"})
+
+    assert params["symbol"] == "XAUUSD1"
+    assert len(params["signature"]) == 64
+    assert settings.main.api_secret not in str(params)
+
+
+def test_aster_instance_lock_blocks_duplicate_manager(tmp_path):
+    path = tmp_path / "aster-neutral.lock"
+    first = _AsterInstanceLock(path)
+    second = _AsterInstanceLock(path)
+    first.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="another Aster neutral manager"):
+            second.acquire()
+    finally:
+        first.release()
+    second.acquire()
+    second.release()
+
+
+@pytest.mark.asyncio
+async def test_aster_account_snapshot_parses_v4_balance_and_position():
+    settings = _settings()
+    client = AsterAccountClient(settings.main, settings, session=None)  # type: ignore[arg-type]
+
+    async def request(_method, _path, _params=None):
+        return {
+            "accountAlias": "main",
+            "availableBalance": "80",
+            "maxWithdrawAmount": "70",
+            "totalWalletBalance": "100",
+            "totalUnrealizedProfit": "5",
+            "totalMarginBalance": "105",
+            "totalInitialMargin": "20",
+            "totalMaintMargin": "12",
+            "canTrade": "true",
+            "canWithdraw": True,
+            "assets": [{
+                "asset": "USD1",
+                "availableBalance": "80",
+                "maxWithdrawAmount": "70",
+                "walletBalance": "100",
+                "unrealizedProfit": "5",
+                "marginBalance": "105",
+                "initialMargin": "20",
+                "maintMargin": "12",
+            }],
+            "positions": [{
+                "symbol": "XAUUSD1",
+                "positionAmt": "3",
+                "entryPrice": "100",
+                "markPrice": "101",
+                "unRealizedProfit": "3",
+                "liquidationPrice": "80",
+                "leverage": "10",
+                "marginType": "crossed",
+            }],
+        }
+
+    client.request = request  # type: ignore[method-assign]
+    snapshot = await client.fetch_snapshot()
+
+    assert snapshot.available_balance == Decimal("80")
+    assert snapshot.max_withdraw_amount == Decimal("70")
+    assert snapshot.equity == Decimal("105")
+    assert snapshot.position is not None
+    assert snapshot.position.signed_size == Decimal("3")
+    assert snapshot.position.position_value == Decimal("303")
+
+
+@pytest.mark.asyncio
+async def test_aster_live_snapshot_rejects_missing_account_capability_fields():
+    settings = _settings(live=True)
+    client = AsterAccountClient(settings.main, settings, session=None)  # type: ignore[arg-type]
+
+    async def request(_method, _path, _params=None):
+        return {
+            "accountAlias": "main",
+            "availableBalance": "80",
+            "maxWithdrawAmount": "70",
+            "totalWalletBalance": "100",
+            "totalUnrealizedProfit": "0",
+            "totalMarginBalance": "100",
+            "totalInitialMargin": "20",
+            "totalMaintMargin": "12",
+            "assets": [{
+                "asset": "USD1",
+                "availableBalance": "80",
+                "maxWithdrawAmount": "70",
+                "walletBalance": "100",
+                "unrealizedProfit": "0",
+                "marginBalance": "100",
+                "initialMargin": "20",
+                "maintMargin": "12",
+            }],
+            "positions": [],
+        }
+
+    client.request = request  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="canTrade/canWithdraw"):
+        await client.fetch_snapshot()

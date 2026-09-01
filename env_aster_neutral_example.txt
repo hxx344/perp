@@ -1,0 +1,47 @@
+# Aster two-account XAUUSD1 neutral monitor.
+# This file is a template only. Keep the real file outside git with chmod 600.
+
+ASTER_NEUTRAL_MAIN_API_KEY=
+ASTER_NEUTRAL_MAIN_API_SECRET=
+ASTER_NEUTRAL_SUB_API_KEY=
+ASTER_NEUTRAL_SUB_API_SECRET=
+
+# Exact Aster futures symbol; verify it in exchangeInfo before live mode.
+ASTER_NEUTRAL_SYMBOL=XAUUSD1
+# XAUUSD1 currently settles in USD1; verify against exchangeInfo if the symbol changes.
+ASTER_NEUTRAL_ASSET=USD1
+ASTER_NEUTRAL_REST_URL=https://fapi.asterdex.com
+ASTER_NEUTRAL_POLL_SECONDS=5
+ASTER_NEUTRAL_SNAPSHOT_MAX_AGE_SECONDS=15
+ASTER_NEUTRAL_RECOVERY_SUCCESSES=3
+
+# Balance equalization uses availableBalance for the difference and caps the
+# source by Aster maxWithdrawAmount. Leave the defaults conservative.
+ASTER_NEUTRAL_TRANSFER_HYSTERESIS=10
+ASTER_NEUTRAL_MIN_TRANSFER=1
+ASTER_NEUTRAL_MAX_TRANSFER=1000
+ASTER_NEUTRAL_TRANSFER_COOLDOWN_SECONDS=30
+
+# Safe defaults: read-only monitor and no automatic transfer.
+ASTER_NEUTRAL_LIVE=false
+ASTER_NEUTRAL_AUTO_TRANSFER=false
+ASTER_NEUTRAL_ALERT_THRESHOLD=100
+
+# This monitor never transfers and therefore does not require wallet private
+# keys or transfer signer credentials.
+
+# Dashboard defaults to loopback. Configure a token for write actions.
+ASTER_NEUTRAL_DASHBOARD_HOST=127.0.0.1
+ASTER_NEUTRAL_DASHBOARD_PORT=8791
+ASTER_NEUTRAL_DASHBOARD_USERNAME=operator
+ASTER_NEUTRAL_DASHBOARD_TOKEN=
+ASTER_NEUTRAL_DASHBOARD_ALLOW_PUBLIC=false
+
+# Optional Feishu incoming webhook; 600 seconds = 10 minutes.
+ASTER_NEUTRAL_FEISHU_WEBHOOK_URL=
+ASTER_NEUTRAL_FEISHU_WEBHOOK_SECRET=
+ASTER_NEUTRAL_FEISHU_INTERVAL_SECONDS=600
+
+ASTER_NEUTRAL_REQUEST_TIMEOUT_SECONDS=10
+ASTER_NEUTRAL_ACTION_TIMEOUT_SECONDS=20
+ASTER_NEUTRAL_STATE_PATH=logs/aster_neutral_manager_state.json
