@@ -1,6 +1,16 @@
 # Aster two-account XAUUSD1 neutral monitor.
 # This file is a template only. Keep the real file outside git with chmod 600.
 
+# Pro API V3 (recommended): each account uses its own user + API Wallet
+# signer. The signer private key is only for read signatures, never trading.
+ASTER_NEUTRAL_MAIN_USER_ADDRESS=
+ASTER_NEUTRAL_MAIN_SIGNER_ADDRESS=
+ASTER_NEUTRAL_MAIN_SIGNER_PRIVATE_KEY=
+ASTER_NEUTRAL_SUB_USER_ADDRESS=
+ASTER_NEUTRAL_SUB_SIGNER_ADDRESS=
+ASTER_NEUTRAL_SUB_SIGNER_PRIVATE_KEY=
+
+# Legacy HMAC V1/V2 fallback (leave empty when Pro API is configured).
 ASTER_NEUTRAL_MAIN_API_KEY=
 ASTER_NEUTRAL_MAIN_API_SECRET=
 ASTER_NEUTRAL_SUB_API_KEY=
@@ -26,9 +36,17 @@ ASTER_NEUTRAL_TRANSFER_COOLDOWN_SECONDS=30
 ASTER_NEUTRAL_LIVE=false
 ASTER_NEUTRAL_AUTO_TRANSFER=false
 ASTER_NEUTRAL_ALERT_THRESHOLD=100
+ASTER_NEUTRAL_ENABLE_TRANSFERS=false
 
-# This monitor never transfers and therefore does not require wallet private
-# keys or transfer signer credentials.
+# To enable transfers, set ENABLE_TRANSFERS/LIVE/AUTO_TRANSFER=true.
+# The main Pro API signer can be reused for transfer signing when it has
+# perpetual-trading permission; leave the dedicated transfer signer fields
+# empty in that case. Fill master/sub addresses (or use the *_USER_ADDRESS
+# values) before enabling.
+ASTER_NEUTRAL_MASTER_WALLET_ADDRESS=
+ASTER_NEUTRAL_SUB_WALLET_ADDRESS=
+ASTER_NEUTRAL_TRANSFER_SIGNER_ADDRESS=
+ASTER_NEUTRAL_TRANSFER_SIGNER_PRIVATE_KEY=
 
 # Dashboard defaults to loopback. Configure a token for write actions.
 ASTER_NEUTRAL_DASHBOARD_HOST=127.0.0.1

@@ -10,6 +10,7 @@ from strategies.aster_neutral_manager import (
     AsterNeutralSettings,
     AsterPositionSnapshot,
     build_transfer_plan,
+    settings_from_env,
 )
 from strategies.aster_neutral_manager import _AsterInstanceLock
 
@@ -80,6 +81,7 @@ def test_aster_transfer_plan_requires_opposite_xau_position_signs():
 def test_aster_settings_reject_live_transfers_without_wallet_signer():
     settings = _settings(live=True)
     settings.wallet_address = ""
+    settings.main = AsterAccountSpec("main", settings.main.api_key, settings.main.api_secret)
     with pytest.raises(ValueError, match="master wallet address"):
         settings.validate()
 
@@ -99,6 +101,26 @@ def test_aster_settings_accepts_approved_agent_signer_without_master_key():
     settings.transfer_signer_private_key = "4" * 64
 
     settings.validate()
+
+
+def test_aster_main_pro_signer_is_valid_transfer_signer_by_default():
+    settings = AsterNeutralSettings(
+        main=AsterAccountSpec(
+            "main", user_address="0x" + "1" * 40,
+            signer_address="0x" + "3" * 40, signer_private_key="4" * 64,
+        ),
+        sub=AsterAccountSpec(
+            "sub", user_address="0x" + "2" * 40,
+            signer_address="0x" + "5" * 40, signer_private_key="6" * 64,
+        ),
+        live=True,
+        transfers_enabled=True,
+        wallet_address="0x" + "1" * 40,
+    )
+
+    settings.validate()
+    assert settings.effective_transfer_signer_address == settings.main.signer_address
+    assert settings.effective_transfer_signer_private_key == settings.main.signer_private_key
 
 
 def test_aster_settings_rejects_insecure_feishu_webhook():
@@ -138,6 +160,71 @@ def test_aster_hmac_params_have_signature_without_leaking_secret():
     assert params["symbol"] == "XAUUSD1"
     assert len(params["signature"]) == 64
     assert settings.main.api_secret not in str(params)
+
+
+def test_aster_pro_api_settings_accept_user_signer_credentials():
+    settings = AsterNeutralSettings(
+        main=AsterAccountSpec(
+            "main", user_address="0x" + "1" * 40,
+            signer_address="0x" + "3" * 40, signer_private_key="4" * 64,
+        ),
+        sub=AsterAccountSpec(
+            "sub", user_address="0x" + "2" * 40,
+            signer_address="0x" + "5" * 40, signer_private_key="6" * 64,
+        ),
+    )
+
+    settings.validate()
+    assert settings.main.uses_pro_api is True
+    assert settings.sub.uses_pro_api is True
+
+
+def test_aster_pro_api_signature_includes_exact_auth_fields():
+    settings = AsterNeutralSettings(
+        main=AsterAccountSpec(
+            "main", user_address="0x" + "1" * 40,
+            signer_address="0x" + "3" * 40, signer_private_key="4" * 64,
+        ),
+        sub=AsterAccountSpec(
+            "sub", user_address="0x" + "2" * 40,
+            signer_address="0x" + "5" * 40, signer_private_key="6" * 64,
+        ),
+    )
+    client = AsterAccountClient(settings.main, settings, session=None)  # type: ignore[arg-type]
+
+    params = client._pro_signed_params({"symbol": "XAUUSD1"})
+    names = [name for name, _value in params]
+
+    assert names[:1] == ["symbol"]
+    assert "nonce" in names and "user" in names and "signer" in names
+    assert names[-1] == "signature"
+    assert len(params[-1][1]) == 130
+
+
+def test_aster_env_requires_explicit_three_switches_for_auto_transfer(monkeypatch):
+    values = {
+        "ASTER_NEUTRAL_MAIN_USER_ADDRESS": "0x" + "1" * 40,
+        "ASTER_NEUTRAL_MAIN_SIGNER_ADDRESS": "0x" + "3" * 40,
+        "ASTER_NEUTRAL_MAIN_SIGNER_PRIVATE_KEY": "4" * 64,
+        "ASTER_NEUTRAL_SUB_USER_ADDRESS": "0x" + "2" * 40,
+        "ASTER_NEUTRAL_SUB_SIGNER_ADDRESS": "0x" + "5" * 40,
+        "ASTER_NEUTRAL_SUB_SIGNER_PRIVATE_KEY": "6" * 64,
+        "ASTER_NEUTRAL_MASTER_WALLET_ADDRESS": "0x" + "1" * 40,
+        "ASTER_NEUTRAL_SUB_WALLET_ADDRESS": "0x" + "2" * 40,
+        "ASTER_NEUTRAL_TRANSFER_SIGNER_ADDRESS": "0x" + "3" * 40,
+        "ASTER_NEUTRAL_TRANSFER_SIGNER_PRIVATE_KEY": "4" * 64,
+        "ASTER_NEUTRAL_LIVE": "true",
+        "ASTER_NEUTRAL_ENABLE_TRANSFERS": "true",
+        "ASTER_NEUTRAL_AUTO_TRANSFER": "true",
+    }
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+
+    settings = settings_from_env()
+
+    assert settings.live is True
+    assert settings.auto_transfer is True
+    assert settings.transfers_enabled is True
 
 
 def test_aster_instance_lock_blocks_duplicate_manager(tmp_path):

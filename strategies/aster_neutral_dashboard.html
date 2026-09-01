@@ -36,6 +36,7 @@
   <div class="muted">主账户多头，子账户空头；转账按官方可转出余额和账户状态执行。</div>
   <div class="toolbar">
     <button id="refresh" type="button">刷新</button>
+    <button id="rebalance" type="button" hidden>平衡可用保证金</button>
     <span id="status" class="status" role="status"></span>
   </div>
   <section class="panel"><h2>账户状态</h2><div id="accounts" class="grid"></div></section>
@@ -47,6 +48,7 @@
     const chartEl = document.getElementById('chart');
     const transferEl = document.getElementById('transfer');
     const statusEl = document.getElementById('status');
+    const rebalanceBtn = document.getElementById('rebalance');
     const requestId = () => (window.crypto && typeof window.crypto.randomUUID === 'function') ? window.crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     const number = value => { const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : (value ?? '-'); };
     const percent = value => { const n = Number(value); return Number.isFinite(n) ? `${(n * 100).toLocaleString(undefined, { maximumFractionDigits: 4 })}%` : '-'; };
@@ -56,6 +58,7 @@
         const response = await fetch('/api/snapshot', { cache: 'no-store' });
         const data = await response.json();
         render(data);
+        rebalanceBtn.hidden = data.dashboard_actions_enabled !== true;
         statusEl.textContent = `最近更新: ${new Date().toLocaleTimeString()}`;
         statusEl.className = 'status ok';
       } catch (error) { statusEl.textContent = `读取失败: ${error.message || error}`; statusEl.className = 'status error'; }
@@ -80,6 +83,18 @@
       if (health.reason) { const note = document.createElement('div'); note.className = 'status error'; note.textContent = `转账限制原因: ${health.reason}`; riskEl.append(note); }
     }
     document.getElementById('refresh').addEventListener('click', load);
+    rebalanceBtn.addEventListener('click', async () => {
+      if (!window.confirm('确认执行 Aster 主子账户可用保证金平衡？')) return;
+      rebalanceBtn.disabled = true;
+      try {
+        const response = await fetch('/api/actions/rebalance', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Neutral-Action': 'dashboard' }, body: JSON.stringify({ request_id: requestId() }) });
+        const result = await response.json();
+        statusEl.textContent = result.ok === false ? `转账未完成: ${result.error || result.status || '未知原因'}` : `转账结果: ${result.status || '已提交'}`;
+        statusEl.className = result.ok === false ? 'status error' : 'status ok';
+        await load();
+      } catch (error) { statusEl.textContent = `转账请求失败: ${error.message || error}`; statusEl.className = 'status error'; }
+      finally { rebalanceBtn.disabled = false; }
+    });
     load(); window.setInterval(load, 5000);
   </script>
 </body>

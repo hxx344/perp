@@ -164,9 +164,20 @@ def _format_amount(value: Decimal) -> str:
 @dataclass(frozen=True, slots=True)
 class AsterAccountSpec:
     name: str
-    api_key: str
-    api_secret: str
+    api_key: str = ""
+    api_secret: str = ""
     wallet_address: str = ""
+    user_address: str = ""
+    signer_address: str = ""
+    signer_private_key: str = ""
+
+    @property
+    def effective_user_address(self) -> str:
+        return (self.user_address or self.wallet_address).strip()
+
+    @property
+    def uses_pro_api(self) -> bool:
+        return bool(self.user_address or self.signer_address or self.signer_private_key)
 
 
 @dataclass(slots=True)
@@ -277,6 +288,7 @@ class AsterNeutralSettings:
     transfer_cooldown_seconds: float = 30.0
     live: bool = False
     auto_transfer: bool = False
+    transfers_enabled: bool = False
     wallet_private_key: str = ""
     wallet_address: str = ""
     transfer_signer_address: str = ""
@@ -294,6 +306,22 @@ class AsterNeutralSettings:
     action_timeout_seconds: float = 20.0
     state_path: str = "logs/aster_neutral_manager_state.json"
 
+    @property
+    def effective_master_wallet_address(self) -> str:
+        return (self.wallet_address or self.main.effective_user_address).strip()
+
+    @property
+    def effective_sub_wallet_address(self) -> str:
+        return (self.sub.wallet_address or self.sub.effective_user_address).strip()
+
+    @property
+    def effective_transfer_signer_address(self) -> str:
+        return (self.transfer_signer_address or self.main.signer_address).strip()
+
+    @property
+    def effective_transfer_signer_private_key(self) -> str:
+        return (self.transfer_signer_private_key or self.main.signer_private_key or self.wallet_private_key).strip()
+
     def validate(self) -> None:
         self.symbol = self.symbol.strip().upper()
         self.asset = self.asset.strip().upper()
@@ -303,9 +331,19 @@ class AsterNeutralSettings:
             raise ValueError("Aster neutral transfer asset must be USD1 for XAUUSD1")
         if self.main.name != "main" or self.sub.name != "sub":
             raise ValueError("Aster neutral account names must be main and sub")
-        if not self.main.api_key or not self.main.api_secret or not self.sub.api_key or not self.sub.api_secret:
-            raise ValueError("Aster API key and secret are required for both accounts")
-        if self.main.api_key == self.sub.api_key:
+        for spec in (self.main, self.sub):
+            if spec.uses_pro_api:
+                if not spec.effective_user_address or not spec.signer_address or not spec.signer_private_key:
+                    raise ValueError(f"{spec.name} Pro API requires user_address, signer_address, and signer_private_key")
+                for label, address in ((f"{spec.name} user address", spec.effective_user_address), (f"{spec.name} signer address", spec.signer_address)):
+                    if len(address) != 42 or not address.lower().startswith("0x") or any(char not in "0123456789abcdefABCDEF" for char in address[2:]):
+                        raise ValueError(f"{label} must be a 20-byte 0x-prefixed EVM address")
+                key = spec.signer_private_key[2:] if spec.signer_private_key.lower().startswith("0x") else spec.signer_private_key
+                if len(key) != 64 or any(char not in "0123456789abcdefABCDEF" for char in key):
+                    raise ValueError(f"{spec.name} signer_private_key must contain 64 hexadecimal characters")
+            elif not spec.api_key or not spec.api_secret:
+                raise ValueError(f"{spec.name} requires either Pro API signer credentials or API key/secret")
+        if self.main.api_key and self.sub.api_key and self.main.api_key == self.sub.api_key:
             raise ValueError("Aster main and sub API keys must be different")
         for name, value in (("poll_seconds", self.poll_seconds), ("snapshot_max_age_seconds", self.snapshot_max_age_seconds),
                             ("transfer_cooldown_seconds", self.transfer_cooldown_seconds),
@@ -331,16 +369,16 @@ class AsterNeutralSettings:
             parsed = urlparse(self.feishu_webhook_url)
             if parsed.scheme != "https" or not parsed.netloc:
                 raise ValueError("Feishu webhook URL must use HTTPS")
-        if self.live and not self.wallet_address:
+        if self.live and not self.effective_master_wallet_address:
             raise ValueError("live Aster master/sub transfers require the master wallet address")
         if self.live:
-            for label, address in (("master wallet address", self.wallet_address), ("sub wallet address", self.sub.wallet_address)):
+            for label, address in (("master wallet address", self.effective_master_wallet_address), ("sub wallet address", self.effective_sub_wallet_address)):
                 normalized_address = str(address).strip()
                 if len(normalized_address) != 42 or not normalized_address.lower().startswith("0x") or any(
                     char not in "0123456789abcdefABCDEF" for char in normalized_address[2:]
                 ):
                     raise ValueError(f"{label} must be a 20-byte 0x-prefixed EVM address")
-            signer_key = self.transfer_signer_private_key or self.wallet_private_key
+            signer_key = self.effective_transfer_signer_private_key
             private_key = str(signer_key).strip()
             if self.transfer_signer_private_key and not self.transfer_signer_address:
                 raise ValueError("transfer_signer_address is required with transfer_signer_private_key")
@@ -395,9 +433,56 @@ class AsterAccountClient:
         result["signature"] = hmac.new(self.spec.api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
         return result
 
+    def _pro_signed_params(self, params: Optional[Mapping[str, Any]] = None) -> List[Tuple[str, str]]:
+        """Build the exact V3 query string and its EIP-712 signature."""
+
+        try:
+            from eth_account import Account
+            from eth_account.messages import encode_typed_data
+        except ImportError as exc:
+            raise RuntimeError("eth-account is required for Aster Pro API V3") from exc
+        values: List[Tuple[str, str]] = [(str(key), str(value)) for key, value in (params or {}).items()]
+        nonce = max(int(time.time() * 1_000_000), self._last_nonce + 1)
+        self._last_nonce = nonce
+        values.extend([
+            ("nonce", str(nonce)),
+            ("user", self.spec.effective_user_address),
+            ("signer", self.spec.signer_address),
+        ])
+        message_text = urlencode(values)
+        typed_data = {
+            "types": {
+                "EIP712Domain": [
+                    {"name": "name", "type": "string"},
+                    {"name": "version", "type": "string"},
+                    {"name": "chainId", "type": "uint256"},
+                    {"name": "verifyingContract", "type": "address"},
+                ],
+                "Message": [{"name": "msg", "type": "string"}],
+            },
+            "primaryType": "Message",
+            "domain": {
+                "name": "AsterSignTransaction",
+                "version": "1",
+                "chainId": 1666,
+                "verifyingContract": "0x0000000000000000000000000000000000000000",
+            },
+            "message": {"msg": message_text},
+        }
+        private_key = self.spec.signer_private_key
+        if not private_key.lower().startswith("0x"):
+            private_key = "0x" + private_key
+        signature = Account.sign_message(encode_typed_data(full_message=typed_data), private_key).signature.hex()
+        values.append(("signature", signature))
+        return values
+
     async def request(self, method: str, path: str, params: Optional[Mapping[str, Any]] = None) -> Any:
-        request_params = self._signed_params(params)
-        headers = {"X-MBX-APIKEY": self.spec.api_key, "Content-Type": "application/x-www-form-urlencoded"}
+        if self.spec.uses_pro_api:
+            request_params: Any = self._pro_signed_params(params)
+            headers = {"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "perp-aster-neutral/1.0"}
+        else:
+            request_params = self._signed_params(params)
+            headers = {"X-MBX-APIKEY": self.spec.api_key, "Content-Type": "application/x-www-form-urlencoded"}
         timeout = aiohttp.ClientTimeout(total=self.settings.request_timeout_seconds)
         url = f"{self.settings.rest_url.rstrip('/')}{path}"
         async with self.session.request(method.upper(), url, params=request_params if method.upper() == "GET" else None,
@@ -415,7 +500,7 @@ class AsterAccountClient:
             return payload
 
     async def fetch_snapshot(self) -> AsterAccountSnapshot:
-        payload = await self.request("GET", "/fapi/v4/account")
+        payload = await self.request("GET", "/fapi/v3/accountWithJoinMargin" if self.spec.uses_pro_api else "/fapi/v4/account")
         if not isinstance(payload, Mapping):
             raise RuntimeError("Aster account response must be an object")
         asset_rows = payload.get("assets") if isinstance(payload.get("assets"), list) else []
@@ -627,7 +712,18 @@ class AsterNeutralManager:
         return {"state": "ready", "allowed": True, "reason": None, "snapshot_ages": ages, "recovery_successes": self._recovery_successes, "recovery_required": self.settings.recovery_successes_required}
 
     def _transfer_allowed(self) -> None:
-        raise RuntimeError("Aster neutral monitor is read-only; transfers are disabled")
+        if not self.settings.transfers_enabled:
+            raise RuntimeError("Aster transfers are disabled; set ASTER_NEUTRAL_ENABLE_TRANSFERS=true")
+        health = self._health()
+        if health["state"] != "ready":
+            raise RuntimeError(str(health["reason"]))
+        if not self.settings.effective_master_wallet_address:
+            raise RuntimeError("Aster master wallet address is not configured")
+        if not self.settings.effective_transfer_signer_private_key:
+            raise RuntimeError("Aster transfer signer is not configured")
+        remaining = self.settings.transfer_cooldown_seconds - (time.time() - self._last_transfer_at)
+        if self._last_transfer_at and remaining > 0:
+            raise RuntimeError(f"Aster transfer cooldown is active for another {remaining:.1f}s")
 
     async def calculate_transfer_plan(self) -> Optional[AsterTransferPlan]:
         self.last_plan = None
@@ -668,8 +764,8 @@ class AsterNeutralManager:
         return Account.sign_message(encode_typed_data(full_message=typed_data), private_key).signature.hex()
 
     async def _submit_transfer(self, plan: AsterTransferPlan) -> Dict[str, Any]:
-        main_address = self.settings.wallet_address
-        sub_address = self.settings.sub.wallet_address
+        main_address = self.settings.effective_master_wallet_address
+        sub_address = self.settings.effective_sub_wallet_address
         if not main_address or not sub_address:
             raise RuntimeError("Aster main and sub wallet addresses are required for transfer")
         source_address = main_address if plan.source == "main" else sub_address
@@ -684,10 +780,10 @@ class AsterNeutralManager:
             ("nonce", str(nonce)),
             ("user", main_address),
         ]
-        signing_key = self.settings.wallet_private_key
-        if self.settings.transfer_signer_private_key:
-            params.append(("signer", self.settings.transfer_signer_address))
-            signing_key = self.settings.transfer_signer_private_key
+        signing_key = self.settings.effective_transfer_signer_private_key
+        signer_address = self.settings.effective_transfer_signer_address
+        if signer_address:
+            params.append(("signer", signer_address))
         if plan.source == "sub":
             params.append(("fromAccountAddress", source_address))
         params.append(("signature", self._transfer_signature(params, signing_key)))
@@ -760,10 +856,16 @@ class AsterNeutralManager:
         return False
 
     async def manual_rebalance(self, *, request_id: Optional[str] = None) -> Dict[str, Any]:
-        raise RuntimeError("Aster neutral monitor is read-only; manual transfers are disabled")
+        if not self.settings.live:
+            await self.refresh_once()
+            plan = await self.calculate_transfer_plan()
+            return {"status": "dry_run", "plan": plan.as_payload() if plan else None}
+        return await self.execute_transfer(request_id=request_id)
 
     async def _handle_dashboard_action(self, action: Any) -> Dict[str, Any]:
-        raise RuntimeError("Aster neutral monitor is read-only; dashboard writes are disabled")
+        if getattr(action, "action", "") == "rebalance":
+            return await self.manual_rebalance(request_id=getattr(action, "request_id", None))
+        raise RuntimeError("Aster neutral dashboard only supports rebalance")
 
     def snapshot_payload(self) -> Dict[str, Any]:
         main, sub = self.snapshots.get("main"), self.snapshots.get("sub")
@@ -778,7 +880,7 @@ class AsterNeutralManager:
             "symbol": self.settings.symbol,
             "live": self.settings.live,
             "auto_transfer": self.settings.auto_transfer,
-            "monitor_only": True,
+            "monitor_only": not self.settings.live,
             "alert_threshold": self.settings.alert_threshold,
             "dashboard_actions_enabled": bool(self.settings.live and self.settings.dashboard_token),
             "last_refresh_error": self._last_refresh_error,
@@ -870,6 +972,8 @@ class AsterNeutralManager:
             try:
                 await self.refresh_once()
                 self.last_plan = await self.calculate_transfer_plan()
+                if self.last_plan and self.settings.auto_transfer and self.settings.live and self._health()["allowed"]:
+                    await self.execute_transfer()
                 await self._maybe_feishu()
             except asyncio.CancelledError:
                 raise
@@ -902,10 +1006,22 @@ def settings_from_env(env_file: Optional[str] = None) -> AsterNeutralSettings:
     if env_file:
         values.update({key: value for key, value in dotenv.dotenv_values(env_file).items() if value is not None})
     main = AsterAccountSpec(
-        "main", str(values.get("ASTER_NEUTRAL_MAIN_API_KEY", "") or ""), str(values.get("ASTER_NEUTRAL_MAIN_API_SECRET", "") or ""), str(values.get("ASTER_NEUTRAL_MAIN_WALLET_ADDRESS", "") or ""),
+        "main",
+        str(values.get("ASTER_NEUTRAL_MAIN_API_KEY", "") or ""),
+        str(values.get("ASTER_NEUTRAL_MAIN_API_SECRET", "") or ""),
+        str(values.get("ASTER_NEUTRAL_MAIN_WALLET_ADDRESS", "") or ""),
+        str(values.get("ASTER_NEUTRAL_MAIN_USER_ADDRESS", "") or ""),
+        str(values.get("ASTER_NEUTRAL_MAIN_SIGNER_ADDRESS", "") or ""),
+        str(values.get("ASTER_NEUTRAL_MAIN_SIGNER_PRIVATE_KEY", "") or ""),
     )
     sub = AsterAccountSpec(
-        "sub", str(values.get("ASTER_NEUTRAL_SUB_API_KEY", "") or ""), str(values.get("ASTER_NEUTRAL_SUB_API_SECRET", "") or ""), str(values.get("ASTER_NEUTRAL_SUB_WALLET_ADDRESS", "") or ""),
+        "sub",
+        str(values.get("ASTER_NEUTRAL_SUB_API_KEY", "") or ""),
+        str(values.get("ASTER_NEUTRAL_SUB_API_SECRET", "") or ""),
+        str(values.get("ASTER_NEUTRAL_SUB_WALLET_ADDRESS", "") or ""),
+        str(values.get("ASTER_NEUTRAL_SUB_USER_ADDRESS", "") or ""),
+        str(values.get("ASTER_NEUTRAL_SUB_SIGNER_ADDRESS", "") or ""),
+        str(values.get("ASTER_NEUTRAL_SUB_SIGNER_PRIVATE_KEY", "") or ""),
     )
     return AsterNeutralSettings(
         main=main,
@@ -920,10 +1036,11 @@ def settings_from_env(env_file: Optional[str] = None) -> AsterNeutralSettings:
         min_transfer=_required_decimal(values.get("ASTER_NEUTRAL_MIN_TRANSFER", "1"), "minimum transfer"),
         max_transfer=_required_decimal(values.get("ASTER_NEUTRAL_MAX_TRANSFER", "1000"), "maximum transfer"),
         transfer_cooldown_seconds=float(values.get("ASTER_NEUTRAL_TRANSFER_COOLDOWN_SECONDS", "30")),
-        live=False,
-        auto_transfer=False,
+        live=_env_bool(values.get("ASTER_NEUTRAL_LIVE"), False) and _env_bool(values.get("ASTER_NEUTRAL_ENABLE_TRANSFERS"), False),
+        auto_transfer=_env_bool(values.get("ASTER_NEUTRAL_AUTO_TRANSFER"), False) and _env_bool(values.get("ASTER_NEUTRAL_ENABLE_TRANSFERS"), False),
+        transfers_enabled=_env_bool(values.get("ASTER_NEUTRAL_ENABLE_TRANSFERS"), False),
         wallet_private_key=str(values.get("ASTER_NEUTRAL_WALLET_PRIVATE_KEY", "") or ""),
-        wallet_address=str(values.get("ASTER_NEUTRAL_MASTER_WALLET_ADDRESS", "") or ""),
+        wallet_address=str(values.get("ASTER_NEUTRAL_MASTER_WALLET_ADDRESS", values.get("ASTER_NEUTRAL_MAIN_USER_ADDRESS", "")) or ""),
         transfer_signer_address=str(values.get("ASTER_NEUTRAL_TRANSFER_SIGNER_ADDRESS", "") or ""),
         transfer_signer_private_key=str(values.get("ASTER_NEUTRAL_TRANSFER_SIGNER_PRIVATE_KEY", "") or ""),
         dashboard_host=str(values.get("ASTER_NEUTRAL_DASHBOARD_HOST", "127.0.0.1")),

@@ -11,8 +11,16 @@ sub:  XAUUSD1 short
 
 The symbol is configurable, but the live deployment should use the exact
 symbol returned by Aster `exchangeInfo` (the default is `XAUUSD1`). The two
-accounts use separate Aster API key/secret pairs. Reads use the signed Aster
-Futures account endpoint and never reuse the Lighter credentials.
+accounts use separate Pro API V3 user/API-wallet signer credentials. Legacy
+HMAC API key/secret pairs remain accepted as a fallback. Reads use the signed
+Aster Futures account endpoint and never reuse the Lighter credentials.
+
+For Pro API V3, configure `ASTER_NEUTRAL_*_USER_ADDRESS`,
+`ASTER_NEUTRAL_*_SIGNER_ADDRESS`, and
+`ASTER_NEUTRAL_*_SIGNER_PRIVATE_KEY`. The signer address is the `0x...` API
+wallet shown in Aster's Pro API page, not an API key. Its private key is
+required to produce the EIP-712 read signature. Use a read-only API wallet for
+this monitor.
 
 ## Transfer calculation
 
@@ -29,16 +37,22 @@ amount is additionally capped by its Aster `maxWithdrawAmount`, which Aster
 documents as the maximum amount available for transfer out. A cooldown and a
 stale-snapshot circuit breaker prevent rapid churn.
 
-This program is monitor-only. It calculates and displays a transfer plan for
-diagnostics, but never submits a master/sub-account transfer.
+The default mode is read-only. It calculates and displays a transfer plan for
+diagnostics, but submits a master/sub-account transfer only when all three
+explicit switches are enabled: `ASTER_NEUTRAL_ENABLE_TRANSFERS=true`,
+`ASTER_NEUTRAL_LIVE=true`, and `ASTER_NEUTRAL_AUTO_TRANSFER=true`.
 
 ## Transfer permissions
 
-No wallet private key is required for this monitor because it performs no
-transfer. The two HMAC API key/secret pairs are used only for account reads.
-The old wallet/Agent signer variables remain in the template only for
-compatibility with an earlier experimental implementation and are ignored by
-the monitor-only runtime.
+The two HMAC API key/secret pairs are used for legacy reads, or Pro API V3
+signer credentials can be used for reads. Transfers require the master and sub
+wallet addresses plus an approved Agent/API Wallet signer private key. By
+default the main account's Pro API signer is reused for transfer signing, so
+the transfer signer variables do not need duplicate values. Set dedicated
+transfer signer variables only when you want a separate Agent. Do not
+grant withdrawal permission to the Agent. The transfer path uses `USD1` for
+`XAUUSD1`, caps the amount by Aster `maxWithdrawAmount`, and blocks after an
+unknown response until the state is reconciled.
 
 ## Run
 
@@ -46,9 +60,9 @@ the monitor-only runtime.
 python -m strategies.aster_neutral_manager --env-file /etc/perp/aster-neutral.env
 ```
 
-The dashboard shows the calculated plan but has no transfer button. Any actual
-master/sub-account transfer must be performed separately through Aster's
-approved wallet/API workflow.
+The dashboard shows the calculated plan. With all three live switches enabled
+and a dashboard token configured, its rebalance action can execute one plan;
+otherwise it remains read-only.
 
 The dashboard listens on `127.0.0.1:8791` by default. It is intentionally
 separate from the Lighter dashboard on port 8790. Use an SSH tunnel or an
