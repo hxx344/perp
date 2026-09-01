@@ -48,6 +48,15 @@ diagnostics, but submits a master/sub-account transfer only when all three
 explicit switches are enabled: `ASTER_NEUTRAL_ENABLE_TRANSFERS=true`,
 `ASTER_NEUTRAL_LIVE=true`, and `ASTER_NEUTRAL_AUTO_TRANSFER=true`.
 
+Transfer failures are classified conservatively. A clear validation,
+permission, or other HTTP 4xx rejection is recorded as
+`rejected_before_submit` and releases the transfer lock. HTTP 503, other 5xx
+responses, timeouts, connection failures, and malformed responses are recorded
+as `unknown_pending` because Aster may have accepted the request. While an
+unknown record is pending, the manager checks both accounts' authenticated
+`TRANSFER` income records for the same transaction id and opposite amounts;
+only that evidence automatically clears the block.
+
 ## Transfer permissions
 
 The two HMAC API key/secret pairs are used for legacy reads, or Pro API V3

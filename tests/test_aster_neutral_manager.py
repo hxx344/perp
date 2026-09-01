@@ -1,3 +1,4 @@
+import time
 from decimal import Decimal
 
 import pytest
@@ -9,6 +10,7 @@ from strategies.aster_neutral_manager import (
     AsterNeutralManager,
     AsterNeutralSettings,
     AsterPositionSnapshot,
+    AsterTransferRejectedError,
     build_transfer_plan,
     settings_from_env,
 )
@@ -74,6 +76,55 @@ def test_aster_snapshot_returns_transfer_history_newest_first():
     history = manager.snapshot_payload()["transfer_history"]
 
     assert [item["timestamp"] for item in history] == [300, 200, 100]
+
+
+@pytest.mark.asyncio
+async def test_explicit_transfer_rejection_clears_pending_lock(tmp_path):
+    settings = _settings(live=True)
+    settings.transfers_enabled = True
+    settings.wallet_private_key = "4" * 64
+    settings.state_path = str(tmp_path / "aster-state.json")
+    manager = AsterNeutralManager(settings)
+    manager.snapshots = {"main": _snapshot("main", 200, 100), "sub": _snapshot("sub", 100, 100)}
+    for snapshot in manager.snapshots.values():
+        snapshot.observed_at = time.time()
+    manager._recovery_successes = settings.recovery_successes_required
+
+    async def rejected(_plan):
+        raise AsterTransferRejectedError("permission denied before submit")
+
+    manager._submit_transfer = rejected  # type: ignore[method-assign]
+    result = await manager.execute_transfer(request_id="reject-1")
+
+    assert result["result"]["status"] == "rejected_before_submit"
+    assert manager._pending_transfer is None
+    assert manager._health()["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_pending_transfer_reconciles_matching_income_records():
+    settings = _settings()
+    manager = AsterNeutralManager(settings)
+    manager._pending_transfer = {
+        "timestamp": time.time(),
+        "plan": {"source": "main", "destination": "sub", "amount": "25"},
+    }
+
+    class FakeClient:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def request(self, _method, _path, _params):
+            return self.rows
+
+    manager._clients = {
+        "main": FakeClient([{"tranId": "tx-1", "income": "-25"}]),
+        "sub": FakeClient([{"tranId": "tx-1", "income": "25"}]),
+    }
+
+    assert await manager._reconcile_pending_transfer() is True
+    assert manager._pending_transfer is None
+    assert manager.last_transfer["result"]["tran_id"] == "tx-1"
 
 
 def test_aster_snapshot_exposes_transfer_delta_and_threshold():

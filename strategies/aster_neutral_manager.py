@@ -45,6 +45,14 @@ TRANSFER_KIND = "FUTURE_FUTURE"
 TRANSFER_ASSET = "USD1"
 
 
+class AsterTransferRejectedError(RuntimeError):
+    """Aster explicitly rejected a request before accepting it for execution."""
+
+
+class AsterTransferUnknownError(RuntimeError):
+    """The request may have reached Aster but its final state is unknown."""
+
+
 class _AsterInstanceLock:
     """Process lock for one Aster neutral manager state path."""
 
@@ -715,7 +723,75 @@ class AsterNeutralManager:
             self._recovery_successes = min(self._recovery_successes + 1, self.settings.recovery_successes_required)
         else:
             self._recovery_successes = 0
+        await self._reconcile_pending_transfer()
         return self.snapshot_payload()
+
+    async def _reconcile_pending_transfer(self) -> bool:
+        """Use matching Aster TRANSFER income records to clear unknown writes."""
+
+        record = self._pending_transfer
+        if not isinstance(record, Mapping):
+            return False
+        plan = record.get("plan") if isinstance(record.get("plan"), Mapping) else {}
+        source_name = str(plan.get("source", ""))
+        destination_name = str(plan.get("destination", ""))
+        amount = _decimal(plan.get("amount"))
+        if source_name not in self._clients or destination_name not in self._clients or amount <= 0:
+            return False
+        created = float(record.get("timestamp", time.time()) or time.time())
+        params = {"incomeType": "TRANSFER", "startTime": max(0, int((created - 300) * 1000)), "limit": 100}
+        rows_by_account: Dict[str, List[Mapping[str, Any]]] = {}
+        try:
+            for name, client in self._clients.items():
+                payload = await client.request("GET", "/fapi/v3/income", params)
+                rows = payload if isinstance(payload, list) else payload.get("rows", []) if isinstance(payload, Mapping) else []
+                rows_by_account[name] = [row for row in rows if isinstance(row, Mapping)]
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.debug("Aster pending transfer history reconciliation unavailable: %s", exc)
+            return False
+        def candidates(name: str, sign: int) -> Dict[str, Mapping[str, Any]]:
+            found: Dict[str, Mapping[str, Any]] = {}
+            for row in rows_by_account.get(name, []):
+                row_amount = _decimal(row.get("income"), None)
+                tran_id = str(_first(row, "tranId", "tran_id", default="") or "")
+                if row_amount is None or not tran_id:
+                    continue
+                if sign < 0 and row_amount <= -amount * Decimal("0.75") and row_amount >= -amount * Decimal("1.25"):
+                    found[tran_id] = row
+                if sign > 0 and row_amount >= amount * Decimal("0.75") and row_amount <= amount * Decimal("1.25"):
+                    found[tran_id] = row
+            return found
+        source_rows = candidates(source_name, -1)
+        destination_rows = candidates(destination_name, 1)
+        common = sorted(set(source_rows).intersection(destination_rows))
+        if not common:
+            return False
+        previous_pending = dict(self._pending_transfer)
+        pending_reference = self._pending_transfer
+        pending_reference["result"] = {
+            "status": "acknowledged",
+            "tran_id": common[0],
+            "confirmation": "matching_transfer_income",
+            "source_income": _json_value(source_rows[common[0]]),
+            "destination_income": _json_value(destination_rows[common[0]]),
+        }
+        pending_reference["reconciled_at"] = time.time()
+        previous_last = self.last_transfer
+        self.last_transfer = dict(pending_reference)
+        self._pending_transfer = None
+        try:
+            self._persist_state()
+        except Exception as exc:
+            pending_reference.clear()
+            pending_reference.update(previous_pending)
+            self._pending_transfer = pending_reference
+            self.last_transfer = previous_last
+            LOGGER.error("Aster pending transfer reconciliation could not persist state: %s", exc)
+            return False
+        LOGGER.info("Reconciled Aster transfer from income history (tranId=%s)", common[0])
+        return True
 
     def _health(self) -> Dict[str, Any]:
         ages = {
@@ -812,9 +888,12 @@ class AsterNeutralManager:
             params.append(("signer", signer_address))
         if plan.source == "sub":
             params.append(("fromAccountAddress", source_address))
-        params.append(("signature", self._transfer_signature(params, signing_key)))
+        try:
+            params.append(("signature", self._transfer_signature(params, signing_key)))
+        except (ValueError, TypeError, RuntimeError) as exc:
+            raise AsterTransferRejectedError(f"Aster transfer could not be signed locally: {exc}") from exc
         if self._session is None:
-            raise RuntimeError("Aster HTTP session is not ready")
+            raise AsterTransferRejectedError("Aster HTTP session is not ready")
         timeout = aiohttp.ClientTimeout(total=self.settings.action_timeout_seconds)
         async with self._session.post(
             f"{ASTER_TRANSFER_REST_URL}/fapi/v3/subAccountTransfer",
@@ -825,11 +904,19 @@ class AsterNeutralManager:
             try:
                 payload = json.loads(text)
             except json.JSONDecodeError as exc:
-                raise RuntimeError(f"Aster transfer returned invalid JSON: {text[:300]}") from exc
+                raise AsterTransferUnknownError(
+                    f"Aster transfer returned invalid JSON; execution status is unknown: {text[:300]}"
+                ) from exc
             if response.status != 200:
-                raise RuntimeError(f"Aster transfer returned HTTP {response.status}: {text[:300]}")
+                if 400 <= response.status < 500 and response.status != 503:
+                    raise AsterTransferRejectedError(
+                        f"Aster transfer rejected before acceptance: HTTP {response.status}: {text[:300]}"
+                    )
+                raise AsterTransferUnknownError(
+                    f"Aster transfer returned HTTP {response.status}; execution status is unknown: {text[:300]}"
+                )
             if isinstance(payload, Mapping) and payload.get("code") not in (None, 0, 200, "0", "200"):
-                raise RuntimeError(f"Aster transfer rejected: {payload.get('code')} {payload.get('msg', '')}")
+                raise AsterTransferRejectedError(f"Aster transfer rejected: {payload.get('code')} {payload.get('msg', '')}")
             return {"status": "accepted_pending_confirmation", "response": payload, "nonce": nonce}
 
     async def execute_transfer(self, *, request_id: Optional[str] = None) -> Dict[str, Any]:
@@ -853,9 +940,20 @@ class AsterNeutralManager:
                 result = await self._submit_transfer(plan)
             except asyncio.CancelledError:
                 raise
+            except AsterTransferRejectedError as exc:
+                record["result"] = {"status": "rejected_before_submit", "error": str(exc)}
+                self._pending_transfer = None
+                self._persist_state()
+                LOGGER.warning("Aster transfer was rejected before acceptance; transfer lock cleared: %s", exc)
+                return _json_value(record)
+            except (AsterTransferUnknownError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+                record["result"] = {"status": "unknown_pending", "error": str(exc)}
+                LOGGER.error("Aster transfer status is unknown; live transfers remain blocked: %s", exc)
+                self._persist_state()
+                return _json_value(record)
             except Exception as exc:
                 record["result"] = {"status": "unknown_pending", "error": str(exc)}
-                LOGGER.error("Aster transfer status is unknown; live transfers are blocked: %s", exc)
+                LOGGER.error("Aster transfer status is unknown; live transfers remain blocked: %s", exc)
                 self._persist_state()
                 return _json_value(record)
             record["result"] = result
@@ -869,6 +967,8 @@ class AsterNeutralManager:
 
     async def _confirm_transfer(self, plan: AsterTransferPlan, before: Mapping[str, Decimal]) -> bool:
         for _ in range(3):
+            if self._pending_transfer is None:
+                return True
             await asyncio.sleep(0.5)
             try:
                 await self.refresh_once()

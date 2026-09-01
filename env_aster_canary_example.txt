@@ -1,0 +1,20 @@
+# Dedicated, initially flat Aster account. Use an Agent with read + perpetual
+# trading permission, no withdrawal permission, and an IP whitelist.
+ASTER_CANARY_USER_ADDRESS=
+ASTER_CANARY_SIGNER_ADDRESS=
+ASTER_CANARY_SIGNER_PRIVATE_KEY=
+
+ASTER_CANARY_SYMBOL=XAUUSD1
+ASTER_CANARY_DIRECTION=BUY
+ASTER_CANARY_QUANTITY=0.002
+ASTER_CANARY_MAX_QUANTITY=0.01
+ASTER_CANARY_MAX_SPREAD_BPS=8
+ASTER_CANARY_MAX_SLIPPAGE_BPS=20
+ASTER_CANARY_MAX_ESTIMATED_WEAR=5
+ASTER_CANARY_CYCLES=1
+ASTER_CANARY_CYCLE_COOLDOWN_SECONDS=30
+
+# Both must be true for real orders. Defaults perform a dry run only.
+ASTER_CANARY_LIVE=false
+ASTER_CANARY_CONFIRM_LIVE=false
+ASTER_CANARY_OUTPUT_PATH=logs/aster_market_stability_canary.jsonl

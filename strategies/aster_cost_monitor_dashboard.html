@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aster 成本监控</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#101317;color:#e8edf2}body{max-width:1200px;margin:0 auto;padding:22px}h1{font-size:1.4rem;margin:0 0 6px}.muted{color:#9aa6b2;font-size:.88rem}.panel{border:1px solid #2d3945;border-radius:8px;padding:14px;background:#151c23;margin-top:14px}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}.metric{background:#11181f;border-radius:5px;padding:9px}.metric b{display:block;margin-top:3px}.status{margin-top:12px}.error{color:#ff9b9b}table{width:100%;border-collapse:collapse;margin-top:10px}th,td{text-align:left;border-bottom:1px solid #29333d;padding:9px 6px}th{color:#9aa6b2;font-size:.8rem}.good{color:#86e1ab}.warn{color:#f0c674}.bad{color:#ff9b9b}@media(max-width:700px){body{padding:14px}table{font-size:.84rem}}
+  </style>
+</head>
+<body>
+  <h1>Aster 交易成本监控</h1>
+  <div class="muted">只读取公共买一卖一数据，不下单、不转账。磨损按每 10,000 USD1 双边开平仓估算。</div>
+  <section class="panel"><div id="summary" class="metrics"></div><div id="status" class="status"></div></section>
+  <section class="panel"><h2>交易对成本</h2><table><thead><tr><th>交易对</th><th>最新价差</th><th>窗口平均价差</th><th>价差成本</th><th>双边手续费</th><th>总磨损</th><th>样本</th></tr></thead><tbody id="rows"></tbody></table></section>
+  <script>
+    const summary=document.getElementById('summary'), rows=document.getElementById('rows'), status=document.getElementById('status');
+    const num=v=>{const n=Number(v);return Number.isFinite(n)?n.toLocaleString(undefined,{maximumFractionDigits:6}):(v??'-')};
+    const bps=v=>{const n=Number(v);return Number.isFinite(n)?`${n.toFixed(4)} bps`:'-'};
+    const money=v=>{const n=Number(v);return Number.isFinite(n)?`${n.toFixed(4)} USD1`:'-'};
+    async function load(){try{const r=await fetch('/api/snapshot',{cache:'no-store'});const d=await r.json();render(d);status.textContent=`最近更新 ${new Date().toLocaleTimeString()}`;status.className='status good'}catch(e){status.textContent=`读取失败: ${e.message||e}`;status.className='status error'}}
+    function render(d){const target=d.symbols?.[d.target_symbol]||{};summary.replaceChildren(...[['模式', '只读成本监控'],['目标交易对',d.target_symbol],['监控窗口',`${d.window_seconds||0} 秒`],['目标平均价差',bps(target.average_spread_bps)],['每万名义总磨损',money(target.total_wear)],['手续费率',`${Number(d.fee_rate||0)*100}%`]].map(([k,v])=>{const e=document.createElement('div');e.className='metric';e.innerHTML='<span class="muted"></span><b></b>';e.querySelector('span').textContent=k;e.querySelector('b').textContent=v;return e}));rows.replaceChildren();Object.values(d.symbols||{}).forEach(x=>{const tr=document.createElement('tr');[x.symbol,bps(x.spread_bps),bps(x.average_spread_bps),money(x.spread_cost),money(x.round_trip_fees),money(x.total_wear),x.sample_count??0].forEach((v,i)=>{const td=document.createElement('td');td.textContent=v;if(i===5)td.className='warn';tr.append(td)});rows.append(tr)})}
+    load();window.setInterval(load,5000);
+  </script>
+</body>
+</html>
