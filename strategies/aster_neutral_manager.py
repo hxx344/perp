@@ -766,17 +766,41 @@ class AsterNeutralManager:
         source_rows = candidates(source_name, -1)
         destination_rows = candidates(destination_name, 1)
         common = sorted(set(source_rows).intersection(destination_rows))
-        if not common:
+        confirmation: Optional[Dict[str, Any]] = None
+        if common:
+            tran_id = common[0]
+            confirmation = {
+                "status": "acknowledged",
+                "tran_id": tran_id,
+                "confirmation": "matching_transfer_income",
+                "source_income": _json_value(source_rows[tran_id]),
+                "destination_income": _json_value(destination_rows[tran_id]),
+            }
+        else:
+            # Some Aster responses omit income records or use different IDs
+            # for the debit and credit legs.  For a transfer created by this
+            # process, matching both balance deltas is sufficient confirmation.
+            before = record.get("before_available") if isinstance(record.get("before_available"), Mapping) else {}
+            before_source = _decimal(before.get(source_name), None)
+            before_destination = _decimal(before.get(destination_name), None)
+            source_snapshot = self.snapshots.get(source_name)
+            destination_snapshot = self.snapshots.get(destination_name)
+            if before_source is not None and before_destination is not None and source_snapshot and destination_snapshot:
+                source_delta = before_source - source_snapshot.available_balance
+                destination_delta = destination_snapshot.available_balance - before_destination
+                tolerance = max(Decimal("0.01"), amount * Decimal("0.25"))
+                if source_delta >= amount - tolerance and destination_delta >= amount - tolerance:
+                    confirmation = {
+                        "status": "acknowledged",
+                        "confirmation": "matching_balance_deltas",
+                        "source_delta": source_delta,
+                        "destination_delta": destination_delta,
+                    }
+        if confirmation is None:
             return False
         previous_pending = dict(self._pending_transfer)
         pending_reference = self._pending_transfer
-        pending_reference["result"] = {
-            "status": "acknowledged",
-            "tran_id": common[0],
-            "confirmation": "matching_transfer_income",
-            "source_income": _json_value(source_rows[common[0]]),
-            "destination_income": _json_value(destination_rows[common[0]]),
-        }
+        pending_reference["result"] = confirmation
         pending_reference["reconciled_at"] = time.time()
         previous_last = self.last_transfer
         self.last_transfer = dict(pending_reference)
@@ -790,7 +814,10 @@ class AsterNeutralManager:
             self.last_transfer = previous_last
             LOGGER.error("Aster pending transfer reconciliation could not persist state: %s", exc)
             return False
-        LOGGER.info("Reconciled Aster transfer from income history (tranId=%s)", common[0])
+        LOGGER.info(
+            "Reconciled Aster transfer (%s)",
+            f"tranId={common[0]}" if common else "matching balance deltas",
+        )
         return True
 
     def _health(self) -> Dict[str, Any]:
@@ -926,7 +953,13 @@ class AsterNeutralManager:
             plan = await self.calculate_transfer_plan()
             if plan is None:
                 return {"status": "balanced", "plan": None}
-            record = {"type": "transfer", "request_id": request_id or uuid.uuid4().hex, "plan": plan.as_payload(), "timestamp": time.time()}
+            record = {
+                "type": "transfer",
+                "request_id": request_id or uuid.uuid4().hex,
+                "plan": plan.as_payload(),
+                "timestamp": time.time(),
+                "before_available": {name: _format_amount(value) for name, value in before.items()},
+            }
             # Set the blocking intent before the network write. Aster documents
             # HTTP 503 as an unknown execution result, so every post-submit
             # exception must prevent an immediate retry.
