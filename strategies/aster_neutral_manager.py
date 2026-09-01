@@ -53,6 +53,9 @@ class AsterTransferUnknownError(RuntimeError):
     """The request may have reached Aster but its final state is unknown."""
 
 
+TRANSFER_RECONCILIATION_FAILURE_LIMIT = 3
+
+
 class _AsterInstanceLock:
     """Process lock for one Aster neutral manager state path."""
 
@@ -634,6 +637,7 @@ class AsterNeutralManager:
         self._last_refresh_error: Optional[str] = None
         self._recovery_successes = 0
         self._pending_transfer: Optional[Dict[str, Any]] = None
+        self._pending_transfer_failures = 0
         self._last_transfer_at = 0.0
         self._next_feishu_report = 0.0
         self._load_state()
@@ -655,6 +659,7 @@ class AsterNeutralManager:
                 self.transfer_history = [dict(item) for item in history[-50:] if isinstance(item, Mapping)]
             if isinstance(pending_transfer, Mapping):
                 self._pending_transfer = dict(pending_transfer)
+                self._pending_transfer_failures = int(payload.get("pending_transfer_failures", 0) or 0)
         except Exception as exc:
             LOGGER.error("Unable to load Aster neutral state %s: %s", self._state_path, exc)
             self._pending_transfer = {"status": "unknown_journal", "error": str(exc)}
@@ -666,6 +671,7 @@ class AsterNeutralManager:
             "last_transfer": self.last_transfer,
             "transfer_history": self.transfer_history[-50:],
             "pending_transfer": self._pending_transfer,
+            "pending_transfer_failures": self._pending_transfer_failures,
         })
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         temp = self._state_path.with_suffix(self._state_path.suffix + f".tmp.{os.getpid()}")
@@ -750,6 +756,7 @@ class AsterNeutralManager:
             raise
         except Exception as exc:
             LOGGER.debug("Aster pending transfer history reconciliation unavailable: %s", exc)
+            self._record_reconciliation_failure(str(exc))
             return False
         def candidates(name: str, sign: int) -> Dict[str, Mapping[str, Any]]:
             found: Dict[str, Mapping[str, Any]] = {}
@@ -797,6 +804,7 @@ class AsterNeutralManager:
                         "destination_delta": destination_delta,
                     }
         if confirmation is None:
+            self._record_reconciliation_failure("no matching transfer income or balance deltas")
             return False
         previous_pending = dict(self._pending_transfer)
         pending_reference = self._pending_transfer
@@ -805,6 +813,7 @@ class AsterNeutralManager:
         previous_last = self.last_transfer
         self.last_transfer = dict(pending_reference)
         self._pending_transfer = None
+        self._pending_transfer_failures = 0
         try:
             self._persist_state()
         except Exception as exc:
@@ -820,13 +829,30 @@ class AsterNeutralManager:
         )
         return True
 
+    def _record_reconciliation_failure(self, reason: str) -> None:
+        self._pending_transfer_failures += 1
+        if isinstance(self._pending_transfer, dict):
+            self._pending_transfer["reconciliation_failures"] = self._pending_transfer_failures
+            self._pending_transfer["last_reconciliation_error"] = reason
+            self._pending_transfer["last_reconciliation_at"] = time.time()
+        try:
+            self._persist_state()
+        except Exception:
+            LOGGER.exception("Could not persist Aster transfer reconciliation failure")
+        if self._pending_transfer_failures >= TRANSFER_RECONCILIATION_FAILURE_LIMIT:
+            LOGGER.error("Aster transfer reconciliation failed %s times; new transfers are now paused", self._pending_transfer_failures)
+        else:
+            LOGGER.warning("Aster transfer reconciliation failed (%s/%s); continuing", self._pending_transfer_failures, TRANSFER_RECONCILIATION_FAILURE_LIMIT)
+
     def _health(self) -> Dict[str, Any]:
         ages = {
             name: max(0.0, time.time() - snapshot.observed_at) if snapshot else None
             for name, snapshot in (("main", self.snapshots.get("main")), ("sub", self.snapshots.get("sub")))
         }
+        if self._pending_transfer and self._pending_transfer_failures >= TRANSFER_RECONCILIATION_FAILURE_LIMIT:
+            return {"state": "blocked", "allowed": False, "reason": f"previous Aster transfer is still unknown after {self._pending_transfer_failures} reconciliation failures", "snapshot_ages": ages, "recovery_successes": self._recovery_successes, "recovery_required": self.settings.recovery_successes_required}
         if self._pending_transfer:
-            return {"state": "blocked", "allowed": False, "reason": "previous Aster transfer status is unknown; reconcile it first", "snapshot_ages": ages, "recovery_successes": self._recovery_successes, "recovery_required": self.settings.recovery_successes_required}
+            return {"state": "warning", "allowed": True, "reason": f"previous Aster transfer is being reconciled ({self._pending_transfer_failures}/{TRANSFER_RECONCILIATION_FAILURE_LIMIT}); continuing", "snapshot_ages": ages, "recovery_successes": self._recovery_successes, "recovery_required": self.settings.recovery_successes_required}
         if self._last_refresh_error or len(self.snapshots) != 2:
             return {"state": "blocked", "allowed": False, "reason": self._last_refresh_error or "both Aster account snapshots are required", "snapshot_ages": ages, "recovery_successes": self._recovery_successes, "recovery_required": self.settings.recovery_successes_required}
         failed = next((item for item in self.snapshots.values() if item.error), None)
@@ -844,7 +870,7 @@ class AsterNeutralManager:
         if not self.settings.transfers_enabled:
             raise RuntimeError("Aster transfers are disabled; set ASTER_NEUTRAL_ENABLE_TRANSFERS=true")
         health = self._health()
-        if health["state"] != "ready":
+        if not health["allowed"]:
             raise RuntimeError(str(health["reason"]))
         if not self.settings.effective_master_wallet_address:
             raise RuntimeError("Aster master wallet address is not configured")
@@ -967,6 +993,7 @@ class AsterNeutralManager:
             self.transfer_history.append(record)
             self.transfer_history = self.transfer_history[-50:]
             self._pending_transfer = record
+            self._pending_transfer_failures = 0
             self._last_transfer_at = time.time()
             self._persist_state()
             try:
@@ -976,16 +1003,19 @@ class AsterNeutralManager:
             except AsterTransferRejectedError as exc:
                 record["result"] = {"status": "rejected_before_submit", "error": str(exc)}
                 self._pending_transfer = None
+                self._pending_transfer_failures = 0
                 self._persist_state()
                 LOGGER.warning("Aster transfer was rejected before acceptance; transfer lock cleared: %s", exc)
                 return _json_value(record)
             except (AsterTransferUnknownError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 record["result"] = {"status": "unknown_pending", "error": str(exc)}
+                self._pending_transfer_failures = 0
                 LOGGER.error("Aster transfer status is unknown; live transfers remain blocked: %s", exc)
                 self._persist_state()
                 return _json_value(record)
             except Exception as exc:
                 record["result"] = {"status": "unknown_pending", "error": str(exc)}
+                self._pending_transfer_failures = 0
                 LOGGER.error("Aster transfer status is unknown; live transfers remain blocked: %s", exc)
                 self._persist_state()
                 return _json_value(record)
