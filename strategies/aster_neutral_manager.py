@@ -53,7 +53,8 @@ class AsterTransferUnknownError(RuntimeError):
     """The request may have reached Aster but its final state is unknown."""
 
 
-TRANSFER_RECONCILIATION_FAILURE_LIMIT = 3
+TRANSFER_RECONCILIATION_INTERVAL_SECONDS = 10.0
+TRANSFER_RECONCILIATION_FAILURE_LIMIT = 30
 
 
 class _AsterInstanceLock:
@@ -638,6 +639,7 @@ class AsterNeutralManager:
         self._recovery_successes = 0
         self._pending_transfer: Optional[Dict[str, Any]] = None
         self._pending_transfer_failures = 0
+        self._last_reconciliation_attempt = 0.0
         self._last_transfer_at = 0.0
         self._next_feishu_report = 0.0
         self._load_state()
@@ -738,6 +740,10 @@ class AsterNeutralManager:
         record = self._pending_transfer
         if not isinstance(record, Mapping):
             return False
+        now = time.time()
+        if now - self._last_reconciliation_attempt < TRANSFER_RECONCILIATION_INTERVAL_SECONDS:
+            return False
+        self._last_reconciliation_attempt = now
         plan = record.get("plan") if isinstance(record.get("plan"), Mapping) else {}
         source_name = str(plan.get("source", ""))
         destination_name = str(plan.get("destination", ""))
@@ -783,28 +789,8 @@ class AsterNeutralManager:
                 "source_income": _json_value(source_rows[tran_id]),
                 "destination_income": _json_value(destination_rows[tran_id]),
             }
-        else:
-            # Some Aster responses omit income records or use different IDs
-            # for the debit and credit legs.  For a transfer created by this
-            # process, matching both balance deltas is sufficient confirmation.
-            before = record.get("before_available") if isinstance(record.get("before_available"), Mapping) else {}
-            before_source = _decimal(before.get(source_name), None)
-            before_destination = _decimal(before.get(destination_name), None)
-            source_snapshot = self.snapshots.get(source_name)
-            destination_snapshot = self.snapshots.get(destination_name)
-            if before_source is not None and before_destination is not None and source_snapshot and destination_snapshot:
-                source_delta = before_source - source_snapshot.available_balance
-                destination_delta = destination_snapshot.available_balance - before_destination
-                tolerance = max(Decimal("0.01"), amount * Decimal("0.25"))
-                if source_delta >= amount - tolerance and destination_delta >= amount - tolerance:
-                    confirmation = {
-                        "status": "acknowledged",
-                        "confirmation": "matching_balance_deltas",
-                        "source_delta": source_delta,
-                        "destination_delta": destination_delta,
-                    }
         if confirmation is None:
-            self._record_reconciliation_failure("no matching transfer income or balance deltas")
+            self._record_reconciliation_failure("no matching transfer income record")
             return False
         previous_pending = dict(self._pending_transfer)
         pending_reference = self._pending_transfer

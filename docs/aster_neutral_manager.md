@@ -54,8 +54,11 @@ permission, or other HTTP 4xx rejection is recorded as
 responses, timeouts, connection failures, and malformed responses are recorded
 as `unknown_pending` because Aster may have accepted the request. While an
 unknown record is pending, the manager checks both accounts' authenticated
-`TRANSFER` income records for the same transaction id and opposite amounts;
-only that evidence automatically clears the block.
+`TRANSFER` income records for the same transaction id and opposite amounts.
+Checks are rate-limited to once every 10 seconds. Transient misses only create
+warnings; new transfers are paused after 30 consecutive misses (about five
+minutes). Balance changes caused by PnL, funding, or fees are never treated as
+transfer confirmation.
 
 ## Transfer permissions
 

@@ -127,31 +127,6 @@ async def test_pending_transfer_reconciles_matching_income_records():
     assert manager.last_transfer["result"]["tran_id"] == "tx-1"
 
 
-@pytest.mark.asyncio
-async def test_pending_transfer_reconciles_matching_balance_deltas():
-    settings = _settings()
-    manager = AsterNeutralManager(settings)
-    manager._pending_transfer = {
-        "timestamp": time.time(),
-        "plan": {"source": "main", "destination": "sub", "amount": "25"},
-        "before_available": {"main": "200", "sub": "100"},
-    }
-    manager.snapshots = {
-        "main": _snapshot("main", 175, 100),
-        "sub": _snapshot("sub", 125, 100),
-    }
-
-    class EmptyIncomeClient:
-        async def request(self, _method, _path, _params):
-            return []
-
-    manager._clients = {"main": EmptyIncomeClient(), "sub": EmptyIncomeClient()}
-
-    assert await manager._reconcile_pending_transfer() is True
-    assert manager._pending_transfer is None
-    assert manager.last_transfer["result"]["confirmation"] == "matching_balance_deltas"
-
-
 def test_aster_snapshot_exposes_transfer_delta_and_threshold():
     settings = _settings()
     settings.transfer_hysteresis = Decimal("25")
