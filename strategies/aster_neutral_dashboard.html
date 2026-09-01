@@ -29,6 +29,11 @@
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; border-bottom: 1px solid #29333d; padding: 8px 5px; }
     th { color: #9aa6b2; font-size: .8rem; }
+    .history-box { white-space: normal; overflow-x: auto; }
+    .history-box table { min-width: 680px; margin-top: 0; }
+    .history-box .transfer-success { color: #86e1ab; }
+    .history-box .transfer-pending { color: #f0c674; }
+    .history-box .transfer-unknown { color: #ff9b9b; }
   </style>
 </head>
 <body>
@@ -51,8 +56,42 @@
     const rebalanceBtn = document.getElementById('rebalance');
     const requestId = () => (window.crypto && typeof window.crypto.randomUUID === 'function') ? window.crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
     const number = value => { const n = Number(value); return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : (value ?? '-'); };
+    const price = value => { const n = Number(value); return Number.isFinite(n) && n > 0 ? n.toLocaleString(undefined, { maximumFractionDigits: 8 }) : '未返回'; };
     const percent = value => { const n = Number(value); return Number.isFinite(n) ? `${(n * 100).toLocaleString(undefined, { maximumFractionDigits: 4 })}%` : '-'; };
     const metric = (label, value) => { const box = document.createElement('div'); box.className = 'metric'; box.innerHTML = `<span class="muted"></span><b></b>`; box.querySelector('span').textContent = label; box.querySelector('b').textContent = number(value); return box; };
+    function renderTransferHistory(history) {
+      transferEl.className = 'history-box';
+      transferEl.replaceChildren();
+      if (!Array.isArray(history) || !history.length) {
+        transferEl.textContent = '暂无转账';
+        return;
+      }
+      const table = document.createElement('table');
+      table.innerHTML = '<thead><tr><th>时间</th><th>方向</th><th>金额（USD1）</th><th>状态</th><th>原因</th></tr></thead><tbody></tbody>';
+      const body = table.querySelector('tbody');
+      for (const item of history) {
+        const row = document.createElement('tr');
+        const timestamp = Number(item.timestamp);
+        const result = item.result || {};
+        const status = String(result.status || item.status || 'unknown');
+        const statusClass = status === 'acknowledged' ? 'transfer-success' : status.includes('pending') ? 'transfer-pending' : 'transfer-unknown';
+        const values = [
+          Number.isFinite(timestamp) ? new Date(timestamp * 1000).toLocaleString() : '-',
+          `${item.plan?.source || '-'} -> ${item.plan?.destination || '-'}`,
+          number(item.plan?.amount),
+          status,
+          item.plan?.reason || result.error || '-',
+        ];
+        values.forEach((value, index) => {
+          const cell = document.createElement('td');
+          cell.textContent = value;
+          if (index === 3) cell.className = statusClass;
+          row.append(cell);
+        });
+        body.append(row);
+      }
+      transferEl.append(table);
+    }
     async function load() {
       try {
         const response = await fetch('/api/snapshot', { cache: 'no-store' });
@@ -71,6 +110,9 @@
         const title = document.createElement('h2'); title.textContent = name === 'main' ? '主账户' : '子账户'; panel.append(title);
         const metrics = document.createElement('div'); metrics.className = 'metrics';
         metrics.append(metric('账户别名', account.account_alias), metric('可用保证金', account.available_balance), metric('官方可转出余额', account.max_withdraw_amount), metric('账户权益', account.equity), metric('维持保证金', account.maintenance_margin), metric('维持保证金占权益', percent(account.maintenance_usage_ratio)), metric('XAUUSD1 仓位', account.position && account.position.signed_size), metric('XAUUSD1 名义价值', account.position && account.position.position_value), metric('未实现盈亏', account.position && account.position.unrealized_pnl), metric('强平价格', account.position && account.position.liquidation_price));
+        const accountMetricValues = metrics.querySelectorAll('b');
+        if (accountMetricValues[7]) accountMetricValues[7].textContent = number(account.position && account.position.position_value);
+        if (accountMetricValues[9]) accountMetricValues[9].textContent = price(account.position && account.position.liquidation_price);
         panel.append(metrics);
         if (account.error) { const error = document.createElement('div'); error.className = 'status error'; error.textContent = `读取失败: ${account.error}`; panel.append(error); }
         accountsEl.append(panel);
@@ -80,6 +122,7 @@
       chartEl.replaceChildren(); const ratio = Number(aggregate.available_balance_to_total_equity_ratio); const heading = document.createElement('div'); heading.innerHTML = '<span class="muted">两账户可用保证金 / 总权益</span> <b></b>'; heading.querySelector('b').textContent = percent(ratio); chartEl.append(heading);
       if (Number.isFinite(ratio)) { const track = document.createElement('div'); track.className = 'risk-track'; const fill = document.createElement('div'); fill.className = `risk-fill ${ratio < .1 ? 'danger' : ratio < .25 ? 'warning' : ratio < .5 ? 'caution' : 'healthy'}`; fill.style.width = `${Math.max(0, Math.min(ratio, 1)) * 100}%`; track.append(fill); chartEl.append(track); } else { const note = document.createElement('div'); note.className = 'muted'; note.textContent = '账户数据不完整，暂无法计算'; chartEl.append(note); }
       transferEl.textContent = Array.isArray(data.transfer_history) && data.transfer_history.length ? JSON.stringify(data.transfer_history, null, 2) : '暂无转账';
+      renderTransferHistory(data.transfer_history);
       if (health.reason) { const note = document.createElement('div'); note.className = 'status error'; note.textContent = `转账限制原因: ${health.reason}`; riskEl.append(note); }
     }
     document.getElementById('refresh').addEventListener('click', load);

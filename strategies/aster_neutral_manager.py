@@ -529,27 +529,28 @@ class AsterAccountClient:
         if len(matching) > 1:
             # Hedge mode can expose LONG and SHORT rows; aggregate them rather
             # than silently selecting one side.
-            raw_size = sum((_required_decimal(item.get("positionAmt", 0), "positionAmt") for item in matching), Decimal("0"))
+            raw_size = sum((_required_decimal(_first(item, "positionAmt", "position_amt", "position", default=0), "positionAmt") for item in matching), Decimal("0"))
             raw_values = matching
         else:
-            raw_size = _required_decimal(matching[0].get("positionAmt", 0), "positionAmt") if matching else Decimal("0")
+            raw_size = _required_decimal(_first(matching[0], "positionAmt", "position_amt", "position", default=0), "positionAmt") if matching else Decimal("0")
             raw_values = matching
         position = None
         if raw_values:
-            item = raw_values[0]
-            mark = _required_decimal(item.get("markPrice", 0), "markPrice")
-            entry = _required_decimal(item.get("entryPrice", 0), "entryPrice")
-            notional = abs(raw_size * mark)
+            item = next((candidate for candidate in raw_values if _required_decimal(_first(candidate, "markPrice", "mark_price", "mark", default=0), "markPrice") > 0), raw_values[0])
+            mark = _required_decimal(_first(item, "markPrice", "mark_price", "mark", default=0), "markPrice")
+            entry = _required_decimal(_first(item, "entryPrice", "entry_price", "avgPrice", default=0), "entryPrice")
+            direct_notional = _decimal(_first(item, "notional", "positionValue", "position_value"), None)
+            notional = abs(direct_notional) if direct_notional is not None and direct_notional > 0 else abs(raw_size * mark)
             position = AsterPositionSnapshot(
                 symbol=self.settings.symbol,
                 signed_size=raw_size,
                 position_value=notional,
                 entry_price=entry,
                 mark_price=mark,
-                unrealized_pnl=_required_decimal(item.get("unRealizedProfit", item.get("unrealizedProfit", 0)), "position PnL"),
-                liquidation_price=_required_decimal(item.get("liquidationPrice", 0), "liquidation price"),
-                leverage=_required_decimal(item.get("leverage", 0), "leverage"),
-                isolated=str(item.get("marginType", "")).casefold() == "isolated" or bool(item.get("isolated", False)),
+                unrealized_pnl=sum((_required_decimal(_first(candidate, "unRealizedProfit", "unrealizedProfit", "unrealized_pnl", default=0), "position PnL") for candidate in raw_values), Decimal("0")),
+                liquidation_price=_required_decimal(_first(item, "liquidationPrice", "liquidation_price", "liqPrice", default=0), "liquidation price"),
+                leverage=_required_decimal(_first(item, "leverage", "initialLeverage", default=0), "leverage"),
+                isolated=str(_first(item, "marginType", "margin_type", default="")).casefold() == "isolated" or _as_bool(_first(item, "isolated", default=False), False),
             )
             # For non-USDT settlement assets, the account-level totals may be
             # omitted or zero in older API wrappers. Prefer target-position
