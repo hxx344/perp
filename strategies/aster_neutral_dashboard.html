@@ -23,9 +23,12 @@
     .status.error { color: #ff9b9b; }
     .status.ok { color: #86e1ab; }
     .risk-chart { margin-top: 12px; padding: 10px; border: 1px solid #2d3945; border-radius: 6px; background: #11181f; }
+    .risk-chart-title { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+    .risk-chart-title strong { font-size: 1.05rem; }
     .risk-track { height: 16px; margin-top: 10px; overflow: hidden; border-radius: 999px; background: #2b2024; }
     .risk-fill { height: 100%; transition: width .25s ease, background-color .25s ease; }
     .danger { background: #d94b4b; } .warning { background: #e0833c; } .caution { background: #d5b243; } .healthy { background: #4caf78; }
+    .risk-chart-scale { display: flex; justify-content: space-between; margin-top: 5px; color: #9aa6b2; font-size: .78rem; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; border-bottom: 1px solid #29333d; padding: 8px 5px; }
     th { color: #9aa6b2; font-size: .8rem; }
@@ -45,12 +48,13 @@
     <span id="status" class="status" role="status"></span>
   </div>
   <section class="panel"><h2>账户状态</h2><div id="accounts" class="grid"></div></section>
-  <section class="panel"><h2>风险与资金平衡</h2><div id="risk" class="metrics"></div><div id="chart" class="risk-chart"></div></section>
+  <section class="panel"><h2>风险与资金平衡</h2><div id="risk" class="metrics"></div><div id="chart" class="risk-chart"></div><div id="transferThresholdChart" class="risk-chart"></div></section>
   <section class="panel"><h2>转账历史</h2><pre id="transfer" class="muted">暂无转账</pre></section>
   <script>
     const accountsEl = document.getElementById('accounts');
     const riskEl = document.getElementById('risk');
     const chartEl = document.getElementById('chart');
+    const transferThresholdChartEl = document.getElementById('transferThresholdChart');
     const transferEl = document.getElementById('transfer');
     const statusEl = document.getElementById('status');
     const rebalanceBtn = document.getElementById('rebalance');
@@ -93,6 +97,47 @@
       }
       transferEl.append(table);
     }
+    function renderTransferThresholdChart(aggregate) {
+      transferThresholdChartEl.replaceChildren();
+      const delta = Number(aggregate.available_balance_delta_abs);
+      const threshold = Number(aggregate.transfer_hysteresis);
+      const heading = document.createElement('div');
+      heading.className = 'risk-chart-title';
+      const label = document.createElement('span');
+      label.className = 'muted';
+      label.textContent = '可用保证金差值 / 自动转账阈值';
+      const value = document.createElement('strong');
+      value.textContent = Number.isFinite(delta) && Number.isFinite(threshold) && threshold > 0
+        ? `${number(delta)} / ${number(threshold)} USD1`
+        : '-';
+      heading.append(label, value);
+      transferThresholdChartEl.append(heading);
+      if (!Number.isFinite(delta) || !Number.isFinite(threshold) || threshold <= 0) {
+        const note = document.createElement('div');
+        note.className = 'muted';
+        note.textContent = '账户数据不完整，暂无法计算';
+        transferThresholdChartEl.append(note);
+        return;
+      }
+      const ratio = delta / threshold;
+      const bounded = Math.max(0, Math.min(ratio, 1));
+      const tone = ratio >= 1 ? 'danger' : ratio >= 0.75 ? 'warning' : 'healthy';
+      const track = document.createElement('div');
+      track.className = 'risk-track';
+      const fill = document.createElement('div');
+      fill.className = `risk-fill ${tone}`;
+      fill.style.width = `${bounded * 100}%`;
+      fill.setAttribute('role', 'progressbar');
+      fill.setAttribute('aria-valuemin', '0');
+      fill.setAttribute('aria-valuemax', '100');
+      fill.setAttribute('aria-valuenow', String(Math.min(ratio * 100, 100)));
+      track.append(fill);
+      transferThresholdChartEl.append(track);
+      const scale = document.createElement('div');
+      scale.className = 'risk-chart-scale';
+      scale.innerHTML = '<span>0</span><span>75% 预警</span><span>100% 触发阈值</span>';
+      transferThresholdChartEl.append(scale);
+    }
     async function load() {
       try {
         const response = await fetch('/api/snapshot', { cache: 'no-store' });
@@ -126,6 +171,7 @@
       if (Number.isFinite(ratio)) { const track = document.createElement('div'); track.className = 'risk-track'; const fill = document.createElement('div'); fill.className = `risk-fill ${ratio < .1 ? 'danger' : ratio < .25 ? 'warning' : ratio < .5 ? 'caution' : 'healthy'}`; fill.style.width = `${Math.max(0, Math.min(ratio, 1)) * 100}%`; track.append(fill); chartEl.append(track); } else { const note = document.createElement('div'); note.className = 'muted'; note.textContent = '账户数据不完整，暂无法计算'; chartEl.append(note); }
       transferEl.textContent = Array.isArray(data.transfer_history) && data.transfer_history.length ? JSON.stringify(data.transfer_history, null, 2) : '暂无转账';
       renderTransferHistory(data.transfer_history);
+      renderTransferThresholdChart(aggregate);
       if (health.reason) { const note = document.createElement('div'); note.className = 'status error'; note.textContent = `转账限制原因: ${health.reason}`; riskEl.append(note); }
     }
     document.getElementById('refresh').addEventListener('click', load);

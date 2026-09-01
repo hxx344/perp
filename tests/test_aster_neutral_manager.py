@@ -76,6 +76,22 @@ def test_aster_snapshot_returns_transfer_history_newest_first():
     assert [item["timestamp"] for item in history] == [300, 200, 100]
 
 
+def test_aster_snapshot_exposes_transfer_delta_and_threshold():
+    settings = _settings()
+    settings.transfer_hysteresis = Decimal("25")
+    manager = AsterNeutralManager(settings)
+    manager.snapshots = {
+        "main": _snapshot("main", 140, 100),
+        "sub": _snapshot("sub", 100, 100),
+    }
+
+    aggregate = manager.snapshot_payload()["aggregate"]
+
+    assert aggregate["available_balance_delta"] == "40"
+    assert aggregate["available_balance_delta_abs"] == "40"
+    assert aggregate["transfer_hysteresis"] == "25"
+
+
 def test_aster_transfer_plan_supports_reverse_direction():
     plan = build_transfer_plan(_snapshot("main", 100, 100), _snapshot("sub", 200, 30), _settings())
 
