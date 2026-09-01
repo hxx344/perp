@@ -921,6 +921,10 @@ class AsterNeutralManager:
                 "available_balance_delta_abs": abs(main.available_balance - sub.available_balance) if main and sub else None,
                 "available_balance_to_total_equity_ratio": available_ratio,
                 "transfer_hysteresis": self.settings.transfer_hysteresis,
+                "transfer_trigger_threshold": max(
+                    self.settings.transfer_hysteresis,
+                    self.settings.min_transfer * Decimal("2"),
+                ),
             },
             "transfer_plan": self.last_plan.as_payload() if self.last_plan else None,
             "last_transfer": self.last_transfer,

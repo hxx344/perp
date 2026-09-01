@@ -37,6 +37,12 @@ amount is additionally capped by its Aster `maxWithdrawAmount`, which Aster
 documents as the maximum amount available for transfer out. A cooldown and a
 stale-snapshot circuit breaker prevent rapid churn.
 
+The effective trigger threshold shown in the dashboard is
+`max(transfer_hysteresis, 2 * min_transfer)`, because the planned amount is
+half of the balance difference. The source account's `maxWithdrawAmount` is a
+separate per-account cap on the resulting transfer amount, not a trigger
+threshold.
+
 The default mode is read-only. It calculates and displays a transfer plan for
 diagnostics, but submits a master/sub-account transfer only when all three
 explicit switches are enabled: `ASTER_NEUTRAL_ENABLE_TRANSFERS=true`,

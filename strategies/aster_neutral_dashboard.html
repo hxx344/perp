@@ -100,12 +100,12 @@
     function renderTransferThresholdChart(aggregate) {
       transferThresholdChartEl.replaceChildren();
       const delta = Number(aggregate.available_balance_delta_abs);
-      const threshold = Number(aggregate.transfer_hysteresis);
+      const threshold = Number(aggregate.transfer_trigger_threshold ?? aggregate.transfer_hysteresis);
       const heading = document.createElement('div');
       heading.className = 'risk-chart-title';
       const label = document.createElement('span');
       label.className = 'muted';
-      label.textContent = '可用保证金差值 / 自动转账阈值';
+      label.textContent = '可用保证金差值 / 有效转账触发阈值';
       const value = document.createElement('strong');
       value.textContent = Number.isFinite(delta) && Number.isFinite(threshold) && threshold > 0
         ? `${number(delta)} / ${number(threshold)} USD1`
@@ -167,6 +167,7 @@
       riskEl.replaceChildren(metric('两账户总权益', aggregate.total_equity), metric('两账户可用保证金总额', aggregate.total_available_balance), metric('可用保证金差值（主-子）', aggregate.available_balance_delta), metric('飞书告警阈值', data.alert_threshold), metric('运行模式', data.monitor_only ? '只读监控' : '未知'));
       const modeValues = riskEl.querySelectorAll('b');
       if (modeValues[4]) modeValues[4].textContent = modeText(data);
+      riskEl.append(metric('有效转账触发阈值', aggregate.transfer_trigger_threshold ?? aggregate.transfer_hysteresis));
       chartEl.replaceChildren(); const ratio = Number(aggregate.available_balance_to_total_equity_ratio); const heading = document.createElement('div'); heading.innerHTML = '<span class="muted">两账户可用保证金 / 总权益</span> <b></b>'; heading.querySelector('b').textContent = percent(ratio); chartEl.append(heading);
       if (Number.isFinite(ratio)) { const track = document.createElement('div'); track.className = 'risk-track'; const fill = document.createElement('div'); fill.className = `risk-fill ${ratio < .1 ? 'danger' : ratio < .25 ? 'warning' : ratio < .5 ? 'caution' : 'healthy'}`; fill.style.width = `${Math.max(0, Math.min(ratio, 1)) * 100}%`; track.append(fill); chartEl.append(track); } else { const note = document.createElement('div'); note.className = 'muted'; note.textContent = '账户数据不完整，暂无法计算'; chartEl.append(note); }
       transferEl.textContent = Array.isArray(data.transfer_history) && data.transfer_history.length ? JSON.stringify(data.transfer_history, null, 2) : '暂无转账';
